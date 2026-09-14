@@ -4,7 +4,7 @@
 import http from 'node:http';
 import https from 'node:https';
 import { ReadableStream } from 'node:stream/web';
-import { tunnelTls } from './sx.js';
+import { sxTunnelAgent } from './sx.js';
 import { proxyForHost, proxyAgent } from './upstream-proxy.js';
 
 // Global fetch multiplexes an origin over one h2 connection, whose 64KB flow-control
@@ -71,14 +71,7 @@ function directFetch(url, { headersTimeoutMs, ...opts }) {
 
 function proxiedFetch(url, opts, sx) {
   const u = new URL(url);
-  const proxy = sx.getProxy();
-  const agent = new https.Agent({ keepAlive: false }); // one target per socket; pooling would leak
-  agent.createConnection = (_options, cb) => {
-    tunnelTls({ proxy, targetHost: u.hostname, targetPort: Number(u.port) || 443, tlsOptions: sx.tlsOptions || {} })
-      .then((sock) => cb(null, sock))
-      .catch((err) => cb(err));
-    return undefined;
-  };
+  const agent = sxTunnelAgent(sx, u.hostname, Number(u.port) || 443);
   return nodeRequest(u, opts, { transport: https, agent });
 }
 

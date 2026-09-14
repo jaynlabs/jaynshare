@@ -7,7 +7,7 @@ import { homedir } from 'node:os';
 
 const MARKER = '# jaynshare alias';
 
-export function detectShell() {
+function detectShell() {
   return (process.env.SHELL || '').split('/').pop() || 'bash';
 }
 

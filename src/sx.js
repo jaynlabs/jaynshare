@@ -3,6 +3,7 @@
 
 import net from 'node:net';
 import tls from 'node:tls';
+import https from 'node:https';
 
 const CONNECT_TIMEOUT_MS = 30000; // residential exits can be slow to establish
 
@@ -27,7 +28,7 @@ async function sxPost(path, apiKey, body) {
   return res.json();
 }
 
-export const SX_MODES = ['off', '429', 'always'];
+const SX_MODES = ['off', '429', 'always'];
 const normalizeMode = (m) => (SX_MODES.includes(m) ? m : 'always');
 
 // ports-list: { proxy: "host:port", login, password, id }; create-port: { server, port, login, password, id }
@@ -78,13 +79,14 @@ export function connectThroughProxy({ proxyHost, proxyPort, auth, targetHost, ta
   });
 }
 
-export async function tunnelTls({ proxy, targetHost, targetPort = 443, tlsOptions = {} }) {
+export async function tunnelTls({ proxy, targetHost, targetPort = 443, tlsOptions = {}, label = 'sx.org proxy' }) {
   const sock = await connectThroughProxy({
     proxyHost: proxy.host,
     proxyPort: proxy.port,
     auth: proxy.username ? `${proxy.username}:${proxy.password}` : null,
     targetHost,
     targetPort,
+    label,
   });
   return new Promise((resolve, reject) => {
     const tlsSock = tls.connect({ socket: sock, servername: targetHost, ...tlsOptions });
@@ -93,6 +95,19 @@ export async function tunnelTls({ proxy, targetHost, targetPort = 443, tlsOption
     tlsSock.once('secureConnect', onOk);
     tlsSock.once('error', onErr);
   });
+}
+
+/** One-shot agent whose sockets tunnel TLS through the sx proxy; pooling would leak across targets. */
+export function sxTunnelAgent(sx, targetHost, targetPort = 443) {
+  const proxy = sx.getProxy();
+  const agent = new https.Agent({ keepAlive: false });
+  agent.createConnection = (_options, cb) => {
+    tunnelTls({ proxy, targetHost, targetPort, tlsOptions: sx.tlsOptions || {} })
+      .then((sock) => cb(null, sock))
+      .catch((err) => cb(err));
+    return undefined;
+  };
+  return agent;
 }
 
 export class SxManager {

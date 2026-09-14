@@ -93,7 +93,7 @@ async function requestTokenRefresh(refreshToken, endpoint) {
   return {
     accessToken: data.access_token,
     refreshToken: data.refresh_token || refreshToken,
-    expiresAt: normalizeExpiresAt(data.expires_at) || (Date.now() + (data.expires_in || 3600) * 1000),
+    expiresAt: tokenExpiry(data),
   };
 }
 
@@ -106,7 +106,7 @@ function isRetriableRefreshError(err) {
     || ['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'UND_ERR_CONNECT_TIMEOUT'].includes(err.code);
 }
 
-export function normalizeExpiresAt(expiresAt) {
+function normalizeExpiresAt(expiresAt) {
   if (!expiresAt) return expiresAt;
   return expiresAt < 1e12 ? expiresAt * 1000 : expiresAt; // OAuth returns seconds, Claude Code stores milliseconds
 }
@@ -121,21 +121,33 @@ export function isTokenExpired(expiresAt) {
   return Date.now() >= normalizeExpiresAt(expiresAt);
 }
 
+/** The human-readable part of an upstream error reply; empty when there is none. */
+async function upstreamErrorDetail(res) {
+  try {
+    const body = await res.json();
+    return body?.error?.message || JSON.stringify(body).slice(0, 200);
+  } catch {
+    return await res.text().catch(() => '');
+  }
+}
+
+/** `HTTP 429: rate limited` — status always, detail when the body carries one. */
+async function httpErrorMessage(res) {
+  const detail = await upstreamErrorDetail(res);
+  return `HTTP ${res.status}${detail ? ': ' + detail : ''}`;
+}
+
+/** The token's absolute expiry, or one `expires_in` from now when upstream omits it. */
+function tokenExpiry({ expires_at, expires_in }) {
+  return normalizeExpiresAt(expires_at) || (Date.now() + (expires_in || 3600) * 1000);
+}
+
 export async function fetchProfile(accessToken) {
   try {
     const res = await proxyFetch(PROFILE_URL, {
       headers: { 'Authorization': `Bearer ${accessToken}` },
     });
-    if (!res.ok) {
-      let detail = '';
-      try {
-        const body = await res.json();
-        detail = body?.error?.message || JSON.stringify(body).slice(0, 200);
-      } catch {
-        detail = await res.text().catch(() => '');
-      }
-      return { error: `HTTP ${res.status}${detail ? ': ' + detail : ''}` };
-    }
+    if (!res.ok) return { error: await httpErrorMessage(res) };
     const data = await res.json();
     return {
       accountUuid: data.account?.uuid,
@@ -198,14 +210,7 @@ export async function fetchUsage(accessToken) {
     });
 
     if (!res.ok) {
-      let detail = '';
-      try {
-        const body = await res.json();
-        detail = body?.error?.message || JSON.stringify(body).slice(0, 200);
-      } catch {
-        detail = await res.text().catch(() => '');
-      }
-      return { error: `HTTP ${res.status}${detail ? ': ' + detail : ''}`, status: res.status };
+      return { error: await httpErrorMessage(res), status: res.status };
     }
 
     const data = await res.json();
@@ -283,7 +288,7 @@ async function exchangeCodeForTokens({ code, state, redirectUri, codeVerifier })
   return {
     accessToken: tokens.access_token,
     refreshToken: tokens.refresh_token,
-    expiresAt: normalizeExpiresAt(tokens.expires_at) || (Date.now() + (tokens.expires_in || 3600) * 1000),
+    expiresAt: tokenExpiry(tokens),
   };
 }
 

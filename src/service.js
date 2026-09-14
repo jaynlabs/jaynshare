@@ -7,7 +7,7 @@ import { homedir } from 'node:os';
 import { join, dirname } from 'node:path';
 
 export const LABEL = 'com.jaynlabs.jaynshare';
-export const UNIT_NAME = 'jaynshare.service';
+const UNIT_NAME = 'jaynshare.service';
 
 export function serviceKind(platform = process.platform) {
   if (platform === 'darwin') return 'launchd';

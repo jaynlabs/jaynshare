@@ -77,7 +77,7 @@ function upstreamHostOf(config) {
   catch { return 'api.anthropic.com'; }
 }
 
-export function hostMode(host, config) {
+function hostMode(host, config) {
   if (host === TEST_HOST) return 'test';
   if (host === upstreamHostOf(config)) return 'rewrite';
   return 'tunnel';

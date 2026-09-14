@@ -39,7 +39,7 @@ async function writePrivateJson(path, data) {
   await chmod(path, 0o600).catch(() => {}); // `mode` applies only on create
 }
 
-export function createDefaultConfig() {
+function createDefaultConfig() {
   return {
     proxy: {
       port: 3456,

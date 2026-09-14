@@ -10,7 +10,7 @@ import { sanitizeToolPairs } from './tool-pair-sanitize.js';
 import { TopLevelFieldFinder, modelGlobMatches, parseRequestModel, parseAdvisorModel } from './model.js';
 import { BodyWriter } from './request-log.js';
 import { upstreamFetch } from './upstream-fetch.js';
-import { tunnelTls } from './sx.js';
+import { sxTunnelAgent } from './sx.js';
 import { createEgressGuard } from './egress-guard.js';
 import { principalStillAuthorized, resolvePrincipal } from './client-auth.js';
 
@@ -33,6 +33,13 @@ const CONNECTION_SPECIFIC_HEADERS = new Set([
 ]);
 
 const LOCAL_OPERATOR = { role: 'operator', clientId: 'local', clientName: 'Local operator', local: true };
+
+// Responses the client body was decoded from must not claim an encoding or length.
+const STALE_BODY_HEADERS = new Set(['content-encoding', 'content-length']);
+
+/** Methods whose request carries no body, so upstream gets `end()` instead of a pipe. */
+const BODYLESS_METHODS = new Set(['GET', 'HEAD']);
+const isBodyless = (method) => BODYLESS_METHODS.has(method);
 
 // Reach upstream with the client's own credential, never a rotated account token.
 const CLIENT_CREDENTIAL_PATHS = ['/v1/code/', '/api/oauth/files/', '/api/oauth/file_upload'];
@@ -341,20 +348,10 @@ function relayHttpForward(req, res) {
     return;
   }
   const transport = target.protocol === 'http:' ? http : https;
-  const headers = {};
-  for (const [key, value] of Object.entries(req.headers)) {
-    const lk = key.toLowerCase();
-    if (lk.startsWith(':') || HOP_BY_HOP_HEADERS.has(lk) || lk === 'proxy-connection') continue;
-    headers[key] = value;
-  }
+  const headers = copyClientHeaders(req.headers, lk => HOP_BY_HOP_HEADERS.has(lk) || lk === 'proxy-connection');
 
   const upstreamReq = transport.request(target, { method: req.method, headers }, (upstreamRes) => {
-    const responseHeaders = {};
-    for (const [key, value] of Object.entries(upstreamRes.headers)) {
-      if (CONNECTION_SPECIFIC_HEADERS.has(key)) continue;
-      responseHeaders[key] = value;
-    }
-    res.writeHead(upstreamRes.statusCode, responseHeaders);
+    res.writeHead(upstreamRes.statusCode, copyResponseHeaders(upstreamRes.headers, { decompressed: false }));
     upstreamRes.pipe(res);
   });
   upstreamReq.on('error', (err) => {
@@ -362,21 +359,13 @@ function relayHttpForward(req, res) {
     if (!res.headersSent) sendJson(res, 502, apiError('proxy_error', 'Upstream unreachable'));
   });
   res.on('close', () => upstreamReq.destroy());
-  if (['GET', 'HEAD'].includes(req.method)) upstreamReq.end();
+  if (isBodyless(req.method)) upstreamReq.end();
   else req.pipe(upstreamReq);
 }
 
 // One-shot: the tunnel closes over one target, so the agent must not pool.
 function sxAgent(sx, targetHost) {
-  const proxy = sx.getProxy();
-  const agent = new https.Agent({ keepAlive: false });
-  agent.createConnection = (_options, cb) => {
-    tunnelTls({ proxy, targetHost, targetPort: 443, tlsOptions: sx.tlsOptions || {} })
-      .then((sock) => cb(null, sock))
-      .catch((err) => cb(err));
-    return undefined;
-  };
-  return agent;
+  return sxTunnelAgent(sx, targetHost);
 }
 
 function sxAgentFor({ sx }, targetHost) {
@@ -384,25 +373,37 @@ function sxAgentFor({ sx }, targetHost) {
   return useProxy ? sxAgent(sx, targetHost) : undefined;
 }
 
+/** Client request headers minus h2 pseudo-headers and whatever `skip` names. */
+function copyClientHeaders(headers, skip) {
+  const out = {};
+  for (const [key, value] of Object.entries(headers)) {
+    const lk = key.toLowerCase();
+    if (lk.startsWith(':') || skip(lk)) continue;
+    out[key] = value;
+  }
+  return out;
+}
+
+/** Upstream response headers minus the hop-by-hop set; `decompressed` also drops stale body headers. */
+function copyResponseHeaders(headers, { decompressed = true } = {}) {
+  const out = {};
+  for (const [key, value] of Object.entries(headers)) {
+    if (CONNECTION_SPECIFIC_HEADERS.has(key)) continue;
+    if (decompressed && STALE_BODY_HEADERS.has(key)) continue;
+    out[key] = value;
+  }
+  return out;
+}
+
 // `fetch` auto-decompressed the body, so the encoding and length headers are stale.
 function clientResponseHeaders(entries) {
-  const responseHeaders = {};
-  for (const [key, value] of entries) {
-    if (CONNECTION_SPECIFIC_HEADERS.has(key) || key === 'content-encoding' || key === 'content-length') continue;
-    responseHeaders[key] = value;
-  }
-  return responseHeaders;
+  return copyResponseHeaders(Object.fromEntries(entries));
 }
 
 /** Pipes bytes both ways with the client's own headers; a long-poll may withhold headers for minutes. */
 function relayStream(req, res, target) {
   const url = new URL(`${target.upstream}${req.url}`);
-  const headers = {};
-  for (const [key, value] of Object.entries(req.headers)) {
-    const lk = key.toLowerCase();
-    if (lk.startsWith(':') || HOP_BY_HOP_HEADERS.has(lk) || lk === 'accept-encoding') continue;
-    headers[key] = value;
-  }
+  const headers = copyClientHeaders(req.headers, lk => HOP_BY_HOP_HEADERS.has(lk) || lk === 'accept-encoding');
 
   const agent = sxAgentFor(target, url.hostname);
   const transport = url.protocol === 'http:' ? http : https;
@@ -418,7 +419,7 @@ function relayStream(req, res, target) {
   });
   res.on('close', () => upstreamReq.destroy());
 
-  if (['GET', 'HEAD'].includes(req.method)) upstreamReq.end();
+  if (isBodyless(req.method)) upstreamReq.end();
   else req.pipe(upstreamReq);
 }
 
@@ -426,12 +427,8 @@ function relayStream(req, res, target) {
 export function createUpgradeRelay(target) {
   return (req, socket, head) => {
     const url = new URL(`${target.upstream}${req.url}`);
-    const headers = {};
-    for (const [key, value] of Object.entries(req.headers)) {
-      const lk = key.toLowerCase();
-      if (lk.startsWith(':') || lk === 'host') continue; // 'upgrade'/'connection' are the handshake
-      headers[key] = value;
-    }
+    // 'upgrade'/'connection' ARE the handshake, so hop-by-hop headers are kept here.
+    const headers = copyClientHeaders(req.headers, lk => lk === 'host');
 
     const agent = sxAgentFor(target, url.hostname);
     const transport = url.protocol === 'http:' ? http : https;
@@ -481,14 +478,7 @@ async function relayRaw(req, res, { upstream, sx }) {
     }, sx?.useByDefault() ? sx : null);
 
     const responseBody = await upstreamRes.text();
-    const responseHeaders = {};
-    for (const [key, value] of upstreamRes.headers.entries()) {
-      // `.text()` decompressed the body, so the encoding and length headers are stale.
-      if (key === 'transfer-encoding' || key === 'connection' ||
-          key === 'content-encoding' || key === 'content-length') continue;
-      responseHeaders[key] = value;
-    }
-    res.writeHead(upstreamRes.status, responseHeaders);
+    res.writeHead(upstreamRes.status, copyResponseHeaders(upstreamRes.headers));
     res.end(responseBody);
   } catch (err) {
     console.error('[Jaynshare] Raw relay error:', err.message);
@@ -866,7 +856,7 @@ async function sendUpstream({ req, res, accountManager, sx }, { account, headers
     return await upstreamFetch(url, {
       method: req.method,
       headers,
-      body: ['GET', 'HEAD'].includes(req.method) ? undefined : body,
+      body: isBodyless(req.method) ? undefined : body,
       redirect: 'manual',
     }, route ? sx : null);
   } finally {

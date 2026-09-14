@@ -5,6 +5,13 @@ import { SessionTracker } from './session-tracker.js';
 
 export { isFableModel, parseRequestModel, parseAdvisorModel } from './model.js';
 
+// Model families metered by their own weekly bucket; auto-detected per account,
+// pinned/routed by name, and never pruned as stale route pins.
+const AUTO_METERED_FAMILIES = [
+  { name: 'fable', match: ['*fable*'], bucket: 'unified7dFable', sample: 'claude-fable-5' },
+  { name: 'sonnet', match: ['*sonnet*'], bucket: 'unified7dSonnet', sample: 'claude-sonnet-4-6' },
+];
+
 // A post-401 forced refresh is suppressed this soon after a successful one.
 const FORCED_REFRESH_FLOOR_MS = 10_000;
 
@@ -339,11 +346,16 @@ export class AccountManager {
     const account = this.accounts[accountIndex];
     if (!account) return { eligible: false, reason: 'no such account' };
     if (this._isAvailable(account, model, advisorModel)) return { eligible: true };
-    if (account.disabled) return { eligible: false, reason: 'disabled' };
-    if (account.status === 'error') return { eligible: false, reason: 'in an error state and needs a re-login' };
-    if (account.status === 'exhausted') return { eligible: false, reason: 'out of quota' };
-    if (account.status === 'throttled') return { eligible: false, reason: 'rate-limited' };
-    return { eligible: false, reason: 'at or above the switch threshold' };
+    return { eligible: false, reason: this._ineligibilityReason(account) };
+  }
+
+  /** Why rotation cannot use this account right now; only called when it cannot. */
+  _ineligibilityReason(account) {
+    if (account.disabled) return 'disabled';
+    if (account.status === 'error') return 'in an error state and needs a re-login';
+    if (account.status === 'exhausted') return 'out of quota';
+    if (account.status === 'throttled') return 'rate-limited';
+    return 'at or above the switch threshold';
   }
 
   /** getActiveAccount, blocking on a refresh when the token has already expired. */
@@ -485,15 +497,11 @@ export class AccountManager {
   }
 
   /** Whether a manual switch to this account would take effect on the next request, with a reason when not. */
-  eligibility(accountIndex) {
+  eligibility(accountIndex, model = null, advisorModel = null) {
     const account = this.accounts[accountIndex];
     if (!account) return { eligible: false, reason: 'no such account' };
-    if (!this._isAvailable(account)) {
-      if (account.disabled) return { eligible: false, reason: 'disabled' };
-      if (account.status === 'error') return { eligible: false, reason: 'in an error state and needs a re-login' };
-      if (account.status === 'exhausted') return { eligible: false, reason: 'out of quota' };
-      if (account.status === 'throttled') return { eligible: false, reason: 'rate-limited' };
-      return { eligible: false, reason: 'at or above the switch threshold' };
+    if (!this._isAvailable(account, model, advisorModel)) {
+      return { eligible: false, reason: this._ineligibilityReason(account) };
     }
     const preemptor = this._preemptedBy(account);
     if (preemptor) {
@@ -513,8 +521,9 @@ export class AccountManager {
     })).filter(r => r.match.length);
     if (this.routePins?.size) {
       const names = new Set(this.routes.map(r => r.name));
+      const autoNames = new Set(AUTO_METERED_FAMILIES.map(f => f.name));
       for (const name of [...this.routePins.keys()]) {
-        if (name !== 'fable' && name !== 'sonnet' && !names.has(name)) this.routePins.delete(name);
+        if (!names.has(name) && !autoNames.has(name)) this.routePins.delete(name);
       }
     }
   }
@@ -553,13 +562,8 @@ export class AccountManager {
       target: this._routeTarget(sampleModelFor(r)),
     }));
 
-    const detected = [];
-    if (this.accounts.some(a => a.quota.unified7dFable != null)) {
-      detected.push({ name: 'fable', match: ['*fable*'], sample: 'claude-fable-5' });
-    }
-    if (this.accounts.some(a => a.quota.unified7dSonnet != null)) {
-      detected.push({ name: 'sonnet', match: ['*sonnet*'], sample: 'claude-sonnet-4-6' });
-    }
+    const detected = AUTO_METERED_FAMILIES
+      .filter(d => this.accounts.some(a => a.quota[d.bucket] != null));
     for (const d of detected) {
       if (this._routeForModel(d.sample)) continue;
       out.push({
@@ -592,9 +596,7 @@ export class AccountManager {
   _routeSample(routeName) {
     const r = this.routes.find(x => x.name === routeName);
     if (r) return r.match[0]?.replace(/\*/g, '') || 'model';
-    if (routeName === 'fable') return 'claude-fable-5';
-    if (routeName === 'sonnet') return 'claude-sonnet-4-6';
-    return null;
+    return AUTO_METERED_FAMILIES.find(f => f.name === routeName)?.sample || null;
   }
 
   /** Rejects only an account the route disallows; a near-quota one is a preference. */
@@ -629,9 +631,9 @@ export class AccountManager {
       const idx = this.routePins.get(route.name);
       return idx == null ? null : (this.accounts[idx] || null);
     }
-    for (const name of ['fable', 'sonnet']) {
-      if (this.routePins.has(name) && modelGlobMatches(`*${name}*`, model)) {
-        return this.accounts[this.routePins.get(name)] || null;
+    for (const family of AUTO_METERED_FAMILIES) {
+      if (this.routePins.has(family.name) && modelGlobMatches(family.match[0], model)) {
+        return this.accounts[this.routePins.get(family.name)] || null;
       }
     }
     return null;

@@ -3,8 +3,7 @@
 
 import http from 'node:http';
 import https from 'node:https';
-import tls from 'node:tls';
-import { connectThroughProxy } from './sx.js';
+import { connectThroughProxy, tunnelTls } from './sx.js';
 
 export function parseProxyUrl(value) {
   if (!value || typeof value !== 'string') return null;
@@ -111,27 +110,23 @@ export function proxyForHost(hostname) {
 export function proxyAgent(proxy, { targetHost, targetPort, tls: useTls = true, tlsOptions = {} }) {
   const agent = new (useTls ? https : http).Agent({ keepAlive: false }); // one target per socket; pooling would leak
   agent.createConnection = (_options, cb) => {
-    connectThroughProxy({
+    const tlsOverProxy = () => tunnelTls({
+      proxy,
+      targetHost,
+      targetPort,
+      tlsOptions,
+      label: 'upstream proxy',
+    });
+    const connectPlain = () => connectThroughProxy({
       proxyHost: proxy.host,
       proxyPort: proxy.port,
       auth: proxy.username ? `${proxy.username}:${proxy.password ?? ''}` : null,
       targetHost,
       targetPort,
       label: 'upstream proxy',
-    })
-      .then((sock) => {
-        if (!useTls) {
-          cb(null, sock);
-          sock.resume(); // connectThroughProxy leaves the socket paused
-          return;
-        }
-        const tlsSock = tls.connect({ socket: sock, servername: targetHost, ...tlsOptions });
-        const onErr = (err) => { tlsSock.removeListener('secureConnect', onOk); sock.destroy(); cb(err); };
-        const onOk = () => { tlsSock.removeListener('error', onErr); cb(null, tlsSock); };
-        tlsSock.once('secureConnect', onOk);
-        tlsSock.once('error', onErr);
-      })
-      .catch((err) => cb(err));
+    }).then((sock) => { sock.resume(); return sock; }); // the CONNECT helper leaves the socket paused
+
+    (useTls ? tlsOverProxy : connectPlain)().then((sock) => cb(null, sock)).catch((err) => cb(err));
     return undefined;
   };
   return agent;

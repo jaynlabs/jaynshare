@@ -90,7 +90,7 @@ export class RemoteControl {
 }
 
 // The dashboard's read surface in attach mode; nothing is guessed beyond the payload.
-export class RemoteAccountManager {
+class RemoteAccountManager {
   constructor() {
     this.accounts = [];
     this.currentIndex = -1;

@@ -3,8 +3,11 @@
 
 import { spawn } from 'node:child_process';
 import { encodePinComponent } from './claude-env.js';
+import { IntervalJob } from './interval-job.js';
 
-export class Warmer {
+export class Warmer extends IntervalJob {
+  label = 'Keep-warm';
+
   constructor(accountManager, {
     intervalMs = 0,
     port,
@@ -15,48 +18,19 @@ export class Warmer {
     timeoutMs = 120_000,
     log = console.log,
   } = {}) {
+    super({ intervalMs, log });
     this.am = accountManager;
-    this.intervalMs = intervalMs;
     this.port = port;
     this.apiKey = apiKey;
     this.model = model;
     this.prompt = prompt;
     this.spawnFn = spawnFn;
     this.timeoutMs = timeoutMs;
-    this.log = log;
-    this.timer = null;
-    this._running = false;
     this._abort = null; // AbortController of the in-flight sweep
-    this.lastRunStartedAt = null;
-    this.lastRunFinishedAt = null;
-    this.nextRunAt = intervalMs > 0 ? Date.now() + intervalMs : null;
-    this.accountStatus = new Map();
-  }
-
-  start() {
-    if (this.intervalMs > 0) this.reschedule(this.intervalMs);
-  }
-
-  reschedule(intervalMs) {
-    const wasOn = this.intervalMs > 0 && this.timer;
-    this.intervalMs = intervalMs;
-    if (this.timer) { clearInterval(this.timer); this.timer = null; }
-
-    if (intervalMs > 0) {
-      this.nextRunAt = Date.now() + intervalMs;
-      if (!wasOn) this.warmAll().catch(() => {}); // off→on only; an interval edit must not spend quota
-      this.timer = setInterval(() => this.warmAll().catch(() => {}), intervalMs);
-      this.timer.unref?.();
-      this.log(`[Jaynshare] Keep-warm enabled (every ${Math.round(intervalMs / 1000)}s)`);
-    } else if (wasOn) {
-      this.nextRunAt = null;
-      this.log('[Jaynshare] Keep-warm disabled');
-    }
   }
 
   stop() {
-    if (this.timer) { clearInterval(this.timer); this.timer = null; }
-    this.nextRunAt = null;
+    super.stop();
     this._abort?.abort();
   }
 
@@ -70,22 +44,18 @@ export class Warmer {
   }
 
   async warmAll() {
-    if (this._running) return;
-    this._running = true;
-    const abort = this._abort = new AbortController();
-    this.lastRunStartedAt = Date.now();
-    this.nextRunAt = this.intervalMs > 0 ? this.lastRunStartedAt + this.intervalMs : null;
-    try {
-      const targets = this.am.accounts.filter(account => this._isWarmTarget(account));
-      for (const account of targets) { // sequential: one subprocess at a time
-        if (abort.signal.aborted) break;
-        await this.warmAccount(account, abort.signal);
+    return this.run(async () => {
+      const abort = this._abort = new AbortController();
+      try {
+        const targets = this.am.accounts.filter(account => this._isWarmTarget(account));
+        for (const account of targets) { // sequential: one subprocess at a time
+          if (abort.signal.aborted) break;
+          await this.warmAccount(account, abort.signal);
+        }
+      } finally {
+        if (this._abort === abort) this._abort = null;
       }
-    } finally {
-      this.lastRunFinishedAt = Date.now();
-      this._running = false;
-      if (this._abort === abort) this._abort = null;
-    }
+    });
   }
 
   async warmAccount(account, signal) {
@@ -128,32 +98,12 @@ export class Warmer {
 
   getStatus() {
     return {
-      enabled: this.intervalMs > 0,
-      intervalSeconds: Math.round(this.intervalMs / 1000),
-      running: this._running,
-      lastRunStartedAt: iso(this.lastRunStartedAt),
-      lastRunFinishedAt: iso(this.lastRunFinishedAt),
-      nextRunAt: iso(this.nextRunAt),
-      accounts: this.am.accounts.map(account => {
-        const status = this.accountStatus.get(account.name);
-        const applicable = account.type === 'oauth' && !account.upstream;
-        return {
-          name: account.name,
-          status: applicable ? (status?.status || 'never') : 'not-applicable',
-          lastWarmedAt: iso(status?.finishedAt),
-          startedAt: iso(status?.startedAt),
-          durationMs: status?.durationMs ?? null,
-          error: status?.error || null,
-        };
-      }),
+      ...this.statusHead(),
+      accounts: this._accountStatusRows(
+        account => account.type === 'oauth' && !account.upstream,
+        'lastWarmedAt',
+      ),
     };
-  }
-
-  _record(account, status) {
-    this.accountStatus.set(account.name, {
-      ...(this.accountStatus.get(account.name) || {}),
-      ...status,
-    });
   }
 }
 
@@ -182,8 +132,4 @@ function defaultSpawn({ command, args, env, timeoutMs, signal }) {
       resolve(code ?? 0);
     });
   });
-}
-
-function iso(ts) {
-  return ts ? new Date(ts).toISOString() : null;
 }
