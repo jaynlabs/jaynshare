@@ -150,7 +150,7 @@ printf '  fixture   %s\n' "$fixture_root"
 # -------------------------------------------------------------- fake server --
 
 port_file="$fixture_root/port"
-node "$(native "$repo_dir/test-support/fake-usage-server.mjs")" \
+node "$(native "$repo_dir/test-support/fake-usage-server.ts")" \
   --port-file "$port_file" --secret "$synthetic_secret" > /dev/null &
 server_pid=$!
 wait_for_file "$port_file" || abort 'the fake server never reported a port'
@@ -351,7 +351,7 @@ check $? 'the refusal explains itself'
 section 'upgrade'
 
 port_file2="$fixture_root/port2"
-node "$(native "$repo_dir/test-support/fake-usage-server.mjs")" \
+node "$(native "$repo_dir/test-support/fake-usage-server.ts")" \
   --port-file "$port_file2" --secret "$synthetic_secret" > /dev/null &
 server_pid=$!
 wait_for_file "$port_file2" || abort 'the second fake server never reported a port'
