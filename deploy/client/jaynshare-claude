@@ -1,0 +1,117 @@
+#!/bin/sh
+set -eu
+
+mode=pick
+selection_set=false
+account_selector=
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --direct)
+      $selection_set && { printf '%s\n' 'choose only one of --direct, --account, or --auto' >&2; exit 2; }
+      mode=direct; selection_set=true; shift ;;
+    --account)
+      $selection_set && { printf '%s\n' 'choose only one of --direct, --account, or --auto' >&2; exit 2; }
+      [ "$#" -ge 2 ] || { printf '%s\n' '--account requires an account selector' >&2; exit 2; }
+      mode=account; selection_set=true; account_selector=$2; shift 2 ;;
+    --auto)
+      $selection_set && { printf '%s\n' 'choose only one of --direct, --account, or --auto' >&2; exit 2; }
+      mode=auto; selection_set=true; shift ;;
+    --) shift; break ;;
+    *) break ;;
+  esac
+done
+
+# Resolve Claude once, up front, so both modes fail the same way and no argument
+# ever passes through a reconstructed command string. Arguments after `--` reach
+# Claude exactly as the shell parsed them, which is also what running `claude`
+# directly would do on this platform.
+claude_bin=$(command -v claude 2>/dev/null) || claude_bin=
+[ -n "$claude_bin" ] || {
+  printf '%s\n' 'claude was not found on PATH; install Claude Code and open a new shell' >&2
+  exit 1
+}
+
+if [ "$mode" = direct ]; then
+  unset HTTPS_PROXY HTTP_PROXY https_proxy http_proxy ANTHROPIC_BASE_URL ANTHROPIC_API_KEY NODE_EXTRA_CA_CERTS
+  exec "$claude_bin" "$@"
+fi
+
+if [ "$mode" = pick ] && { [ ! -t 0 ] || [ ! -t 1 ]; }; then
+  printf '%s\n' 'account selection needs a terminal; use --account ACCOUNT or --auto' >&2
+  exit 2
+fi
+
+command -v node >/dev/null 2>&1 || { printf '%s\n' 'Node.js 20+ is required' >&2; exit 1; }
+
+# `uname` describes the Git Bash compatibility layer, not how the native Node
+# that actually opens these files interprets paths. Ask Node instead.
+platform=${JAYNSHARE_PLATFORM:-$(node -p 'process.platform' | tr -d '\r')}
+
+if [ "$platform" = win32 ]; then
+  # Enrollment lives where the installer put it: under the Windows profile that
+  # os.homedir() reports, which Git Bash's own HOME does not always match.
+  home_dir=$(cygpath -u -- "$(node -p 'require("os").homedir()' | tr -d '\r')" | tr -d '\r')
+  [ -n "$home_dir" ] || {
+    printf '%s\n' 'could not resolve your Windows profile; run this from Git Bash' >&2
+    exit 1
+  }
+  config_dir="$home_dir/.config/jaynshare"
+else
+  config_dir=${XDG_CONFIG_HOME:-"$HOME/.config"}/jaynshare
+fi
+config_file="$config_dir/client.env"
+secret_file="$config_dir/client.secret"
+ca_file="$config_dir/jaynshare-ca.pem"
+
+# Native Windows executables cannot open the MSYS spellings Git Bash uses.
+native_path() {
+  case "$platform" in
+    win32) cygpath -w -- "$1" | tr -d '\r' ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
+[ -r "$config_file" ] || { printf '%s\n' "missing $config_file" >&2; exit 1; }
+[ -r "$secret_file" ] || { printf '%s\n' "missing $secret_file" >&2; exit 1; }
+[ -r "$ca_file" ] || { printf '%s\n' "missing $ca_file" >&2; exit 1; }
+
+. "$config_file"
+[ -n "${JAYNSHARE_CLIENT_ID:-}" ] || { printf '%s\n' 'missing client ID' >&2; exit 1; }
+[ -n "${JAYNSHARE_HOST:-}" ] || { printf '%s\n' 'missing proxy host' >&2; exit 1; }
+[ -n "${JAYNSHARE_PORT:-}" ] || { printf '%s\n' 'missing proxy port' >&2; exit 1; }
+secret=$(sed -n '1p' "$secret_file" | tr -d '\r')
+[ -n "$secret" ] || { printf '%s\n' 'empty client secret' >&2; exit 1; }
+
+node -e '
+  const net = require("net");
+  const s = net.connect({host: process.argv[1], port: Number(process.argv[2])});
+  const done = code => { s.destroy(); process.exit(code); };
+  s.setTimeout(1500); s.once("connect", () => done(0)); s.once("timeout", () => done(1)); s.once("error", () => done(1));
+' "$JAYNSHARE_HOST" "$JAYNSHARE_PORT" || { printf '%s\n' 'Jaynshare proxy is unreachable; refusing direct fallback' >&2; exit 1; }
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+client_helper="$script_dir/jaynshare"
+[ -r "$client_helper" ] || client_helper="$script_dir/jaynshare-client.mjs"
+client_helper=$(native_path "$client_helper")
+
+case "$mode" in
+  auto) proxy_user=$JAYNSHARE_CLIENT_ID ;;
+  account) proxy_user=$(node "$client_helper" resolve-account "$account_selector") ;;
+  pick) proxy_user=$(node "$client_helper" pick-account) ;;
+esac
+
+# The secret travels in the environment rather than argv: process command lines
+# are readable by other processes on both supported platforms.
+proxy_url=$(JAYNSHARE_CLIENT_SECRET="$secret" node -e '
+  const url = new URL(`http://${process.argv[2]}:${process.argv[3]}`);
+  url.username = process.argv[1];
+  url.password = process.env.JAYNSHARE_CLIENT_SECRET;
+  process.stdout.write(url.href);
+' "$proxy_user" "$JAYNSHARE_HOST" "$JAYNSHARE_PORT")
+export HTTPS_PROXY="$proxy_url" HTTP_PROXY="$proxy_url" https_proxy="$proxy_url" http_proxy="$proxy_url"
+export NO_PROXY='localhost,127.0.0.1,::1' no_proxy='localhost,127.0.0.1,::1'
+export NODE_EXTRA_CA_CERTS="$(native_path "$ca_file")"
+unset ANTHROPIC_BASE_URL ANTHROPIC_API_KEY
+unset secret proxy_user account_selector mode selection_set platform client_helper home_dir
+exec "$claude_bin" "$@"

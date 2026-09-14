@@ -1,0 +1,116 @@
+name: CI
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  node:
+    name: node ${{ matrix.node }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Cover the whole supported range — package.json declares "node >=20".
+        node: [20, 22, 24]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Node.js ${{ matrix.node }}
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ matrix.node }}
+
+      # No package-lock.json is committed, so `npm ci` is not usable here.
+      - name: Install dependencies
+        run: npm install
+
+      - name: Run tests
+        run: npm test
+
+      - name: Lint
+        if: matrix.node == 24
+        run: npm run lint
+
+  windows-client:
+    name: windows client ${{ matrix.node }}
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [20, 22, 24]
+    runs-on: windows-latest
+    defaults:
+      run:
+        # Git for Windows Bash, the only supported installation shell for the
+        # desktop client. Everything here runs against the native Windows Node
+        # that Claude Code itself uses, not WSL and not a container.
+        shell: bash
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Node.js ${{ matrix.node }}
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: Confirm this is native Windows Node under Git Bash
+        run: |
+          uname -s
+          node -p 'process.platform'
+          test "$(node -p 'process.platform' | tr -d '\r')" = win32
+          command -v cygpath
+          command -v icacls.exe
+
+      # The platform-independent suite runs in the `node` job above, including
+      # the win32 code paths driven through JAYNSHARE_PLATFORM. What only a
+      # Windows runner can prove is the real thing: a Git Bash install into a
+      # throwaway profile, real NTFS access rules, native paths handed to native
+      # Node, and the shipped launcher and picker. The check needs no
+      # dependencies — this project has none at runtime.
+      #
+      # The synthetic secret it enrolls is not a credential for anything, and no
+      # Anthropic account is involved.
+      - name: Client install, launcher, and picker check
+        run: bash test-support/client-install-check.sh
+
+  nix:
+    name: nix package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: Flake check (package build + NixOS module VM test)
+        run: nix flake check --no-update-lock-file -L
+
+      - name: Smoke test the CLI wrapper
+        run: nix run --no-update-lock-file .#jaynshare -- help
+
+  # Single stable status check for branch protection to require, independent of
+  # how many implementation jobs run. Always runs and fails explicitly if any
+  # required job did not succeed (so it is never silently "skipped").
+  test:
+    name: test
+    needs: [node, windows-client, nix]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check job results
+        if: needs.node.result != 'success' || needs.windows-client.result != 'success' || needs.nix.result != 'success'
+        run: |
+          echo "Node job result: ${{ needs.node.result }}"
+          echo "Windows client result: ${{ needs.windows-client.result }}"
+          echo "Nix package result: ${{ needs.nix.result }}"
+          exit 1
+      - run: echo "All required jobs passed"

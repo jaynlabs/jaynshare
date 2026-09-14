@@ -1,0 +1,9 @@
+# The desktop client installs from Git Bash on Windows, where a CRLF checkout
+# would break every `#!/bin/sh` entry point and leave stray carriage returns in
+# the values they parse. Keep the shell and JavaScript the client ships as LF on
+# every platform, whatever the local core.autocrlf says.
+*.sh text eol=lf
+*.mjs text eol=lf
+*.js text eol=lf
+# The launcher is extensionless, so it is named directly.
+jaynshare-claude text eol=lf

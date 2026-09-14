@@ -1,0 +1,53 @@
+# Quota
+
+How Jaynshare learns each account's quota, the two optional background jobs, and what happens when everything is spent.
+
+## How quota is observed
+
+Jaynshare is **passive** by default: it reads `anthropic-ratelimit-unified-*` headers off the responses that flow through it. An account that hasn't served a request yet shows unknown quota until rotation first reaches it.
+
+Observed quota is persisted to `jaynshare.state.json` next to the config, so rotation state survives a restart. Stale windows are discarded automatically, and the file is safe to delete — quota is simply re-learned from traffic.
+
+## Quota probe
+
+If you'd rather keep idle accounts' quota fresh, enable the background probe:
+
+```bash
+jaynshare probe 300    # refresh every 300s
+jaynshare probe off    # back to passive (default)
+jaynshare probe        # show current setting
+```
+
+The **Quota probe** row on the TUI settings screen (`g`) does the same thing, and `p` on the main screen is a one-shot refresh of every account.
+
+It reads each OAuth account's utilization from Anthropic's usage endpoint (`/api/oauth/usage`), which reports quota **without consuming any message quota**. API-key and third-party accounts are skipped. Minimum interval is 30s. Changing it takes effect on a running server immediately.
+
+The probe is also the only source for the **Sonnet 7-day** bucket, when your plan exposes it. The Fable weekly bucket arrives passively in the response headers (`anthropic-ratelimit-unified-7d_oi-*`), so Fable-aware routing works without turning the probe on.
+
+## Keep-warm
+
+The rolling **5-hour session window** only starts once an account sends a real message. So when your active account runs out and rotation moves to a cold account, that account's 5h window starts *then* — right when you need its full headroom. Keep-warm ([#76](https://github.com/KarpelesLab/teamclaude/issues/76)) starts the timer on idle accounts ahead of time, so the next account is already partway (or fully) through a fresh window when it's needed.
+
+```bash
+jaynshare warmup 600    # warm idle accounts every 600s
+jaynshare warmup off    # disabled (default)
+jaynshare warmup        # show current setting
+```
+
+> ⚠️ **This spends a little quota — unlike the passive quota probe.** The 5h timer can't be started by a read-only call, so keep-warm sends a real (minimal) message: for each eligible idle account it spawns a one-shot `claude -p --bare --model haiku --output-format text "hi"` pointed at this proxy, pinned to that account. It only warms accounts whose 5h window is **not already running**, skips disabled/throttled/errored and third-party-backend accounts, and uses the cheapest model — but it does consume a few tokens and a slice of the 5h/weekly buckets per account per window. Requires the `claude` CLI on `PATH`. Minimum interval 60s; changes apply live. Status shows under `warm` in `jaynshare status --json`.
+
+Keep-warm has nothing to do with the prompt cache — see [Prompt caching across rotation](routing.md#prompt-caching-across-rotation).
+
+## Hold on exhaustion
+
+By default, when all accounts are exhausted Jaynshare returns a `429` immediately, which causes Claude Code to abort the current task. With `holdSeconds` set, the proxy **holds the HTTP connection open** instead and polls silently every ~60 seconds; the instant any account's quota resets, the request is forwarded and Claude Code resumes — the interruption never happens.
+
+Set it in the config file (`~/.config/jaynshare.json`):
+
+```json
+"holdSeconds": 3600
+```
+
+`jaynshare run` automatically raises `API_TIMEOUT_MS` on the spawned Claude Code process to `holdSeconds + 60` seconds, so the client-side timeout covers the full hold window. No manual Claude Code configuration is needed.
+
+Useful for overnight or unattended runs: rather than waking up to a stopped task, the session resumes silently once a quota window opens.

@@ -1,0 +1,31 @@
+# Local enrollment and runtime state must never be committed.
+*.secret
+.env
+.env.*
+**/client.secret
+**/operator.secret
+**/jaynshare.json
+**/jaynshare.state.json
+**/jaynshare-ca.pem
+**/jaynshare-leaf.pem
+**/jaynshare-leaf.key
+**/audit.ndjson
+**/audit.ndjson.*
+
+# Client bundles written by deploy/server/prepare-client.sh. These carry
+# enrollment material for a named person; the directory is ignored wholesale so
+# a stray bundle can never be added by a wildcard `git add`.
+onboarding/
+
+# Working notes and planning documents. Deliberately local-only: each
+# maintainer keeps their own, and they are not part of the published project.
+plans/
+
+# Build and local configuration.
+node_modules/
+package-lock.json
+config.json
+*.log
+
+# macOS
+.DS_Store

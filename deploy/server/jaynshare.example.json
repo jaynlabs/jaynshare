@@ -1,0 +1,21 @@
+{
+  "proxy": {
+    "host": "100.x.y.z",
+    "port": 3456,
+    "clients": []
+  },
+  "upstream": "https://api.anthropic.com",
+  "switchThreshold": 0.98,
+  "quotaProbeSeconds": 300,
+  "warmupSeconds": 0,
+  "holdSeconds": 0,
+  "distributeSessions": true,
+  "eventLogging": "block",
+  "autoUpdate": false,
+  "auditLog": {
+    "path": "/home/jaynshare/.local/state/jaynshare/audit.ndjson",
+    "maxBytes": 10485760,
+    "keepFiles": 7
+  },
+  "accounts": []
+}

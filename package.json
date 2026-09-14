@@ -1,0 +1,41 @@
+{
+  "name": "@jaynlabs/jaynshare",
+  "version": "1.0.0",
+  "description": "Self-hosted Claude subscription pool: quota-aware routing across multiple Claude accounts",
+  "type": "module",
+  "main": "src/index.js",
+  "bin": {
+    "jaynshare": "src/index.js"
+  },
+  "files": [
+    "src/",
+    "NOTICE.md"
+  ],
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "node --test --test-timeout=120000",
+    "lint": "eslint ."
+  },
+  "keywords": [
+    "claude",
+    "anthropic",
+    "proxy",
+    "load-balancer",
+    "multi-account"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jaynlabs/jaynshare.git"
+  },
+  "bugs": {
+    "url": "https://github.com/jaynlabs/jaynshare/issues"
+  },
+  "homepage": "https://github.com/jaynlabs/jaynshare#readme",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "devDependencies": {
+    "eslint": "^9.0.0"
+  }
+}
