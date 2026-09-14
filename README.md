@@ -72,7 +72,4 @@ security issues privately as described in [SECURITY.md](SECURITY.md).
 
 ## License
 
-MIT. Jaynshare is derived from
-[TeamClaude](https://github.com/KarpelesLab/teamclaude). See [LICENSE](LICENSE),
-[NOTICE.md](NOTICE.md), and [SOURCES.md](SOURCES.md) for license and provenance
-details.
+MIT. See [LICENSE](LICENSE).
