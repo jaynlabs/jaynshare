@@ -11,26 +11,26 @@ export function parseProxyUrl(value) {
   if (!raw) return null;
 
   const withScheme = /^[a-z0-9+.-]+:\/\//i.test(raw) ? raw : `http://${raw}`;
-  let u;
+  let parsedUrl;
   try {
-    u = new URL(withScheme);
+    parsedUrl = new URL(withScheme);
   } catch {
     throw new Error(`invalid proxy URL: ${value}`);
   }
-  if (!/^https?:$/.test(u.protocol)) {
-    throw new Error(`unsupported proxy protocol "${u.protocol.replace(/:$/, '')}" (only http/https): ${value}`);
+  if (!/^https?:$/.test(parsedUrl.protocol)) {
+    throw new Error(`unsupported proxy protocol "${parsedUrl.protocol.replace(/:$/, '')}" (only http/https): ${value}`);
   }
-  if (!u.hostname) throw new Error(`proxy URL has no host: ${value}`);
+  if (!parsedUrl.hostname) throw new Error(`proxy URL has no host: ${value}`);
 
-  const port = u.port ? Number(u.port) : (u.protocol === 'https:' ? 443 : 8080);
+  const port = parsedUrl.port ? Number(parsedUrl.port) : (parsedUrl.protocol === 'https:' ? 443 : 8080);
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
     throw new Error(`proxy URL has an invalid port: ${value}`);
   }
   return {
-    host: u.hostname,
+    host: parsedUrl.hostname,
     port,
-    username: u.username ? decodeURIComponent(u.username) : null,
-    password: u.password ? decodeURIComponent(u.password) : null,
+    username: parsedUrl.username ? decodeURIComponent(parsedUrl.username) : null,
+    password: parsedUrl.password ? decodeURIComponent(parsedUrl.password) : null,
   };
 }
 

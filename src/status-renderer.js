@@ -132,10 +132,10 @@ function formatAccountStatus(account, { paint, now }) {
 
 // Per-family eligibility, for accounts whose Sonnet or Fable weekly bucket is metered separately.
 function modelRoutingLine(account, { paint, now, blocked, threshold }) {
-  const q = account.quota || {};
-  if (q.unified7dSonnet == null && q.unified7dFable == null) return null;
+  const quota = account.quota || {};
+  if (quota.unified7dSonnet == null && quota.unified7dFable == null) return null;
   const t = Number(threshold);
-  const fiveOver = q.unified5h != null && !Number.isNaN(t) && q.unified5h >= t;
+  const fiveOver = quota.unified5h != null && !Number.isNaN(t) && quota.unified5h >= t;
 
   const cell = (label, weekly, reset) => {
     if (findFamilyBlock(blocked, label)) { // the blocklist outranks quota headroom
@@ -148,9 +148,9 @@ function modelRoutingLine(account, { paint, now, blocked, threshold }) {
     return `${label} ${mark}${when}`;
   };
 
-  const cells = [cell('Opus', q.unified7d, q.unified7dReset)];
-  if (q.unified7dSonnet != null) cells.push(cell('Sonnet', q.unified7dSonnet, q.unified7dSonnetReset));
-  if (q.unified7dFable != null) cells.push(cell('Fable', q.unified7dFable, q.unified7dFableReset));
+  const cells = [cell('Opus', quota.unified7d, quota.unified7dReset)];
+  if (quota.unified7dSonnet != null) cells.push(cell('Sonnet', quota.unified7dSonnet, quota.unified7dSonnetReset));
+  if (quota.unified7dFable != null) cells.push(cell('Fable', quota.unified7dFable, quota.unified7dFableReset));
   return `${paint.dim('Models'.padEnd(8))} ${cells.join('   ')}`;
 }
 

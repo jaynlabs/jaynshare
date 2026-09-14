@@ -21,14 +21,14 @@ const LEAF_KEY = 'jaynshare-leaf.key';
 export const TEST_HOST = 'www.example.org';
 
 const certDir = () => dirname(getConfigPath());
-const fpath = (n) => join(certDir(), n);
+const certFilePath = (filename) => join(certDir(), filename);
 
 export function caCertPath() {
-  return fpath(CA_CERT);
+  return certFilePath(CA_CERT);
 }
 
-async function readIf(p) {
-  try { return await readFile(p, 'utf8'); } catch { return null; }
+async function readIfPresent(filePath) {
+  try { return await readFile(filePath, 'utf8'); } catch { return null; }
 }
 
 async function atomicWrite(path, data, mode) {
@@ -52,20 +52,20 @@ function leafCovers(caCertPem, leafCertPem, hosts) {
 export async function ensureCerts(host) {
   const hosts = host === TEST_HOST ? [TEST_HOST] : [host, TEST_HOST];
   const [caCertPem, leafCertPem, leafKeyPem] = await Promise.all([
-    readIf(fpath(CA_CERT)), readIf(fpath(LEAF_CERT)), readIf(fpath(LEAF_KEY)),
+    readIfPresent(certFilePath(CA_CERT)), readIfPresent(certFilePath(LEAF_CERT)), readIfPresent(certFilePath(LEAF_KEY)),
   ]);
 
   if (caCertPem && leafCertPem && leafKeyPem && leafCovers(caCertPem, leafCertPem, hosts)) {
-    return { caPath: fpath(CA_CERT), caCertPem, leafCertPem, leafKeyPem };
+    return { caPath: certFilePath(CA_CERT), caCertPem, leafCertPem, leafKeyPem };
   }
 
   const chain = generateCertChain(hosts); // the CA key is never persisted
   await mkdir(certDir(), { recursive: true });
-  await atomicWrite(fpath(CA_CERT), chain.caCertPem, 0o644);
-  await atomicWrite(fpath(LEAF_CERT), chain.leafCertPem, 0o644);
-  await atomicWrite(fpath(LEAF_KEY), chain.leafKeyPem, 0o600);
+  await atomicWrite(certFilePath(CA_CERT), chain.caCertPem, 0o644);
+  await atomicWrite(certFilePath(LEAF_CERT), chain.leafCertPem, 0o644);
+  await atomicWrite(certFilePath(LEAF_KEY), chain.leafKeyPem, 0o600);
   return {
-    caPath: fpath(CA_CERT),
+    caPath: certFilePath(CA_CERT),
     caCertPem: chain.caCertPem,
     leafCertPem: chain.leafCertPem,
     leafKeyPem: chain.leafKeyPem,
@@ -160,21 +160,21 @@ function blindTunnel({ clientSocket, head }, { host, port }, log) {
     if (!established && statusLine) {
       try { clientSocket.write(`HTTP/1.1 ${statusLine}\r\nConnection: close\r\n\r\n`); } catch { /* client already gone */ }
     }
-    up.destroy(); clientSocket.destroy();
+    upstreamSocket.destroy(); clientSocket.destroy();
   };
-  const up = net.connect(port, host, () => {
+  const upstreamSocket = net.connect(port, host, () => {
     established = true;
     reply200Raw(clientSocket);
-    if (head && head.length) up.write(head);
-    up.pipe(clientSocket); clientSocket.pipe(up);
+    if (head && head.length) upstreamSocket.write(head);
+    upstreamSocket.pipe(clientSocket); clientSocket.pipe(upstreamSocket);
   });
-  up.on('error', (err) => {
+  upstreamSocket.on('error', (err) => {
     if (!established) log(`[Jaynshare] tunnel ${host}:${port} failed: ${err.message}`);
     teardown('502 Bad Gateway');
   });
-  up.on('close', () => teardown('502 Bad Gateway')); // a FIN before the tunnel is live is a failed dial
+  upstreamSocket.on('close', () => teardown('502 Bad Gateway')); // a FIN before the tunnel is live is a failed dial
   clientSocket.on('close', () => teardown());
-  up.setTimeout(30_000, () => teardown('504 Gateway Timeout'));
+  upstreamSocket.setTimeout(30_000, () => teardown('504 Gateway Timeout'));
 }
 
 function serveTestHost({ clientSocket, head }, ensureLeaf, log) {
@@ -204,9 +204,9 @@ function rewriteTunnel({ req, clientSocket, head }, { host, accountManager, conf
 export function connectPinToken(req) {
   const header = (req?.headers?.['proxy-authorization'] || '').trim();
   if (!header.toLowerCase().startsWith('basic ')) return null;
-  const dec = Buffer.from(header.slice('basic '.length).trim(), 'base64').toString('utf8');
-  const colon = dec.indexOf(':');
-  return (colon >= 0 ? dec.slice(0, colon) : dec) || null;
+  const decoded = Buffer.from(header.slice('basic '.length).trim(), 'base64').toString('utf8');
+  const colon = decoded.indexOf(':');
+  return (colon >= 0 ? decoded.slice(0, colon) : decoded) || null;
 }
 
 // The proxy key wins over an account of the same name. An unknown username is an
@@ -240,10 +240,10 @@ export function resolveConnectPin(req, { accountManager, config, principal = nul
 // The credential a CONNECT presents: Bearer <key>, or Basic with the key as the
 // password, else the username (`--proxy http://<key>@host:port`).
 function presentedCredential(req) {
-  const m = /^\s*(basic|bearer)\s+(.+?)\s*$/i.exec(req?.headers?.['proxy-authorization'] || '');
-  if (!m) return null;
-  if (m[1].toLowerCase() !== 'basic') return m[2];
-  const decoded = Buffer.from(m[2], 'base64').toString('utf8');
+  const match = /^\s*(basic|bearer)\s+(.+?)\s*$/i.exec(req?.headers?.['proxy-authorization'] || '');
+  if (!match) return null;
+  if (match[1].toLowerCase() !== 'basic') return match[2];
+  const decoded = Buffer.from(match[2], 'base64').toString('utf8');
   const colon = decoded.indexOf(':');
   const user = colon >= 0 ? decoded.slice(0, colon) : decoded;
   const pass = colon >= 0 ? decoded.slice(colon + 1) : '';
@@ -261,9 +261,9 @@ function reply502Raw(sock) { try { sock.write('HTTP/1.1 502 Bad Gateway\r\nConne
 
 function terminateTls({ clientSocket, head }, { key, cert }) {
   if (head && head.length) clientSocket.unshift(head);
-  const t = new tls.TLSSocket(clientSocket, { isServer: true, key, cert, ALPNProtocols: ['http/1.1'] });
-  t.on('error', () => t.destroy());
-  return t;
+  const tlsSocket = new tls.TLSSocket(clientSocket, { isServer: true, key, cert, ALPNProtocols: ['http/1.1'] });
+  tlsSocket.on('error', () => tlsSocket.destroy());
+  return tlsSocket;
 }
 
 function serveTest(tlsSock) {

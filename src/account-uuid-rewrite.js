@@ -94,7 +94,7 @@ export class AccountUuidPatcher {
 }
 
 export function patchAccountUuid(buf, newUuid) {
-  const p = new AccountUuidPatcher(newUuid);
-  const out = p.push(buf);
-  return p.changed ? out : buf;
+  const patcher = new AccountUuidPatcher(newUuid);
+  const out = patcher.push(buf);
+  return patcher.changed ? out : buf;
 }

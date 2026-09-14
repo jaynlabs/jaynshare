@@ -35,12 +35,12 @@ function escapeRegExp(s) {
 }
 
 // Display-only approximation: two globs overlap when either literal core contains the other.
-export function modelGlobOverlaps(a, b) {
-  if (typeof a !== 'string' || typeof b !== 'string') return false;
+export function modelGlobOverlaps(globA, globB) {
+  if (typeof globA !== 'string' || typeof globB !== 'string') return false;
   const core = s => s.replace(/\*/g, '').toLowerCase();
-  const ca = core(a);
-  const cb = core(b);
-  return ca.includes(cb) || cb.includes(ca);
+  const coreA = core(globA);
+  const coreB = core(globB);
+  return coreA.includes(coreB) || coreB.includes(coreA);
 }
 
 // Display-only: the blocklist pattern that covers a family, by glob or by substring.

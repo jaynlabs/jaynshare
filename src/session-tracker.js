@@ -16,78 +16,78 @@ export class SessionTracker {
 
   touch(sessionId, accountIndex = null, now = this._now()) {
     if (!sessionId) return null;
-    const s = this._ensure(sessionId, now);
-    s.lastSeen = now;
-    s.count += 1;
-    if (accountIndex != null) s.accountIndex = accountIndex;
+    const session = this._ensure(sessionId, now);
+    session.lastSeen = now;
+    session.count += 1;
+    if (accountIndex != null) session.accountIndex = accountIndex;
     if (now - this._lastSweep > SWEEP_INTERVAL_MS) this.sweep(now);
-    return s;
+    return session;
   }
 
   beginRequest(sessionId, now = this._now()) {
     if (!sessionId) return null;
-    const s = this._ensure(sessionId, now);
-    s.inFlight += 1;
-    s.lastSeen = now;
-    return s;
+    const session = this._ensure(sessionId, now);
+    session.inFlight += 1;
+    session.lastSeen = now;
+    return session;
   }
 
   endRequest(sessionId, now = this._now()) {
-    const s = sessionId && this.sessions.get(sessionId);
-    if (!s) return;
-    s.inFlight = Math.max(0, s.inFlight - 1);
-    s.lastSeen = now;
+    const session = sessionId && this.sessions.get(sessionId);
+    if (!session) return;
+    session.inFlight = Math.max(0, session.inFlight - 1);
+    session.lastSeen = now;
   }
 
   _ensure(sessionId, now) {
-    let s = this.sessions.get(sessionId);
-    if (!s) {
-      s = { accountIndex: null, firstSeen: now, lastSeen: now, count: 0, inFlight: 0 };
-      this.sessions.set(sessionId, s);
+    let session = this.sessions.get(sessionId);
+    if (!session) {
+      session = { accountIndex: null, firstSeen: now, lastSeen: now, count: 0, inFlight: 0 };
+      this.sessions.set(sessionId, session);
     }
-    return s;
+    return session;
   }
 
-  _isActive(s, now) {
-    return s.inFlight > 0 || now - s.lastSeen <= this.activeTtlMs;
+  _isActive(session, now) {
+    return session.inFlight > 0 || now - session.lastSeen <= this.activeTtlMs;
   }
 
-  _isExpired(s, now) {
-    return s.inFlight === 0 && now - s.lastSeen > this.knownTtlMs;
+  _isExpired(session, now) {
+    return session.inFlight === 0 && now - session.lastSeen > this.knownTtlMs;
   }
 
   pinnedAccount(sessionId, now = this._now()) {
-    const s = sessionId && this.sessions.get(sessionId);
-    if (!s) return null;
-    if (this._isExpired(s, now)) {
+    const session = sessionId && this.sessions.get(sessionId);
+    if (!session) return null;
+    if (this._isExpired(session, now)) {
       this.sessions.delete(sessionId);
       return null;
     }
-    return s.accountIndex ?? null;
+    return session.accountIndex ?? null;
   }
 
   lookup(sessionId, now = this._now()) {
-    const s = sessionId && this.sessions.get(sessionId);
-    if (!s) return null;
-    if (this._isExpired(s, now)) {
+    const session = sessionId && this.sessions.get(sessionId);
+    if (!session) return null;
+    if (this._isExpired(session, now)) {
       this.sessions.delete(sessionId);
       return null;
     }
-    return { accountIndex: s.accountIndex ?? null, lastSeen: s.lastSeen };
+    return { accountIndex: session.accountIndex ?? null, lastSeen: session.lastSeen };
   }
 
   activeCountFor(accountIndex, now = this._now()) {
     let n = 0;
-    for (const s of this.sessions.values()) {
-      if (s.accountIndex === accountIndex && this._isActive(s, now)) n += 1;
+    for (const session of this.sessions.values()) {
+      if (session.accountIndex === accountIndex && this._isActive(session, now)) n += 1;
     }
     return n;
   }
 
   sweep(now = this._now()) {
     this._lastSweep = now;
-    for (const [id, s] of this.sessions) {
-      if (this._isExpired(s, now)) this.sessions.delete(id);
+    for (const [id, session] of this.sessions) {
+      if (this._isExpired(session, now)) this.sessions.delete(id);
     }
   }
 
@@ -96,15 +96,15 @@ export class SessionTracker {
     let known = 0;
     let active = 0;
     const perAccount = {};
-    for (const [id, s] of this.sessions) {
-      if (this._isExpired(s, now)) {
+    for (const [id, session] of this.sessions) {
+      if (this._isExpired(session, now)) {
         this.sessions.delete(id);
         continue;
       }
       known += 1;
-      if (this._isActive(s, now)) {
+      if (this._isActive(session, now)) {
         active += 1;
-        if (s.accountIndex != null) perAccount[s.accountIndex] = (perAccount[s.accountIndex] || 0) + 1;
+        if (session.accountIndex != null) perAccount[session.accountIndex] = (perAccount[session.accountIndex] || 0) + 1;
       }
     }
     return { known, active, perAccount };

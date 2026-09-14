@@ -28,8 +28,8 @@ export async function importCredentials(filePath, {
     if (err.code !== 'ENOENT' || platform !== 'darwin' || !isDefaultPath) throw err;
     try {
       raw = await readKeychain();
-    } catch (kcErr) {
-      throw new Error(`${err.message}; macOS Keychain lookup for "${KEYCHAIN_SERVICE}" also failed: ${kcErr.message}`);
+    } catch (keychainError) {
+      throw new Error(`${err.message}; macOS Keychain lookup for "${KEYCHAIN_SERVICE}" also failed: ${keychainError.message}`);
     }
   }
 
@@ -167,9 +167,9 @@ export async function fetchProfile(accessToken) {
 // Model-scoped weekly quota lives in `limits[]`, not in a top-level `seven_day_<model>` key.
 export function findScopedWeeklyLimit(data, modelNamePattern) {
   const limits = Array.isArray(data?.limits) ? data.limits : [];
-  const entry = limits.find((l) =>
-    l && l.group === 'weekly' && l.scope?.model?.display_name
-    && modelNamePattern.test(l.scope.model.display_name));
+  const entry = limits.find((limit) =>
+    limit && limit.group === 'weekly' && limit.scope?.model?.display_name
+    && modelNamePattern.test(limit.scope.model.display_name));
   if (!entry) return null;
   return { utilization: entry.percent, resets_at: entry.resets_at };
 }

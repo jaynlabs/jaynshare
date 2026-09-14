@@ -46,15 +46,15 @@ export function proxyFetch(url, opts = {}) {
 }
 
 function pooledFetch(url, opts) {
-  const u = new URL(url);
-  const isHttp = u.protocol === 'http:';
-  const port = Number(u.port) || (isHttp ? 80 : 443);
-  const proxy = proxyForHost(u.hostname);
+  const parsedUrl = new URL(url);
+  const isHttp = parsedUrl.protocol === 'http:';
+  const port = Number(parsedUrl.port) || (isHttp ? 80 : 443);
+  const proxy = proxyForHost(parsedUrl.hostname);
   if (proxy) {
-    const agent = proxyAgent(proxy, { targetHost: u.hostname, targetPort: port, tls: !isHttp, tlsOptions: opts.tlsOptions || {} });
-    return nodeRequest(u, opts, { transport: isHttp ? http : https, agent });
+    const agent = proxyAgent(proxy, { targetHost: parsedUrl.hostname, targetPort: port, tls: !isHttp, tlsOptions: opts.tlsOptions || {} });
+    return nodeRequest(parsedUrl, opts, { transport: isHttp ? http : https, agent });
   }
-  return nodeRequest(u, opts, { transport: isHttp ? http : https, agent: isHttp ? httpAgent : httpsAgent });
+  return nodeRequest(parsedUrl, opts, { transport: isHttp ? http : https, agent: isHttp ? httpAgent : httpsAgent });
 }
 
 // JAYNSHARE_UPSTREAM_GLOBAL_FETCH=1: Node's global fetch with a headers-only
@@ -70,17 +70,17 @@ function directFetch(url, { headersTimeoutMs, ...opts }) {
 }
 
 function proxiedFetch(url, opts, sx) {
-  const u = new URL(url);
-  const agent = sxTunnelAgent(sx, u.hostname, Number(u.port) || 443);
-  return nodeRequest(u, opts, { transport: https, agent });
+  const parsedUrl = new URL(url);
+  const agent = sxTunnelAgent(sx, parsedUrl.hostname, Number(parsedUrl.port) || 443);
+  return nodeRequest(parsedUrl, opts, { transport: https, agent });
 }
 
 // `req` is created before the timer so a synchronous throw leaves no armed timer.
-function nodeRequest(u, opts, { transport, agent }) {
+function nodeRequest(parsedUrl, opts, { transport, agent }) {
   const timeoutMs = opts.headersTimeoutMs;
   return new Promise((resolve, reject) => {
     const req = transport.request(
-      u,
+      parsedUrl,
       { method: opts.method || 'GET', headers: opts.headers || {}, agent },
       (res) => { clearTimeout(timer); cleanupAbort(); resolve(makeResponse(res)); },
     );

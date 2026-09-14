@@ -9,14 +9,14 @@ export class Prober extends IntervalJob {
 
   constructor(accountManager, { intervalMs = 0, probeFn = fetchUsage, timeoutMs = 10_000, log = console.log } = {}) {
     super({ intervalMs, log });
-    this.am = accountManager;
+    this.accountManager = accountManager;
     this.probeFn = probeFn;
     this.timeoutMs = timeoutMs;
   }
 
   async probeAll() {
     return this.run(async () => {
-      const accounts = this.am.accounts.filter(account => account.type === 'oauth' && account.credential);
+      const accounts = this.accountManager.accounts.filter(account => account.type === 'oauth' && account.credential);
       await Promise.all(accounts.map(account => this.probeAccount(account)));
     });
   }
@@ -25,10 +25,10 @@ export class Prober extends IntervalJob {
     const startedAt = Date.now();
     this._record(account, { status: 'running', startedAt });
     try {
-      await this.am.ensureTokenFresh(account.index);
+      await this.accountManager.ensureTokenFresh(account.index);
       let usage = await this._withTimeout(this.probeFn(account.credential));
       if (usage?.status === 401) {
-        await this.am.refreshTokenAfterRejection(account.index);
+        await this.accountManager.refreshTokenAfterRejection(account.index);
         usage = await this._withTimeout(this.probeFn(account.credential));
       }
 
@@ -37,7 +37,7 @@ export class Prober extends IntervalJob {
         return;
       }
 
-      this.am.applyUsageData(account.index, usage);
+      this.accountManager.applyUsageData(account.index, usage);
       this._record(account, this._outcome('ok', null, startedAt));
     } catch (err) {
       this._record(account, this._outcome('error', err?.message || String(err), startedAt));

@@ -395,40 +395,40 @@ export class AccountManager {
 
   /** Highest utilization (0-1) across the buckets that govern `model`. */
   _maxUtilization(account, model = null) {
-    const q = account.quota;
+    const quota = account.quota;
     let max = 0;
-    if (q.unified5h != null) max = Math.max(max, q.unified5h);
+    if (quota.unified5h != null) max = Math.max(max, quota.unified5h);
     const weeklyVal = this._governingWeekly(account, model);
     if (weeklyVal != null) max = Math.max(max, weeklyVal);
-    if (q.tokensLimit != null && q.tokensRemaining != null) {
-      max = Math.max(max, 1 - q.tokensRemaining / q.tokensLimit);
+    if (quota.tokensLimit != null && quota.tokensRemaining != null) {
+      max = Math.max(max, 1 - quota.tokensRemaining / quota.tokensLimit);
     }
-    if (q.requestsLimit != null && q.requestsRemaining != null) {
-      max = Math.max(max, 1 - q.requestsRemaining / q.requestsLimit);
+    if (quota.requestsLimit != null && quota.requestsRemaining != null) {
+      max = Math.max(max, 1 - quota.requestsRemaining / quota.requestsLimit);
     }
     return max;
   }
 
   /** Utilization of the weekly bucket governing `model`, falling back to the shared one. */
   _governingWeekly(account, model) {
-    const q = account.quota;
+    const quota = account.quota;
     const key = this._weeklyBucketFor(model);
-    if (q[key] != null) return q[key];
-    return key !== 'unified7d' ? q.unified7d : null;
+    if (quota[key] != null) return quota[key];
+    return key !== 'unified7d' ? quota.unified7d : null;
   }
 
   _governingWeeklyReset(account, model) {
-    const q = account.quota;
+    const quota = account.quota;
     const key = this._weeklyBucketFor(model);
-    return q[`${key}Reset`] || q.unified7dReset || null;
+    return quota[`${key}Reset`] || quota.unified7dReset || null;
   }
 
   /** Only the family-specific bucket; the shared caps are _isNearQuota's job. */
   _modelWeeklyExhausted(account, model) {
-    const q = account.quota;
+    const quota = account.quota;
     const key = this._weeklyBucketFor(model);
     if (key === 'unified7d') return false;
-    return q[key] != null && q[key] >= this.switchThreshold;
+    return quota[key] != null && quota[key] >= this.switchThreshold;
   }
 
   /** The least-utilized probeable account, at most once per probeIntervalMs; null between probes. */
@@ -641,42 +641,42 @@ export class AccountManager {
 
   /** @returns {{changed: boolean, session: boolean}} */
   _clearExpiredQuotas(account) {
-    const q = account.quota;
+    const quota = account.quota;
     const now = Date.now();
     let changed = false;
     let session = false;
 
-    if (q.unified5h != null && q.unified5hReset && now >= q.unified5hReset) {
+    if (quota.unified5h != null && quota.unified5hReset && now >= quota.unified5hReset) {
       console.log(`[Jaynshare] Account "${account.name}" session quota reset`);
-      q.unified5h = null;
-      q.unified5hReset = null;
+      quota.unified5h = null;
+      quota.unified5hReset = null;
       changed = true;
       session = true;
     }
-    if (q.unified7d != null && q.unified7dReset && now >= q.unified7dReset) {
+    if (quota.unified7d != null && quota.unified7dReset && now >= quota.unified7dReset) {
       console.log(`[Jaynshare] Account "${account.name}" weekly quota reset`);
-      q.unified7d = null;
-      q.unified7dReset = null;
-      q.unifiedStatus = null;
+      quota.unified7d = null;
+      quota.unified7dReset = null;
+      quota.unifiedStatus = null;
       changed = true;
     }
-    if (q.unified7dSonnet != null && q.unified7dSonnetReset && now >= q.unified7dSonnetReset) {
-      q.unified7dSonnet = null;
-      q.unified7dSonnetReset = null;
+    if (quota.unified7dSonnet != null && quota.unified7dSonnetReset && now >= quota.unified7dSonnetReset) {
+      quota.unified7dSonnet = null;
+      quota.unified7dSonnetReset = null;
       changed = true;
     }
-    if (q.unified7dFable != null && q.unified7dFableReset && now >= q.unified7dFableReset) {
-      q.unified7dFable = null;
-      q.unified7dFableReset = null;
+    if (quota.unified7dFable != null && quota.unified7dFableReset && now >= quota.unified7dFableReset) {
+      quota.unified7dFable = null;
+      quota.unified7dFableReset = null;
       changed = true;
     }
 
-    if (q.resetsAt && now >= new Date(q.resetsAt).getTime()) {
-      q.tokensRemaining = null;
-      q.tokensLimit = null;
-      q.requestsRemaining = null;
-      q.requestsLimit = null;
-      q.resetsAt = null;
+    if (quota.resetsAt && now >= new Date(quota.resetsAt).getTime()) {
+      quota.tokensRemaining = null;
+      quota.tokensLimit = null;
+      quota.requestsRemaining = null;
+      quota.requestsLimit = null;
+      quota.resetsAt = null;
       changed = true;
     }
 
@@ -722,20 +722,20 @@ export class AccountManager {
   }
 
   _isNearQuota(account, model = null) {
-    const q = account.quota;
+    const quota = account.quota;
     this._clearExpiredQuotas(account);
 
-    if (q.unified5h != null && q.unified5h >= this.switchThreshold) return true;
+    if (quota.unified5h != null && quota.unified5h >= this.switchThreshold) return true;
     const weeklyVal = this._governingWeekly(account, model); // only the bucket governing `model`
     if (weeklyVal != null && weeklyVal >= this.switchThreshold) return true;
 
-    if (q.tokensLimit != null && q.tokensRemaining != null) {
-      const used = 1 - (q.tokensRemaining / q.tokensLimit);
+    if (quota.tokensLimit != null && quota.tokensRemaining != null) {
+      const used = 1 - (quota.tokensRemaining / quota.tokensLimit);
       if (used >= this.switchThreshold) return true;
     }
 
-    if (q.requestsLimit != null && q.requestsRemaining != null) {
-      const used = 1 - (q.requestsRemaining / q.requestsLimit);
+    if (quota.requestsLimit != null && quota.requestsRemaining != null) {
+      const used = 1 - (quota.requestsRemaining / quota.requestsLimit);
       if (used >= this.switchThreshold) return true;
     }
 
@@ -871,26 +871,26 @@ export class AccountManager {
   applyUsageData(accountIndex, usage) {
     const account = this.accounts[accountIndex];
     if (!account || !usage) return;
-    const q = account.quota;
+    const quota = account.quota;
 
     if (usage.fiveHour) {
-      if (usage.fiveHour.utilization != null) q.unified5h = usage.fiveHour.utilization;
-      if (usage.fiveHour.resetAt != null) q.unified5hReset = usage.fiveHour.resetAt;
+      if (usage.fiveHour.utilization != null) quota.unified5h = usage.fiveHour.utilization;
+      if (usage.fiveHour.resetAt != null) quota.unified5hReset = usage.fiveHour.resetAt;
     }
     if (usage.sevenDay) {
-      if (usage.sevenDay.utilization != null) q.unified7d = usage.sevenDay.utilization;
-      if (usage.sevenDay.resetAt != null) q.unified7dReset = usage.sevenDay.resetAt;
+      if (usage.sevenDay.utilization != null) quota.unified7d = usage.sevenDay.utilization;
+      if (usage.sevenDay.resetAt != null) quota.unified7dReset = usage.sevenDay.resetAt;
     }
     if (usage.sevenDaySonnet) {
-      if (usage.sevenDaySonnet.utilization != null) q.unified7dSonnet = usage.sevenDaySonnet.utilization;
-      if (usage.sevenDaySonnet.resetAt != null) q.unified7dSonnetReset = usage.sevenDaySonnet.resetAt;
+      if (usage.sevenDaySonnet.utilization != null) quota.unified7dSonnet = usage.sevenDaySonnet.utilization;
+      if (usage.sevenDaySonnet.resetAt != null) quota.unified7dSonnetReset = usage.sevenDaySonnet.resetAt;
     }
     if (usage.sevenDayFable) {
-      if (usage.sevenDayFable.utilization != null) q.unified7dFable = usage.sevenDayFable.utilization;
-      if (usage.sevenDayFable.resetAt != null) q.unified7dFableReset = usage.sevenDayFable.resetAt;
+      if (usage.sevenDayFable.utilization != null) quota.unified7dFable = usage.sevenDayFable.utilization;
+      if (usage.sevenDayFable.resetAt != null) quota.unified7dFableReset = usage.sevenDayFable.resetAt;
     }
 
-    if (account.probing && q.unified7dReset != null) {
+    if (account.probing && quota.unified7dReset != null) {
       account.probing = false;
       account.requalify = true;
     }

@@ -320,20 +320,20 @@ async function readControlBody(req, limit = 64 * 1024) {
 export function resolveAccountPin(accountManager, token) {
   const accounts = accountManager.accounts || [];
   const norm = (s) => (s || '').trim().toLowerCase();
-  const t = norm(token);
-  if (!t) return null;
+  const normalizedToken = norm(token);
+  if (!normalizedToken) return null;
 
-  const at = (pick) => accounts.findIndex(a => norm(pick(a)) === t);
+  const matchingIndex = (pick) => accounts.findIndex(a => norm(pick(a)) === normalizedToken);
   const qualified = accounts.findIndex(a => a.accountUuid && a.orgUuid
-    && `${norm(a.accountUuid)}/${norm(a.orgUuid)}` === t);
+    && `${norm(a.accountUuid)}/${norm(a.orgUuid)}` === normalizedToken);
 
-  for (const i of [
+  for (const index of [
     qualified,
-    at(a => a.accountUuid),
-    at(a => a.orgUuid),
-    at(a => a.name),
-    at(a => (a.name || '').split(' (')[0]),
-  ]) if (i >= 0) return i;
+    matchingIndex(a => a.accountUuid),
+    matchingIndex(a => a.orgUuid),
+    matchingIndex(a => a.name),
+    matchingIndex(a => (a.name || '').split(' (')[0]),
+  ]) if (index >= 0) return index;
 
   return null;
 }
@@ -490,7 +490,7 @@ async function relayRaw(req, res, { upstream, sx }) {
 
 /** The data-plane listener shared by the base server and the MITM's terminating server. */
 export function createProxyRequestListener({ accountManager, upstream, logDir = null, hooks = {}, sx = null, holdMs = 0, config = {}, forcedPin = null, preferredAccount = null, forcedPrincipal = null, egress = null }) {
-  const pool = { accountManager, upstream, hooks, logDir, sx, holdMs, config };
+  const listenerContext = { accountManager, upstream, hooks, logDir, sx, holdMs, config };
   return async (req, res) => {
     try {
       const principal = forcedPrincipal || req.jaynsharePrincipal || LOCAL_OPERATOR;
@@ -503,11 +503,11 @@ export function createProxyRequestListener({ accountManager, upstream, logDir = 
       if (await relayedVerbatim(req, res, { upstream, sx })) return;
 
       // Event logs the operator chose to hide stay off the TUI but still reach upstream.
-      const io = { req, res, activity: eventLogHidden(req, config) ? {} : hooks };
-      const pins = resolvePins(io, { accountManager, forcedPin, preferredAccount });
+      const clientExchange = { req, res, activity: eventLogHidden(req, config) ? {} : hooks };
+      const pins = resolvePins(clientExchange, { accountManager, forcedPin, preferredAccount });
       if (!pins) return;
 
-      await serveExchange(io, { pool, principal, pins });
+      await serveExchange(clientExchange, { listenerContext, principal, pins });
     } catch (err) {
       console.error('[Jaynshare] Unhandled error:', err);
     }
@@ -539,8 +539,8 @@ async function relayedVerbatim(req, res, { upstream, sx }) {
  * Resolves the account a pin or preference names, answering the client itself when
  * it names none. Returns null once that answer is sent.
  */
-function resolvePins(io, { accountManager, forcedPin, preferredAccount }) {
-  const { req } = io;
+function resolvePins(clientExchange, { accountManager, forcedPin, preferredAccount }) {
+  const { req } = clientExchange;
 
   // `/jaynshare-account/<token>/...` pins one account and never rotates. The prefix is stripped.
   let pinnedIndex = null;
@@ -548,7 +548,7 @@ function resolvePins(io, { accountManager, forcedPin, preferredAccount }) {
   if (urlPin) {
     pinnedIndex = resolveAccountPin(accountManager, urlPin.token);
     if (pinnedIndex == null) {
-      rejectUnknownAccount(io, `(unknown pin: "${urlPin.token}")`, `Unknown account pin "${urlPin.token}"`);
+      rejectUnknownAccount(clientExchange, `(unknown pin: "${urlPin.token}")`, `Unknown account pin "${urlPin.token}"`);
       return null;
     }
     req.url = urlPin.rest;
@@ -556,7 +556,7 @@ function resolvePins(io, { accountManager, forcedPin, preferredAccount }) {
     // The MITM pin arrives bound to the listener; resolved per request since a reload can renumber accounts.
     pinnedIndex = resolveAccountPin(accountManager, forcedPin);
     if (pinnedIndex == null) {
-      rejectUnknownAccount(io, `(unknown pin: "${forcedPin}")`, `Unknown account pin "${forcedPin}" (from JAYNSHARE_ACCOUNT)`);
+      rejectUnknownAccount(clientExchange, `(unknown pin: "${forcedPin}")`, `Unknown account pin "${forcedPin}" (from JAYNSHARE_ACCOUNT)`);
       return null;
     }
   }
@@ -565,7 +565,7 @@ function resolvePins(io, { accountManager, forcedPin, preferredAccount }) {
   if (pinnedIndex == null && preferredAccount != null) {
     preferredIndex = resolveAccountPin(accountManager, preferredAccount);
     if (preferredIndex == null) {
-      rejectUnknownAccount(io, '(unknown preference)', 'Preferred account no longer exists; choose another account.');
+      rejectUnknownAccount(clientExchange, '(unknown preference)', 'Preferred account no longer exists; choose another account.');
       return null;
     }
   }
@@ -574,8 +574,8 @@ function resolvePins(io, { accountManager, forcedPin, preferredAccount }) {
 }
 
 /** Reads the request, then relays it through the pool and reports what happened. */
-async function serveExchange({ req, res, activity }, { pool, principal, pins }) {
-  const { accountManager, upstream, hooks, logDir, sx, holdMs, config } = pool;
+async function serveExchange({ req, res, activity }, { listenerContext, principal, pins }) {
+  const { accountManager, upstream, hooks, logDir, sx, holdMs, config } = listenerContext;
   const reqId = ++requestCounter;
   const sessionId = req.headers['x-claude-code-session-id'] || null;
   const sessionKey = sessionId ? `${principal.clientId}\0${sessionId}` : null;
@@ -837,14 +837,14 @@ function lazyRequestLog({ req, body, reqId, logDir }, attempt) {
   return {
     get,
     head() {
-      const l = get();
-      if (!l || headWritten) return;
+      const requestLog = get();
+      if (!requestLog || headWritten) return;
       headWritten = true;
       const safeHeaders = { ...attempt.headers };
       if (safeHeaders['x-api-key']) safeHeaders['x-api-key'] = safeHeaders['x-api-key'].slice(0, 15) + '...';
       if (safeHeaders['authorization']) safeHeaders['authorization'] = safeHeaders['authorization'].slice(0, 20) + '...';
-      l.write(`=== REQUEST (account: ${attempt.account.name}, retry: ${attempt.retryCount}) ===\n${req.method} ${attempt.url}\n${formatHeaders(safeHeaders)}`);
-      if (body.length > 0) l.body('REQUEST BODY', body, req.headers['content-type']);
+      requestLog.write(`=== REQUEST (account: ${attempt.account.name}, retry: ${attempt.retryCount}) ===\n${req.method} ${attempt.url}\n${formatHeaders(safeHeaders)}`);
+      if (body.length > 0) requestLog.body('REQUEST BODY', body, req.headers['content-type']);
     },
   };
 }
@@ -886,10 +886,10 @@ async function handle429(exchange, attempt, upstreamRes) {
 }
 
 /** The unified bucket upstream rejected on, if any. */
-function rejectedBucket(rl) {
-  if (rl['anthropic-ratelimit-unified-5h-status'] === 'rejected'
-      || rl['anthropic-ratelimit-unified-7d-status'] === 'rejected') return 'general';
-  if (rl['anthropic-ratelimit-unified-7d_oi-status'] === 'rejected') return 'fable';
+function rejectedBucket(rateLimitHeaders) {
+  if (rateLimitHeaders['anthropic-ratelimit-unified-5h-status'] === 'rejected'
+      || rateLimitHeaders['anthropic-ratelimit-unified-7d-status'] === 'rejected') return 'general';
+  if (rateLimitHeaders['anthropic-ratelimit-unified-7d_oi-status'] === 'rejected') return 'fable';
   return null;
 }
 
@@ -975,8 +975,8 @@ async function relayResponse({ res, accountManager, ctx }, { account, log }, ups
   res.writeHead(upstreamRes.status, clientResponseHeaders(upstreamRes.headers.entries()));
 
   if (!upstreamRes.body) {
-    const l = log.get();
-    if (l) { l.write('\n\n=== RESPONSE BODY ===\n(empty)'); l.end(); }
+    const requestLog = log.get();
+    if (requestLog) { requestLog.write('\n\n=== RESPONSE BODY ===\n(empty)'); requestLog.end(); }
     res.end();
     return;
   }
@@ -985,15 +985,15 @@ async function relayResponse({ res, accountManager, ctx }, { account, log }, ups
   const isStreaming = contentType.includes('text/event-stream');
 
   if (isStreaming) {
-    const l = log.get();
-    const bodyWriter = l ? l.bodyWriter('RESPONSE BODY (streamed)', contentType) : null;
+    const requestLog = log.get();
+    const bodyWriter = requestLog ? requestLog.bodyWriter('RESPONSE BODY (streamed)', contentType) : null;
     await streamResponse(upstreamRes.body, res, { accountManager, accountIndex: account.index, bodyWriter });
-    l?.end();
+    requestLog?.end();
   } else {
     const buf = Buffer.from(await upstreamRes.arrayBuffer());
     extractUsageFromBody(buf, account.index, accountManager);
-    const l = log.get();
-    if (l) { l.body('RESPONSE BODY', buf, contentType); l.end(); }
+    const requestLog = log.get();
+    if (requestLog) { requestLog.body('RESPONSE BODY', buf, contentType); requestLog.end(); }
     res.end(buf);
   }
 }
@@ -1013,8 +1013,8 @@ async function handleUpstreamError(exchange, { account, retryCount, route, log }
   console.error(`[Jaynshare] Upstream error (account "${account.name}"):`, err.message);
 
   log.head();
-  const l = log.get();
-  if (l) { l.write(`\n\n=== ERROR ===\n${err.stack || err.message}`); l.end(); }
+  const requestLog = log.get();
+  if (requestLog) { requestLog.write(`\n\n=== ERROR ===\n${err.stack || err.message}`); requestLog.end(); }
 
   // The fetch pool is process-wide, so failing over would not help; a fast failure evicts the dead socket.
   if (isTransientUpstreamError(err)) {

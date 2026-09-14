@@ -29,18 +29,18 @@ async function sxPost(path, apiKey, body) {
 }
 
 const SX_MODES = ['off', '429', 'always'];
-const normalizeMode = (m) => (SX_MODES.includes(m) ? m : 'always');
+const normalizeMode = (mode) => (SX_MODES.includes(mode) ? mode : 'always');
 
 // ports-list: { proxy: "host:port", login, password, id }; create-port: { server, port, login, password, id }
-function parsePort(p) {
+function parsePort(portEntry) {
   let host, port;
-  if (typeof p.proxy === 'string' && p.proxy.includes(':')) {
-    const i = p.proxy.lastIndexOf(':');
-    host = p.proxy.slice(0, i); port = p.proxy.slice(i + 1);
+  if (typeof portEntry.proxy === 'string' && portEntry.proxy.includes(':')) {
+    const colonIndex = portEntry.proxy.lastIndexOf(':');
+    host = portEntry.proxy.slice(0, colonIndex); port = portEntry.proxy.slice(colonIndex + 1);
   } else {
-    host = p.server; port = p.port;
+    host = portEntry.server; port = portEntry.port;
   }
-  return { host, port: parseInt(port, 10), username: p.login, password: p.password, portId: p.id };
+  return { host, port: parseInt(port, 10), username: portEntry.login, password: portEntry.password, portId: portEntry.id };
 }
 
 // Resolves with the raw socket, paused, once the proxy answers 200.
@@ -60,8 +60,8 @@ export function connectThroughProxy({ proxyHost, proxyPort, auth, targetHost, ta
       const idx = buf.indexOf('\r\n\r\n');
       if (idx < 0) { if (buf.length > 65536) fail(new Error(`${label} CONNECT response too large`)); return; }
       const statusLine = buf.slice(0, buf.indexOf('\r\n'));
-      const m = statusLine.match(/^HTTP\/\d\.\d\s+(\d{3})/);
-      if (!m || m[1] !== '200') { fail(new Error(`${label} refused CONNECT: ${statusLine}`)); return; }
+      const match = statusLine.match(/^HTTP\/\d\.\d\s+(\d{3})/);
+      if (!match || match[1] !== '200') { fail(new Error(`${label} refused CONNECT: ${statusLine}`)); return; }
       cleanup();
       sock.pause(); // the TLS layer must see every byte
       const rest = Buffer.from(buf.slice(idx + 4), 'latin1');

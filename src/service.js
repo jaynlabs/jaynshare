@@ -117,8 +117,8 @@ WantedBy=default.target
 }
 
 function runCommand(cmd, args) {
-  const r = spawnSync(cmd, args, { encoding: 'utf8' });
-  return { code: r.status ?? 1, stdout: r.stdout || '', stderr: r.stderr || '' };
+  const result = spawnSync(cmd, args, { encoding: 'utf8' });
+  return { code: result.status ?? 1, stdout: result.stdout || '', stderr: result.stderr || '' };
 }
 
 const guiDomain = (uid = process.getuid?.() ?? 0) => `gui/${uid}`;
@@ -190,13 +190,13 @@ export async function serviceStatus({
   if (!kind) return { installed: false, running: false, detail: 'unsupported platform' };
   if (kind === 'launchd') {
     const plist = launchAgentPath(home);
-    const r = run('launchctl', ['print', `${guiDomain()}/${LABEL}`]);
-    const pid = /\bpid = (\d+)/.exec(r.stdout)?.[1] || null;
-    return { installed: existsSync(plist), running: r.code === 0 && !!pid, pid, file: plist, detail: r.code === 0 ? 'loaded' : 'not loaded' };
+    const result = run('launchctl', ['print', `${guiDomain()}/${LABEL}`]);
+    const pid = /\bpid = (\d+)/.exec(result.stdout)?.[1] || null;
+    return { installed: existsSync(plist), running: result.code === 0 && !!pid, pid, file: plist, detail: result.code === 0 ? 'loaded' : 'not loaded' };
   }
   const unit = systemdUnitPath(home, xdgConfig);
-  const r = run('systemctl', ['--user', 'is-active', UNIT_NAME]);
-  return { installed: existsSync(unit), running: r.stdout.trim() === 'active', file: unit, detail: r.stdout.trim() || r.stderr.trim() };
+  const result = run('systemctl', ['--user', 'is-active', UNIT_NAME]);
+  return { installed: existsSync(unit), running: result.stdout.trim() === 'active', file: unit, detail: result.stdout.trim() || result.stderr.trim() };
 }
 
 export function renderService({ kind = serviceKind(), home = homedir(), platform = process.platform, exec = resolveExec(), configPath = null } = {}) {

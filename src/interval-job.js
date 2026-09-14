@@ -79,7 +79,7 @@ export class IntervalJob {
 
   /** One row per account; inapplicable ones report `not-applicable` instead of their state. */
   _accountStatusRows(applicable, finishedAtKey) {
-    return this.am.accounts.map(account => {
+    return this.accountManager.accounts.map(account => {
       const status = this.accountStatus.get(account.name);
       return {
         name: account.name,

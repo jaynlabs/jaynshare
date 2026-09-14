@@ -157,7 +157,7 @@ class RemoteAccountManager {
 }
 
 export function createAttachSession({ control, config, onQuit, pollMs = DEFAULT_POLL_MS }) {
-  const am = new RemoteAccountManager();
+  const accountManager = new RemoteAccountManager();
   let timer = null;
   let polling = false;
   control.timeoutMs ??= Math.max(2000, pollMs * 3); // a poll this late hides an outage
@@ -167,7 +167,7 @@ export function createAttachSession({ control, config, onQuit, pollMs = DEFAULT_
   };
 
   const tui = new TUI({
-    accountManager: am,
+    accountManager,
     config,
     remote: true,
     saveConfig: async () => { throw new Error('attach mode cannot write config'); },
@@ -181,14 +181,14 @@ export function createAttachSession({ control, config, onQuit, pollMs = DEFAULT_
     polling = true;
     try {
       const status = await control.status();
-      const recovered = !am.connected && am.lastError != null;
-      am.applyStatus(status);
+      const recovered = !accountManager.connected && accountManager.lastError != null;
+      accountManager.applyStatus(status);
       if (recovered) tui._addLog('Reconnected to the server');
     } catch (err) {
-      if (am.connected || am.lastError == null) { // one line per outage, not one per tick
+      if (accountManager.connected || accountManager.lastError == null) { // one line per outage, not one per tick
         tui._addLog(`Lost contact with the server: ${err.message}`);
       }
-      am.markDisconnected(err);
+      accountManager.markDisconnected(err);
     } finally {
       polling = false;
     }
@@ -201,5 +201,5 @@ export function createAttachSession({ control, config, onQuit, pollMs = DEFAULT_
     timer = setInterval(poll, pollMs);
   };
 
-  return { tui, am, poll, start, stop };
+  return { tui, accountManager, poll, start, stop };
 }

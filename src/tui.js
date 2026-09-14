@@ -40,9 +40,9 @@ const routeColorFn = name => {
 const SESSION_FG = [36, 35, 34, 33, 94, 95, 96, 93, 92];
 const SESSION_ID_LEN = 6;
 function sessionColorCode(sid) {
-  let h = 0;
-  for (let i = 0; i < sid.length; i++) h = (h * 31 + sid.charCodeAt(i)) >>> 0;
-  return SESSION_FG[h % SESSION_FG.length];
+  let hash = 0;
+  for (let i = 0; i < sid.length; i++) hash = (hash * 31 + sid.charCodeAt(i)) >>> 0;
+  return SESSION_FG[hash % SESSION_FG.length];
 }
 const sessionTag = sid =>
   sid ? fg(sessionColorCode(sid), sid.slice(0, SESSION_ID_LEN)) : ' '.repeat(SESSION_ID_LEN);
@@ -61,10 +61,10 @@ const routeGlyph = (paint, eligible, pinned) =>
 
 const ANSI_RE = /\x1b\[[0-9;]*m/g;
 const strip = s => s.replace(ANSI_RE, '');
-const vw = s => strip(s).length;
+const visibleWidth = s => strip(s).length;
 
 function rpad(s, w) {
-  const gap = w - vw(s);
+  const gap = w - visibleWidth(s);
   return gap > 0 ? s + ' '.repeat(gap) : s;
 }
 
@@ -90,7 +90,7 @@ function truncate(s, w) {
 }
 
 function fitLine(s, w) {
-  const v = vw(s);
+  const v = visibleWidth(s);
   if (v > w) return truncate(s, w);
   if (v < w) return s + ' '.repeat(w - v);
   return s;
@@ -103,44 +103,44 @@ function formatReset(resetTs) {
   const mins = Math.ceil(ms / 60000);
   if (mins < 60) return `${mins}m`;
   const hrs = Math.floor(mins / 60);
-  const rm = mins % 60;
-  if (hrs < 24) return rm > 0 ? `${hrs}h${rm}m` : `${hrs}h`;
+  const remainingMinutes = mins % 60;
+  if (hrs < 24) return remainingMinutes > 0 ? `${hrs}h${remainingMinutes}m` : `${hrs}h`;
   const days = Math.floor(hrs / 24);
-  const rh = hrs % 24;
-  return rh > 0 ? `${days}d${rh}h` : `${days}d`;
+  const remainingHours = hrs % 24;
+  return remainingHours > 0 ? `${days}d${remainingHours}h` : `${days}d`;
 }
 
 /** A background-colored bar with the reset time (or the percentage) overlaid. */
 export function bar(ratio, w = 10, resetTs) {
-  const rst = formatReset(resetTs);
+  const resetLabel = formatReset(resetTs);
 
   if (ratio == null || isNaN(ratio)) {
-    const label = rst || '-';
+    const label = resetLabel || '-';
     const text = label.slice(0, w);
     const pad = w - text.length;
-    const lp = Math.floor(pad / 2);
-    const rp = pad - lp;
-    return `${ESC}100m${' '.repeat(lp)}${text}${' '.repeat(rp)}${RESET}`;
+    const leftPad = Math.floor(pad / 2);
+    const rightPad = pad - leftPad;
+    return `${ESC}100m${' '.repeat(leftPad)}${text}${' '.repeat(rightPad)}${RESET}`;
   }
 
   ratio = Math.max(0, Math.min(1, ratio));
-  const f = Math.round(ratio * w);
-  const bg = ratio < 0.7 ? 42 : ratio < 0.9 ? 43 : 41; // green | yellow | red
+  const filledWidth = Math.round(ratio * w);
+  const backgroundColor = ratio < 0.7 ? 42 : ratio < 0.9 ? 43 : 41; // green | yellow | red
 
   const pct = (ratio * 100).toFixed(0) + '%';
-  const label = rst || pct;
+  const label = resetLabel || pct;
   const text = label.slice(0, w);
   const pad = w - text.length;
-  const lp = Math.floor(pad / 2);
-  const rp = pad - lp;
-  const chars = (' '.repeat(lp) + text + ' '.repeat(rp));
+  const leftPad = Math.floor(pad / 2);
+  const rightPad = pad - leftPad;
+  const chars = (' '.repeat(leftPad) + text + ' '.repeat(rightPad));
 
-  const filled = chars.slice(0, f);
-  const empty = chars.slice(f);
-  const fgc = bg === 41 ? 97 : 30; // themes render green/yellow light, so the label is black there
+  const filled = chars.slice(0, filledWidth);
+  const empty = chars.slice(filledWidth);
+  const labelColor = backgroundColor === 41 ? 97 : 30; // themes render green/yellow light, so the label is black there
 
   let out = '';
-  if (filled) out += `${ESC}${bg};${fgc}m${filled}`;
+  if (filled) out += `${ESC}${backgroundColor};${labelColor}m${filled}`;
   if (empty) out += `${ESC}100;37m${empty}`;
   out += RESET;
   return out;
@@ -162,26 +162,26 @@ function accountStatusLabel(account, isCurrent) {
 }
 
 /** The two bars every row shows: subscription windows when known, else the API-key counters. */
-function quotaBars(q) {
-  if (q.unified5h != null || q.unified7d != null || q.unified7dSonnet != null || q.unified7dFable != null) {
+function quotaBars(quota) {
+  if (quota.unified5h != null || quota.unified7d != null || quota.unified7dSonnet != null || quota.unified7dFable != null) {
     return [
-      { label: 'Ses', ratio: q.unified5h, reset: q.unified5hReset },
-      { label: 'Wk ', ratio: q.unified7d, reset: q.unified7dReset },
+      { label: 'Ses', ratio: quota.unified5h, reset: quota.unified5hReset },
+      { label: 'Wk ', ratio: quota.unified7d, reset: quota.unified7dReset },
     ];
   }
-  const reset = q.resetsAt ? new Date(q.resetsAt).getTime() : null;
+  const reset = quota.resetsAt ? new Date(quota.resetsAt).getTime() : null;
   const used = (remaining, limit) => (limit != null && remaining != null ? 1 - remaining / limit : null);
   return [
-    { label: 'Tok', ratio: used(q.tokensRemaining, q.tokensLimit), reset },
-    { label: 'Req', ratio: used(q.requestsRemaining, q.requestsLimit), reset },
+    { label: 'Tok', ratio: used(quota.tokensRemaining, quota.tokensLimit), reset },
+    { label: 'Req', ratio: used(quota.requestsRemaining, quota.requestsLimit), reset },
   ];
 }
 
 /** Families whose own weekly bucket is at or over the switch threshold. */
-function spentFamilies(q, threshold) {
+function spentFamilies(quota, threshold) {
   const spent = [];
-  if (q.unified7dSonnet != null && q.unified7dSonnet >= threshold) spent.push('Sonnet');
-  if (q.unified7dFable != null && q.unified7dFable >= threshold) spent.push('Fable');
+  if (quota.unified7dSonnet != null && quota.unified7dSonnet >= threshold) spent.push('Sonnet');
+  if (quota.unified7dFable != null && quota.unified7dFable >= threshold) spent.push('Fable');
   return spent;
 }
 
@@ -189,7 +189,7 @@ export class TUI {
   constructor({ accountManager, config, saveConfig, syncAccounts, onQuit, sx = null, probeQuota = null, activityLogPath = null,
     remote = false, applySwitch = null, // attach mode: mutations are off, a switch becomes a request
     readCredentials = importCredentials, readProfile = fetchProfile }) {
-    this.am = accountManager;
+    this.accountManager = accountManager;
     this.remote = remote;
     this.applySwitch = applySwitch;
     this.config = config;
@@ -360,15 +360,15 @@ export class TUI {
 
   _keyNormal(k) {
     if (k === 'q') { this.stop(); this.onQuit?.(); }
-    else if (k === 's' && this.am.accounts.length > 0) {
-      this.mode = 'select'; this.selAction = 'switch'; this.selIdx = Math.max(0, this.am.currentIndex); this.selRoute = null; this.selReturn = 'normal';
+    else if (k === 's' && this.accountManager.accounts.length > 0) {
+      this.mode = 'select'; this.selAction = 'switch'; this.selIdx = Math.max(0, this.accountManager.currentIndex); this.selRoute = null; this.selReturn = 'normal';
     }
     else if (k === 'R') { this._doSync(); }
     else if (this.remote) { /* the server owns everything below */ }
-    else if (k === 'd' && this.am.accounts.length > 0) {
-      this.mode = 'select'; this.selAction = 'toggle'; this.selIdx = this.am.currentIndex; this.selReturn = 'normal';
+    else if (k === 'd' && this.accountManager.accounts.length > 0) {
+      this.mode = 'select'; this.selAction = 'toggle'; this.selIdx = this.accountManager.currentIndex; this.selReturn = 'normal';
     }
-    else if (k === 'p' && this.am.accounts.length > 0) { this._doProbe(); }
+    else if (k === 'p' && this.accountManager.accounts.length > 0) { this._doProbe(); }
     else if (k === 'g') { this.mode = 'settings'; this.setIdx = 0; this._loadSxBalance(); }
   }
 
@@ -381,7 +381,7 @@ export class TUI {
       label: 'Switch threshold',
       hint: '←→ ±1%',
       value: () => {
-        const thr = this.am.switchThreshold ?? this.config.switchThreshold ?? 0.98;
+        const thr = this.accountManager.switchThreshold ?? this.config.switchThreshold ?? 0.98;
         return green(`${Math.round(thr * 100)}%`);
       },
       left: () => this._nudgeThreshold(-1),
@@ -407,9 +407,9 @@ export class TUI {
       label: 'Event logging',
       hint: '←→ cycle',
       value: () => {
-        const m = this.config.eventLogging || 'hide';
-        return m === 'show' ? green('show')
-          : m === 'block' ? red('block')
+        const mode = this.config.eventLogging || 'hide';
+        return mode === 'show' ? green('show')
+          : mode === 'block' ? red('block')
           : gray('hide');
       },
       left: () => this._cycleEventLogging(-1),
@@ -444,13 +444,13 @@ export class TUI {
       label: 'Add account',
       hint: 'Enter to open',
       value: () => {
-        const n = this.am.accounts.length;
+        const n = this.accountManager.accounts.length;
         return n ? green(`${n} account${n === 1 ? '' : 's'}`) : gray('none');
       },
       enter: () => { this.mode = 'add'; },
     });
 
-    if (this.am.accounts.length > 0) {
+    if (this.accountManager.accounts.length > 0) {
       fields.push({
         id: 'removeAccount',
         label: 'Remove account',
@@ -518,13 +518,13 @@ export class TUI {
     const fields = this._settingsFields();
     const n = fields.length;
     if (n > 0 && this.setIdx >= n) this.setIdx = n - 1;
-    const f = fields[this.setIdx];
+    const field = fields[this.setIdx];
 
     if (k === 'up' || k === 'k') this.setIdx = (this.setIdx - 1 + n) % n;
     else if (k === 'down' || k === 'j') this.setIdx = (this.setIdx + 1) % n;
-    else if (k === 'left') f?.left?.();
-    else if (k === 'right') f?.right?.();
-    else if (k === 'enter') f?.enter?.();
+    else if (k === 'left') field?.left?.();
+    else if (k === 'right') field?.right?.();
+    else if (k === 'enter') field?.enter?.();
     else if (k === 'esc' || k === 'q') { this.mode = 'normal'; }
   }
 
@@ -537,7 +537,7 @@ export class TUI {
   }
 
   _nudgeThreshold(deltaPct) {
-    const cur = Math.round((this.am.switchThreshold ?? this.config.switchThreshold ?? 0.98) * 100);
+    const cur = Math.round((this.accountManager.switchThreshold ?? this.config.switchThreshold ?? 0.98) * 100);
     const next = Math.max(1, Math.min(100, cur + deltaPct));
     if (next !== cur) this._doSetThreshold(String(next));
   }
@@ -555,7 +555,7 @@ export class TUI {
     }
     const v = Math.round(pct) / 100;
     this.config.switchThreshold = v;
-    this.am.switchThreshold = v;
+    this.accountManager.switchThreshold = v;
     try { await this.saveConfig(this.config); }
     catch (e) { this._addLog(`Failed to save: ${e.message}`); }
     this._addLog(`Switch threshold set to ${Math.round(v * 100)}%`);
@@ -580,7 +580,7 @@ export class TUI {
   }
 
   _keySelect(k) {
-    const len = this.am.accounts.length;
+    const len = this.accountManager.accounts.length;
     if (k === 'up' || k === 'k') this.selIdx = Math.max(0, this.selIdx - 1);
     else if (k === 'down' || k === 'j') this.selIdx = Math.min(len - 1, this.selIdx + 1);
     // ←→ cycle the pin target: the default account, then each route. Attach mode has no pins.
@@ -600,7 +600,7 @@ export class TUI {
   }
 
   _cycleSelRoute(dir) {
-    const routes = this.am.getRoutes();
+    const routes = this.accountManager.getRoutes();
     const cycle = [null, ...routes];
     const at = this.selRoute ? routes.findIndex(r => r.name === this.selRoute.name) + 1 : 0;
     const from = at < 1 ? 0 : at; // a vanished route lands on the default
@@ -608,23 +608,23 @@ export class TUI {
   }
 
   _doSwitchSelection() {
-    const acct = this.am.accounts[this.selIdx];
+    const acct = this.accountManager.accounts[this.selIdx];
     if (!acct) { this.mode = 'normal'; this._addLog('That account is no longer listed'); return; } // attach mode polls
     if (this.applySwitch) { this.mode = 'normal'; this._doSwitchRemote(acct); return; }
     if (this.selRoute === null) {
-      this.am.currentIndex = this.selIdx;
+      this.accountManager.currentIndex = this.selIdx;
       this._addLog(`Switched to "${acct.name}"`);
       this.mode = 'normal';
       return;
     }
     const name = this.selRoute.name;
-    if (this.am.getRoutePin(name) === acct) {
-      this.am.clearRoutePin(name);
+    if (this.accountManager.getRoutePin(name) === acct) {
+      this.accountManager.clearRoutePin(name);
       this._addLog(`Unpinned route "${name}"`);
       this.mode = 'normal';
       return;
     }
-    const res = this.am.setRoutePin(name, this.selIdx);
+    const res = this.accountManager.setRoutePin(name, this.selIdx);
     if (res.ok) {
       this._addLog(`Pinned "${acct.name}" for route "${name}"`);
       this.mode = 'normal';
@@ -679,10 +679,10 @@ export class TUI {
   async _doProbe() {
     if (!this.probeQuota) { this._addLog('Quota probe unavailable'); return; }
     if (this._probing) return;
-    const n = this.am.accounts.filter(a => a.type === 'oauth' && a.credential).length;
-    if (n === 0) { this._addLog('No OAuth accounts to probe'); return; }
+    const oauthCount = this.accountManager.accounts.filter(a => a.type === 'oauth' && a.credential).length;
+    if (oauthCount === 0) { this._addLog('No OAuth accounts to probe'); return; }
     this._probing = true;
-    this._addLog(`Refreshing quota on ${n} account${n === 1 ? '' : 's'}...`);
+    this._addLog(`Refreshing quota on ${oauthCount} account${oauthCount === 1 ? '' : 's'}...`);
     try {
       await this.probeQuota();
       this._addLog('Quota refresh complete');
@@ -741,7 +741,7 @@ export class TUI {
       .catch(() => {});
   }
 
-  _sxModeLabel(m) { return m === 'always' ? 'always' : m === '429' ? 'on 429 only' : 'off'; }
+  _sxModeLabel(mode) { return mode === 'always' ? 'always' : mode === '429' ? 'on 429 only' : 'off'; }
 
   async _doSetSxKey(key) {
     const mode = this.config.sx?.mode || 'always';
@@ -749,10 +749,10 @@ export class TUI {
     try { await this.saveConfig(this.config); }
     catch (e) { this._addLog(`Failed to save sx.org key: ${e.message}`); }
     this._addLog('sx.org: configuring...');
-    const r = await this.sx.configure(key, mode);
-    if (r.ok && r.proxy) this._addLog(`sx.org key saved — proxy ${r.proxy.host}:${r.proxy.port} (mode: ${this._sxModeLabel(mode)})`);
-    else if (r.ok) this._addLog(`sx.org key saved (mode: ${this._sxModeLabel(mode)})`);
-    else this._addLog(`sx.org error: ${r.error}`);
+    const result = await this.sx.configure(key, mode);
+    if (result.ok && result.proxy) this._addLog(`sx.org key saved — proxy ${result.proxy.host}:${result.proxy.port} (mode: ${this._sxModeLabel(mode)})`);
+    else if (result.ok) this._addLog(`sx.org key saved (mode: ${this._sxModeLabel(mode)})`);
+    else this._addLog(`sx.org error: ${result.error}`);
     this._loadSxBalance();
     this.mode = 'settings';
     if (this.running) this.render();
@@ -764,8 +764,8 @@ export class TUI {
     this.config.sx = { ...(this.config.sx || {}), mode: next };
     try { await this.saveConfig(this.config); }
     catch (e) { this._addLog(`Failed to save: ${e.message}`); }
-    const r = await this.sx.setMode(next);
-    this._addLog(`sx.org mode: ${this._sxModeLabel(next)}${r.ok ? '' : ` — ${r.error}`}`);
+    const result = await this.sx.setMode(next);
+    this._addLog(`sx.org mode: ${this._sxModeLabel(next)}${result.ok ? '' : ` — ${result.error}`}`);
     if (next !== 'off') this._loadSxBalance();
     if (this.running) this.render();
   }
@@ -835,7 +835,7 @@ export class TUI {
   _updateImported(at, entry) {
     const prev = this.config.accounts[at];
     this.config.accounts[at] = { ...prev, ...entry, name: prev.name };
-    const live = this.am.accounts.find(a => sameIdentity(a, entry)) || this.am.accounts[at];
+    const live = this.accountManager.accounts.find(a => sameIdentity(a, entry)) || this.accountManager.accounts[at];
     if (live) {
       live.credential = entry.accessToken;
       live.refreshToken = entry.refreshToken;
@@ -851,7 +851,7 @@ export class TUI {
   _addImported(entry) {
     const { accounts, incoming } = withOrgSuffixes(this.config.accounts, entry);
     this.config.accounts = [...accounts, incoming];
-    this.am.addAccount(incoming);
+    this.accountManager.addAccount(incoming);
     this._addLog(`Imported account "${incoming.name}"`);
   }
 
@@ -859,26 +859,26 @@ export class TUI {
     const n = this.config.accounts.filter(a => a.name.startsWith('api-')).length + 1;
     const name = `api-${n}`;
     this.config.accounts.push({ name, type: 'apikey', apiKey });
-    this.am.addAccount({ name, type: 'apikey', apiKey });
+    this.accountManager.addAccount({ name, type: 'apikey', apiKey });
     await this.saveConfig(this.config);
     this._addLog(`Added API key account "${name}"`);
   }
 
   async _doRemove(idx) {
-    if (idx < 0 || idx >= this.am.accounts.length) return;
-    const name = this.am.accounts[idx].name;
-    this.am.removeAccount(idx);
+    if (idx < 0 || idx >= this.accountManager.accounts.length) return;
+    const name = this.accountManager.accounts[idx].name;
+    this.accountManager.removeAccount(idx);
     this.config.accounts.splice(idx, 1);
-    if (this.selIdx >= this.am.accounts.length) this.selIdx = Math.max(0, this.am.accounts.length - 1);
+    if (this.selIdx >= this.accountManager.accounts.length) this.selIdx = Math.max(0, this.accountManager.accounts.length - 1);
     await this.saveConfig(this.config);
     this._addLog(`Removed account "${name}"`);
   }
 
   async _doToggleDisabled(idx) {
-    if (idx < 0 || idx >= this.am.accounts.length) return;
-    const acct = this.am.accounts[idx];
+    if (idx < 0 || idx >= this.accountManager.accounts.length) return;
+    const acct = this.accountManager.accounts[idx];
     const next = !acct.disabled;
-    this.am.setDisabled(idx, next);
+    this.accountManager.setDisabled(idx, next);
     if (this.config.accounts[idx]) this.config.accounts[idx].disabled = next; // saveConfig merges; delete would keep the disk value
     await this.saveConfig(this.config);
     this._addLog(`${next ? 'Disabled' : 'Enabled'} account "${acct.name}"`);
@@ -913,7 +913,7 @@ export class TUI {
 
   /** Builds the whole screen; painting it is the caller's job. */
   _frame() {
-    this.am.refreshExpiredQuotas();
+    this.accountManager.refreshExpiredQuotas();
     const W = process.stdout.columns || 80;
     const H = process.stdout.rows || 24;
 
@@ -956,46 +956,46 @@ export class TUI {
   _renderHeader(lines, W) {
     const left = bold(yellow(' ◆ JAYNSHARE'));
     const port = this.config.proxy?.port || 3456;
-    const sess = this.am.sessionStats();
+    const sess = this.accountManager.sessionStats();
     const sessStr = (sess.active || sess.known)
-      ? `${sess.active} sess${this.am.distributeSessions ? green(' dist') : ''}  `
+      ? `${sess.active} sess${this.accountManager.distributeSessions ? green(' dist') : ''}  `
       : '';
-    const live = this.am.connected === false ? red('▼') : green('▲'); // attach mode lost the server
+    const live = this.accountManager.connected === false ? red('▼') : green('▲'); // attach mode lost the server
     const right = `${sessStr}Port ${port} ${live} `;
-    lines.push(left + ' '.repeat(Math.max(1, W - vw(left) - vw(right))) + right);
+    lines.push(left + ' '.repeat(Math.max(1, W - visibleWidth(left) - visibleWidth(right))) + right);
     lines.push(' ' + dim('─'.repeat(W - 2)));
   }
 
   _renderAccounts(lines, W) {
     lines.push('');
-    if (this.am.accounts.length === 0) {
+    if (this.accountManager.accounts.length === 0) {
       lines.push(yellow(this.remote
         ? '  The server reports no accounts.'
         : '  No accounts configured. Press [g] → Add account.'));
       return;
     }
     const showBoth = W >= 70;
-    const bw = showBoth
+    const barWidth = showBoth
       ? Math.max(5, Math.min(20, Math.floor((W - 56) / 2)))
       : Math.max(5, Math.min(20, W - 45));
 
-    const layout = { barWidth: bw, showBoth, ...this._routeLayout() };
-    for (let i = 0; i < this.am.accounts.length; i++) {
+    const layout = { barWidth, showBoth, ...this._routeLayout() };
+    for (let i = 0; i < this.accountManager.accounts.length; i++) {
       lines.push(this._renderAcct(i, layout));
     }
   }
 
   /** The route markers every account row shares: one column per general route, one ► per family. */
   _routeLayout() {
-    const routes = this.am.getRoutes();
-    const anyFable = this.am.accounts.some(a => a.quota.unified7dFable != null);
-    const anySonnet = this.am.accounts.some(a => a.quota.unified7dSonnet != null);
+    const routes = this.accountManager.getRoutes();
+    const anyFable = this.accountManager.accounts.some(a => a.quota.unified7dFable != null);
+    const anySonnet = this.accountManager.accounts.some(a => a.quota.unified7dSonnet != null);
     return {
       routes,
       genRoutes: routes.filter(r => routeFamily(r) === null),
       familyTarget: {
-        fable: anyFable ? this.am.previewRouteIndex('claude-fable-5') : null,
-        sonnet: anySonnet ? this.am.previewRouteIndex('claude-sonnet-4-6') : null,
+        fable: anyFable ? this.accountManager.previewRouteIndex('claude-fable-5') : null,
+        sonnet: anySonnet ? this.accountManager.previewRouteIndex('claude-sonnet-4-6') : null,
       },
     };
   }
@@ -1003,19 +1003,19 @@ export class TUI {
   /** In-flight requests, then the completed log down to `maxLines`. Attach mode sees only its own messages. */
   _renderActivity(lines, W, maxLines) {
     lines.push('');
-    const ac = this.active.size;
-    const acTag = ac > 0 ? `  ${cyan(ac + ' active')}` : '';
-    const aHdr = this.remote ? ' Messages ' : ` Activity${acTag} `;
-    lines.push(aHdr + dim('─'.repeat(Math.max(1, W - vw(aHdr)))));
+    const activeCount = this.active.size;
+    const activeTag = activeCount > 0 ? `  ${cyan(activeCount + ' active')}` : '';
+    const activityHeader = this.remote ? ' Messages ' : ` Activity${activeTag} `;
+    lines.push(activityHeader + dim('─'.repeat(Math.max(1, W - visibleWidth(activityHeader)))));
 
     const now = Date.now();
     for (const [, r] of this.active) {
-      const el = ((now - r.started) / 1000).toFixed(1);
-      const sp = cyan(SPINNER[this.frame]);
-      const m = r.model ? dim(` (${r.model})`) : '';
+      const elapsed = ((now - r.started) / 1000).toFixed(1);
+      const spinner = cyan(SPINNER[this.frame]);
+      const modelSuffix = r.model ? dim(` (${r.model})`) : '';
       const pin = r.pinned ? dim(' [pin]') : '';
-      const a = r.account ? ` → ${r.account}${pin}` : '';
-      lines.push(` ${sp} ${gray(r.t)}  ${sessionTag(r.sessionId)} ${r.method} ${r.path}${m}${a} ${dim(`(${el}s...)`)}`);
+      const routingSuffix = r.account ? ` → ${r.account}${pin}` : '';
+      lines.push(` ${spinner} ${gray(r.t)}  ${sessionTag(r.sessionId)} ${r.method} ${r.path}${modelSuffix}${routingSuffix} ${dim(`(${elapsed}s...)`)}`);
     }
 
     const space = Math.max(0, maxLines - lines.length);
@@ -1025,48 +1025,48 @@ export class TUI {
   }
 
   _renderAcct(idx, { barWidth, showBoth, routes = [], genRoutes = [], familyTarget = {} }) {
-    const a = this.am.accounts[idx];
-    const isCur = idx === this.am.currentIndex;
+    const account = this.accountManager.accounts[idx];
+    const isCurrent = idx === this.accountManager.currentIndex;
     const isSel = this.mode === 'select' && idx === this.selIdx;
 
     const sel = isSel ? cyan('>') : ' ';
-    const cur = isCur ? green('►') : ' ';
+    const cur = isCurrent ? green('►') : ' ';
 
     // One fixed column per general route, so the marker's position identifies the route.
-    const memberOf = (route) => route.accounts.find(x => x.name === a.name);
+    const memberOf = (route) => route.accounts.find(x => x.name === account.name);
     const startCells = genRoutes.map(r => {
-      const m = memberOf(r);
-      return m ? routeGlyph(routeColorFn(r.color), m.eligible, r.pinned === a.name) : ' ';
+      const member = memberOf(r);
+      return member ? routeGlyph(routeColorFn(r.color), member.eligible, r.pinned === account.name) : ' ';
     });
     const startSlot = genRoutes.length ? `${startCells.join('')} ` : '';
 
     // A single ► on the account the family bucket routes to right now.
-    const familyMark = (fam) => {
-      if (familyTarget[fam] !== idx) return ' ';
-      const r = routes.find(x => routeFamily(x) === fam);
-      const pinned = r ? r.pinned === a.name : false;
+    const familyMark = (family) => {
+      if (familyTarget[family] !== idx) return ' ';
+      const r = routes.find(x => routeFamily(x) === family);
+      const pinned = r ? r.pinned === account.name : false;
       return routeGlyph(routeColorFn(r?.color), true, pinned);
     };
 
-    const rawName = a.name.slice(0, 12).padEnd(12);
+    const rawName = account.name.slice(0, 12).padEnd(12);
     const name = isSel ? bold(rawName) : rawName;
-    const type = gray(a.type.padEnd(7));
-    const status = rpad(accountStatusLabel(a, isCur), 10);
+    const type = gray(account.type.padEnd(7));
+    const status = rpad(accountStatusLabel(account, isCurrent), 10);
 
-    const q = a.quota;
-    const [primary, secondary] = quotaBars(q);
+    const quota = account.quota;
+    const [primary, secondary] = quotaBars(quota);
 
     let line = ` ${sel}${cur} ${startSlot}${name} ${type} ${status} ${primary.label} ${bar(primary.ratio, barWidth, primary.reset)}`;
     if (showBoth) {
       line += `  ${secondary.label} ${bar(secondary.ratio, barWidth, secondary.reset)}`;
-      if (q.unified7dSonnet != null) {
-        line += ` ${familyMark('sonnet')}S7  ${bar(q.unified7dSonnet, barWidth, q.unified7dSonnetReset)}`;
+      if (quota.unified7dSonnet != null) {
+        line += ` ${familyMark('sonnet')}S7  ${bar(quota.unified7dSonnet, barWidth, quota.unified7dSonnetReset)}`;
       }
-      if (q.unified7dFable != null) {
-        line += ` ${familyMark('fable')}F7  ${bar(q.unified7dFable, barWidth, q.unified7dFableReset)}`;
+      if (quota.unified7dFable != null) {
+        line += ` ${familyMark('fable')}F7  ${bar(quota.unified7dFable, barWidth, quota.unified7dFableReset)}`;
       }
     }
-    const blocked = spentFamilies(q, this.am.switchThreshold);
+    const blocked = spentFamilies(quota, this.accountManager.switchThreshold);
     if (blocked.length) line += `  ${red('⊘ ' + blocked.join(' '))}`;
     return line;
   }
@@ -1118,9 +1118,9 @@ export class TUI {
     if (!this.sx) { lines.push(yellow('  Unavailable in this build.')); return; }
     const key = this.config.sx?.apiKey;
     const mode = this.sx.getMode();
-    const p = this.sx.getProxy?.();
+    const proxy = this.sx.getProxy?.();
     const proxyStr = mode === 'off' ? gray('—')
-      : this.sx.isProvisioned() ? green(`${p.host}:${p.port}`)
+      : this.sx.isProvisioned() ? green(`${proxy.host}:${proxy.port}`)
       : key ? yellow('not provisioned')
       : gray('no key');
     const b = this.sxBalance;
@@ -1177,7 +1177,7 @@ export class TUI {
       hint: 'Space toggles — none selected = all accounts',
       multi: true,
       selected: preselected,
-      items: this.am.accounts.map(a => ({ label: a.name, value: a.name })),
+      items: this.accountManager.accounts.map(a => ({ label: a.name, value: a.name })),
       cb,
     });
   }
@@ -1213,40 +1213,40 @@ export class TUI {
   }
 
   _keyPick(k) {
-    const p = this.pick;
-    if (!p) { this.mode = this.pickReturn; return; }
-    const len = p.items.length;
-    if (k === 'up' || k === 'k') p.idx = Math.max(0, p.idx - 1);
-    else if (k === 'down' || k === 'j') p.idx = Math.min(len - 1, p.idx + 1);
-    else if (p.multi && (k === ' ' || k === 'x')) {
-      const v = p.items[p.idx]?.value;
-      if (v != null) { p.sel.has(v) ? p.sel.delete(v) : p.sel.add(v); }
+    const picker = this.pick;
+    if (!picker) { this.mode = this.pickReturn; return; }
+    const len = picker.items.length;
+    if (k === 'up' || k === 'k') picker.idx = Math.max(0, picker.idx - 1);
+    else if (k === 'down' || k === 'j') picker.idx = Math.min(len - 1, picker.idx + 1);
+    else if (picker.multi && (k === ' ' || k === 'x')) {
+      const v = picker.items[picker.idx]?.value;
+      if (v != null) { picker.sel.has(v) ? picker.sel.delete(v) : picker.sel.add(v); }
     }
     else if (k === 'enter') {
-      const cb = p.cb;
+      const cb = picker.cb;
       this.pick = null;
       this.mode = this.pickReturn;
-      if (p.multi) cb?.(p.items.filter(it => p.sel.has(it.value)).map(it => it.value));
-      else cb?.(p.items[p.idx]?.value ?? '');
+      if (picker.multi) cb?.(picker.items.filter(it => picker.sel.has(it.value)).map(it => it.value));
+      else cb?.(picker.items[picker.idx]?.value ?? '');
     }
     else if (k === 'esc' || k === 'q') { this.pick = null; this.mode = this.pickReturn; }
   }
 
   _renderPick(lines) {
-    const p = this.pick;
-    if (!p) return;
+    const picker = this.pick;
+    if (!picker) return;
     lines.push('');
-    lines.push(bold('  ' + p.title) + (p.hint ? dim('  — ' + p.hint) : ''));
+    lines.push(bold('  ' + picker.title) + (picker.hint ? dim('  — ' + picker.hint) : ''));
     lines.push('');
-    if (!p.items.length) {
+    if (!picker.items.length) {
       lines.push(gray('    (no accounts loaded — a route with none set serves all)'));
       return;
     }
-    p.items.forEach((it, i) => {
-      const cur = i === p.idx;
+    picker.items.forEach((it, i) => {
+      const cur = i === picker.idx;
       const cursor = cur ? cyan('▸') : ' ';
-      const mark = p.multi
-        ? (p.sel.has(it.value) ? green('[x]') : dim('[ ]'))
+      const mark = picker.multi
+        ? (picker.sel.has(it.value) ? green('[x]') : dim('[ ]'))
         : (cur ? cyan('◉') : dim('◯'));
       const paint = it.paint || (s => s);
       lines.push(`   ${cursor} ${mark} ${paint(cur ? bold(it.label) : it.label)}`);
@@ -1296,7 +1296,7 @@ export class TUI {
       : this.config.routes.findIndex(r => r.name === route.name);
     if (at >= 0) this.config.routes[at] = route; else this.config.routes.push(route);
 
-    this.am.setRoutes(this.config.routes);
+    this.accountManager.setRoutes(this.config.routes);
     try { await this.saveConfig(this.config); this._addLog(`Route "${route.name}" saved`); }
     catch (e) { this._addLog(`Failed to save route: ${e.message}`); }
     this.mode = 'routes';
@@ -1309,7 +1309,7 @@ export class TUI {
     const r = routes[idx];
     if (!r) return;
     routes.splice(idx, 1);
-    this.am.setRoutes(routes);
+    this.accountManager.setRoutes(routes);
     try { await this.saveConfig(this.config); this._addLog(`Route "${r.name}" deleted`); }
     catch (e) { this._addLog(`Failed to save: ${e.message}`); }
     this.routeIdx = Math.max(0, Math.min(idx, routes.length - 1));
@@ -1391,7 +1391,7 @@ export class TUI {
         lines.push(`   ${cursor} ${sel ? bold(name) : name} ${cyan(rpad(match, 22))} ${dim('→')} ${accts}${bucket}`);
       });
     }
-    const auto = this.am.getRoutes().filter(r => r.autocreated);
+    const auto = this.accountManager.getRoutes().filter(r => r.autocreated);
     if (auto.length) {
       lines.push('');
       lines.push(dim('  Auto-detected (not saved):'));

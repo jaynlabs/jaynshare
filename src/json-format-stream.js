@@ -9,7 +9,7 @@ export class JsonStreamFormatter {
     this.freshContainer = false; // just opened { or [
   }
 
-  nl(depth) { return '\n' + this.pad.repeat(depth); }
+  newline(depth) { return '\n' + this.pad.repeat(depth); }
 
   push(buf) {
     const text = Buffer.isBuffer(buf) ? buf.toString('latin1') : String(buf);
@@ -30,14 +30,14 @@ export class JsonStreamFormatter {
       if (ch === '}' || ch === ']') {
         this.depth--;
         if (this.freshContainer) { this.freshContainer = false; out += ch; }
-        else out += this.nl(this.depth) + ch;
+        else out += this.newline(this.depth) + ch;
         continue;
       }
 
-      if (this.freshContainer) { out += this.nl(this.depth); this.freshContainer = false; }
+      if (this.freshContainer) { out += this.newline(this.depth); this.freshContainer = false; }
 
       if (ch === '{' || ch === '[') { out += ch; this.depth++; this.freshContainer = true; continue; }
-      if (ch === ',') { out += ',' + this.nl(this.depth); continue; }
+      if (ch === ',') { out += ',' + this.newline(this.depth); continue; }
       if (ch === ':') { out += ': '; continue; }
       if (ch === '"') { this.inStr = true; out += ch; continue; }
       out += ch;

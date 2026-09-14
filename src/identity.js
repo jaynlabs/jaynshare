@@ -8,9 +8,9 @@ export function orgKey(acct) {
 export function sameIdentity(a, b) {
   if (a?.accountUuid && b?.accountUuid) {
     if (a.accountUuid !== b.accountUuid) return false;
-    const ka = orgKey(a);
-    const kb = orgKey(b);
-    if (ka && kb) return ka === kb;
+    const orgKeyA = orgKey(a);
+    const orgKeyB = orgKey(b);
+    if (orgKeyA && orgKeyB) return orgKeyA === orgKeyB;
     return true; // an org still unknown on one side never contradicts
   }
   return a?.name === b?.name;
@@ -20,9 +20,9 @@ export function sameIdentity(a, b) {
 export function distinctAccounts(a, b) {
   if (!a?.accountUuid || !b?.accountUuid) return false;
   if (a.accountUuid !== b.accountUuid) return true;
-  const ka = orgKey(a);
-  const kb = orgKey(b);
-  return !!(ka && kb && ka !== kb);
+  const orgKeyA = orgKey(a);
+  const orgKeyB = orgKey(b);
+  return !!(orgKeyA && orgKeyB && orgKeyA !== orgKeyB);
 }
 
 // The config entry a login should update, or -1. Two orgs of one person share a

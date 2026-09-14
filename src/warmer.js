@@ -19,7 +19,7 @@ export class Warmer extends IntervalJob {
     log = console.log,
   } = {}) {
     super({ intervalMs, log });
-    this.am = accountManager;
+    this.accountManager = accountManager;
     this.port = port;
     this.apiKey = apiKey;
     this.model = model;
@@ -47,7 +47,7 @@ export class Warmer extends IntervalJob {
     return this.run(async () => {
       const abort = this._abort = new AbortController();
       try {
-        const targets = this.am.accounts.filter(account => this._isWarmTarget(account));
+        const targets = this.accountManager.accounts.filter(account => this._isWarmTarget(account));
         for (const account of targets) { // sequential: one subprocess at a time
           if (abort.signal.aborted) break;
           await this.warmAccount(account, abort.signal);
@@ -62,7 +62,7 @@ export class Warmer extends IntervalJob {
     const startedAt = Date.now();
     this._record(account, { status: 'running', startedAt });
     try {
-      await this.am.ensureTokenFresh(account.index);
+      await this.accountManager.ensureTokenFresh(account.index);
       const code = await this.spawnFn(this._spawnSpec(account, signal));
       const finishedAt = Date.now();
       this._record(account, {

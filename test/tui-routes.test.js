@@ -9,7 +9,7 @@ const stripAnsi = s => s.replace(/\x1b\[[0-9;]*m/g, '');
 function makeTUI({ routes = [] } = {}) {
   const applied = { routes: null };
   const pins = { calls: [], byName: new Map() };
-  const am = {
+  const accountManager = {
     accounts: [{ name: 'a', index: 0 }, { name: 'b', index: 1 }],
     currentIndex: 0,
     switchThreshold: 0.98,
@@ -22,7 +22,7 @@ function makeTUI({ routes = [] } = {}) {
   const saved = { routes: null };
   const config = { proxy: { port: 1 }, routes: [] };
   const tui = new TUI({
-    accountManager: am, config, sx: null,
+    accountManager: accountManager, config, sx: null,
     saveConfig: async (c) => { saved.routes = JSON.parse(JSON.stringify(c.routes)); },
     syncAccounts: async () => 0, onQuit: () => {},
   });
@@ -149,7 +149,7 @@ test('TUI switch mode: Enter on the current pin clears it (toggle off)', () => {
     accounts: [{ name: 'a', eligible: true }, { name: 'b', eligible: true }],
   }];
   const { tui, pins } = makeTUI({ routes });
-  pins.byName.set('fable', tui.am.accounts[0]); // a is already pinned
+  pins.byName.set('fable', tui.accountManager.accounts[0]); // a is already pinned
 
   tui._key('s');
   tui._key('tab');                     // target fable
@@ -200,21 +200,21 @@ test('TUI switch mode: ←→ are inert for remove/toggle actions', () => {
 test('TUI: the F7 (Fable) marker sits on exactly one account — the routing target', () => {
   const future = Date.now() + 7 * 24 * 3600_000;
   const oauth = n => ({ name: n, type: 'oauth', accessToken: 't', refreshToken: 'r', expiresAt: future });
-  const am = new AccountManager([oauth('a'), oauth('b'), oauth('c')], 0.98);
-  for (const acc of am.accounts) {
+  const accountManager = new AccountManager([oauth('a'), oauth('b'), oauth('c')], 0.98);
+  for (const acc of accountManager.accounts) {
     acc.quota.unified5h = 0.1; acc.quota.unified5hReset = future;
     acc.quota.unified7d = 0.1; acc.quota.unified7dReset = future;
     acc.quota.unified7dFable = 0.2; acc.quota.unified7dFableReset = future; // all meter Fable → F7 bar shows
   }
   // a's Fable weekly is spent → Fable routes elsewhere, but a stays the default current.
-  am.accounts[0].quota.unified7dFable = 1.0;
+  accountManager.accounts[0].quota.unified7dFable = 1.0;
 
   const tui = Object.create(TUI.prototype);
-  tui.am = am; tui.mode = 'normal'; tui.selIdx = -1;
-  const routes = am.getRoutes();
-  const familyTarget = { fable: am.previewRouteIndex('claude-fable-5'), sonnet: null };
+  tui.accountManager = accountManager; tui.mode = 'normal'; tui.selIdx = -1;
+  const routes = accountManager.getRoutes();
+  const familyTarget = { fable: accountManager.previewRouteIndex('claude-fable-5'), sonnet: null };
 
-  const rows = am.accounts.map((_, i) =>
+  const rows = accountManager.accounts.map((_, i) =>
     stripAnsi(tui._renderAcct(i, { barWidth: 8, showBoth: true, routes, genRoutes: [], familyTarget })));
   const marked = rows.filter(r => /►\s*F7/.test(r));
   assert.equal(marked.length, 1, 'exactly one F7 marker across all accounts');

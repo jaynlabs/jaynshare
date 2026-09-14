@@ -25,29 +25,29 @@ export function currentVersion(root = packageRoot()) {
 }
 
 export function compareVersions(a, b) {
-  const nums = (v) => String(v).split('+')[0].split('-')[0].split('.').map((n) => parseInt(n, 10) || 0);
-  const pa = nums(a), pb = nums(b);
+  const numericParts = (v) => String(v).split('+')[0].split('-')[0].split('.').map((n) => parseInt(n, 10) || 0);
+  const versionAParts = numericParts(a), versionBParts = numericParts(b);
   for (let i = 0; i < 3; i++) {
-    const d = (pa[i] || 0) - (pb[i] || 0);
-    if (d) return d;
+    const diff = (versionAParts[i] || 0) - (versionBParts[i] || 0);
+    if (diff) return diff;
   }
   return 0;
 }
 
 function npmGlobalRoot() {
   try {
-    const r = spawnSync('npm', ['root', '-g'], { encoding: 'utf8', timeout: 5000 });
-    if (r.status === 0 && r.stdout) return r.stdout.trim();
+    const result = spawnSync('npm', ['root', '-g'], { encoding: 'utf8', timeout: 5000 });
+    if (result.status === 0 && result.stdout) return result.stdout.trim();
   } catch { /* npm missing */ }
   return null;
 }
 
 export function installKind({ root = packageRoot(), globalRoot = npmGlobalRoot } = {}) {
   if (existsSync(join(root, '.git'))) return 'git';
-  const norm = root.split('\\').join('/');
-  if (!norm.includes('/node_modules/')) return 'unknown';
-  const g = typeof globalRoot === 'function' ? globalRoot() : globalRoot;
-  if (g && norm.startsWith(g.split('\\').join('/'))) return 'global';
+  const normalizedRoot = root.split('\\').join('/');
+  if (!normalizedRoot.includes('/node_modules/')) return 'unknown';
+  const globalRootPath = typeof globalRoot === 'function' ? globalRoot() : globalRoot;
+  if (globalRootPath && normalizedRoot.startsWith(globalRootPath.split('\\').join('/'))) return 'global';
   return 'local';
 }
 
@@ -75,8 +75,8 @@ function defaultCacheFile() {
 async function readCache(path) {
   try { return JSON.parse(await readFile(path, 'utf8')); } catch { return {}; }
 }
-async function writeCache(path, obj) {
-  try { await writeFile(path, JSON.stringify(obj)); } catch { /* best effort */ }
+async function writeCache(path, cache) {
+  try { await writeFile(path, JSON.stringify(cache)); } catch { /* best effort */ }
 }
 
 export async function checkForUpdate({
@@ -101,11 +101,11 @@ export async function checkForUpdate({
 }
 
 export function runUpdate(version = 'latest', { spawnImpl = spawnSync } = {}) {
-  const r = spawnImpl('npm', ['install', '-g', `${PKG_NAME}@${version}`], {
+  const result = spawnImpl('npm', ['install', '-g', `${PKG_NAME}@${version}`], {
     stdio: 'inherit',
     timeout: 180000,
   });
-  return !!r && !r.error && r.status === 0;
+  return !!result && !result.error && result.status === 0;
 }
 
 export async function autoUpdate({ config = {}, force = false, log = console.error } = {}) {

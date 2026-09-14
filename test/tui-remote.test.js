@@ -95,7 +95,7 @@ async function makeSession(t, { routes, status = statusFixture() } = {}) {
     onQuit: () => quits.push(true),
   });
   session.tui.render = () => {}; // bypass the terminal, as the other TUI tests do
-  return { ...fake, control, session, tui: session.tui, am: session.am, quits };
+  return { ...fake, control, session, tui: session.tui, accountManager: session.accountManager, quits };
 }
 
 // ── control client ───────────────────────────────────────────
@@ -177,99 +177,99 @@ test('a rejection reported with 200 is still a rejection', async (t) => {
 // ── status → account-manager adapter ─────────────────────────
 
 test('a status payload fills the read surface the dashboard renders from', async (t) => {
-  const { am } = await makeSession(t);
-  am.applyStatus(statusFixture());
+  const { accountManager } = await makeSession(t);
+  accountManager.applyStatus(statusFixture());
 
-  assert.deepEqual(am.accounts.map(a => a.name), ['alpha', 'bravo']);
-  assert.deepEqual(am.accounts.map(a => a.index), [0, 1]);
-  assert.equal(am.accounts[0].quota.unified7dFable, 0.1);
-  assert.equal(am.currentIndex, 1); // "bravo"
-  assert.equal(am.switchThreshold, 0.98);
-  assert.equal(am.distributeSessions, true);
-  assert.deepEqual(am.sessionStats(), { active: 2, known: 3, perAccount: { 0: 1, 1: 1 } });
-  assert.equal(am.getRoutes()[0].name, 'fable');
-  assert.equal(am.connected, true);
+  assert.deepEqual(accountManager.accounts.map(a => a.name), ['alpha', 'bravo']);
+  assert.deepEqual(accountManager.accounts.map(a => a.index), [0, 1]);
+  assert.equal(accountManager.accounts[0].quota.unified7dFable, 0.1);
+  assert.equal(accountManager.currentIndex, 1); // "bravo"
+  assert.equal(accountManager.switchThreshold, 0.98);
+  assert.equal(accountManager.distributeSessions, true);
+  assert.deepEqual(accountManager.sessionStats(), { active: 2, known: 3, perAccount: { 0: 1, 1: 1 } });
+  assert.equal(accountManager.getRoutes()[0].name, 'fable');
+  assert.equal(accountManager.connected, true);
 });
 
 test('an unknown current account marks nothing current rather than guessing', async (t) => {
-  const { am } = await makeSession(t);
-  am.applyStatus(statusFixture({ currentAccount: 'gone' }));
-  assert.equal(am.currentIndex, -1);
+  const { accountManager } = await makeSession(t);
+  accountManager.applyStatus(statusFixture({ currentAccount: 'gone' }));
+  assert.equal(accountManager.currentIndex, -1);
 });
 
 test('previewRouteIndex resolves a route target by glob', async (t) => {
-  const { am } = await makeSession(t);
-  am.applyStatus(statusFixture());
-  assert.equal(am.previewRouteIndex('claude-fable-5'), 0); // route target "alpha"
-  assert.equal(am.previewRouteIndex('claude-opus-4'), null); // no route matches
+  const { accountManager } = await makeSession(t);
+  accountManager.applyStatus(statusFixture());
+  assert.equal(accountManager.previewRouteIndex('claude-fable-5'), 0); // route target "alpha"
+  assert.equal(accountManager.previewRouteIndex('claude-opus-4'), null); // no route matches
 });
 
 test('a route with no serving account yields no marker', async (t) => {
-  const { am } = await makeSession(t);
+  const { accountManager } = await makeSession(t);
   const status = statusFixture();
   status.routes[0].target = null;
-  am.applyStatus(status);
-  assert.equal(am.previewRouteIndex('claude-fable-5'), null);
+  accountManager.applyStatus(status);
+  assert.equal(accountManager.previewRouteIndex('claude-fable-5'), null);
 });
 
 test('a status payload with no routes and no quota data renders nothing rather than throwing', async (t) => {
-  const { am } = await makeSession(t);
-  am.applyStatus({ accounts: [{ name: 'alpha', type: 'oauth', status: 'active' }] });
-  assert.deepEqual(am.getRoutes(), []);
-  assert.equal(am.previewRouteIndex('claude-fable-5'), null);
-  assert.deepEqual(am.accounts[0].quota, {});
-  assert.deepEqual(am.sessionStats(), { active: 0, known: 0, perAccount: {} });
-  am.refreshExpiredQuotas(); // server-side concern; must be a harmless no-op here
+  const { accountManager } = await makeSession(t);
+  accountManager.applyStatus({ accounts: [{ name: 'alpha', type: 'oauth', status: 'active' }] });
+  assert.deepEqual(accountManager.getRoutes(), []);
+  assert.equal(accountManager.previewRouteIndex('claude-fable-5'), null);
+  assert.deepEqual(accountManager.accounts[0].quota, {});
+  assert.deepEqual(accountManager.sessionStats(), { active: 0, known: 0, perAccount: {} });
+  accountManager.refreshExpiredQuotas(); // server-side concern; must be a harmless no-op here
 });
 
 test('a payload missing the fields the renderer formats reads as unknown, not a crash', async (t) => {
-  const { am, tui } = await makeSession(t);
-  am.applyStatus({ accounts: [{ status: 'active' }, {}] });
-  assert.deepEqual(am.accounts.map(a => [a.name, a.type]), [['(unnamed)', '?'], ['(unnamed)', '?']]);
+  const { accountManager, tui } = await makeSession(t);
+  accountManager.applyStatus({ accounts: [{ status: 'active' }, {}] });
+  assert.deepEqual(accountManager.accounts.map(a => [a.name, a.type]), [['(unnamed)', '?'], ['(unnamed)', '?']]);
   const out = renderToString(tui);
   assert.match(out, /\(unnamed\)/);
 });
 
 test('a reply that is not a status payload is a connection problem, not an empty fleet', async (t) => {
-  const { session, am, tui } = await makeSession(t, {
+  const { session, accountManager, tui } = await makeSession(t, {
     routes: { 'GET /jaynshare/status': json({ hello: 'this is some other service' }) },
   });
   await session.poll();
-  assert.equal(am.connected, false);
+  assert.equal(accountManager.connected, false);
   assert.match(tui.log[0].msg, /not a jaynshare status endpoint/);
-  assert.deepEqual(am.accounts, []);
+  assert.deepEqual(accountManager.accounts, []);
 });
 
 test('an empty but genuine fleet is reported as such, without pointing at dead keys', async (t) => {
-  const { session, am, tui } = await makeSession(t, {
+  const { session, accountManager, tui } = await makeSession(t, {
     routes: { 'GET /jaynshare/status': json({ accounts: [], switchThreshold: 0.98 }) },
   });
   await session.poll();
-  assert.equal(am.connected, true);
+  assert.equal(accountManager.connected, true);
   const out = renderToString(tui);
   assert.match(out, /server reports no accounts/);
   assert.doesNotMatch(out, /\[g\]/); // never point at a key attach mode ignores
 });
 
 test('a lost connection keeps the last snapshot and says it is stale', async (t) => {
-  const { am } = await makeSession(t);
-  am.applyStatus(statusFixture());
-  am.markDisconnected(new Error('ECONNREFUSED'));
+  const { accountManager } = await makeSession(t);
+  accountManager.applyStatus(statusFixture());
+  accountManager.markDisconnected(new Error('ECONNREFUSED'));
 
-  assert.equal(am.connected, false);
-  assert.match(am.lastError, /ECONNREFUSED/);
-  assert.deepEqual(am.accounts.map(a => a.name), ['alpha', 'bravo']); // last known state kept
+  assert.equal(accountManager.connected, false);
+  assert.match(accountManager.lastError, /ECONNREFUSED/);
+  assert.deepEqual(accountManager.accounts.map(a => a.name), ['alpha', 'bravo']); // last known state kept
 
-  am.applyStatus(statusFixture());
-  assert.equal(am.connected, true);
-  assert.equal(am.lastError, null);
+  accountManager.applyStatus(statusFixture());
+  assert.equal(accountManager.connected, true);
+  assert.equal(accountManager.lastError, null);
 });
 
 // ── polling ──────────────────────────────────────────────────
 
 test('a poll applies the payload; a failing poll flags the header and logs once', async (t) => {
   let fail = false;
-  const { session, am, tui } = await makeSession(t, {
+  const { session, accountManager, tui } = await makeSession(t, {
     routes: {
       'GET /jaynshare/status': (req, res) => {
         if (fail) { res.writeHead(503); res.end('down'); return; }
@@ -279,12 +279,12 @@ test('a poll applies the payload; a failing poll flags the header and logs once'
   });
 
   await session.poll();
-  assert.equal(am.connected, true);
-  assert.equal(am.accounts.length, 2);
+  assert.equal(accountManager.connected, true);
+  assert.equal(accountManager.accounts.length, 2);
 
   fail = true;
   await session.poll();
-  assert.equal(am.connected, false);
+  assert.equal(accountManager.connected, false);
   const dropped = tui.log.filter(l => /lost|503/i.test(l.msg));
   assert.equal(dropped.length, 1);
 
@@ -324,12 +324,12 @@ test('a poll that never gets an answer becomes a lost connection, not a live vie
   const session = createAttachSession({ control, config: { proxy: { port: fake.port } }, onQuit: () => {} });
   session.tui.render = () => {};
 
-  await session.am.applyStatus(statusFixture()); // start from a good snapshot
+  await session.accountManager.applyStatus(statusFixture()); // start from a good snapshot
   await session.poll();
 
-  assert.equal(session.am.connected, false);
+  assert.equal(session.accountManager.connected, false);
   assert.match(session.tui.log[0].msg, /no reply within/);
-  assert.deepEqual(session.am.accounts.map(a => a.name), ['alpha', 'bravo']); // snapshot kept, marked stale
+  assert.deepEqual(session.accountManager.accounts.map(a => a.name), ['alpha', 'bravo']); // snapshot kept, marked stale
   session.stop();
 });
 
@@ -346,21 +346,21 @@ test('the poll deadline is derived from the poll interval', async (t) => {
 });
 
 test('a general route renders, and a half-specified one does not take the dashboard down', async (t) => {
-  const { tui, am } = await makeSession(t);
+  const { tui, accountManager } = await makeSession(t);
   const status = statusFixture();
   status.routes = [
     { name: 'bulk', match: ['*opus*'], color: 'green', autocreated: false, pinned: 'alpha', target: 'alpha',
       accounts: [{ name: 'alpha', eligible: true }] },
     { name: 'broken' }, // no match, no accounts, no target
   ];
-  am.applyStatus(status);
+  accountManager.applyStatus(status);
 
-  assert.deepEqual(am.getRoutes().map(r => r.accounts), [[{ name: 'alpha', eligible: true }], []]);
-  assert.deepEqual(am.getRoutes()[1].match, []);
+  assert.deepEqual(accountManager.getRoutes().map(r => r.accounts), [[{ name: 'alpha', eligible: true }], []]);
+  assert.deepEqual(accountManager.getRoutes()[1].match, []);
   const out = renderToString(tui);
   assert.match(out, /alpha/);
   assert.match(out, /bravo/);
-  assert.equal(am.previewRouteIndex('claude-opus-4'), 0); // the general route still resolves
+  assert.equal(accountManager.previewRouteIndex('claude-opus-4'), 0); // the general route still resolves
 });
 
 test('the control client talks to the host it was given', async () => {
@@ -391,8 +391,8 @@ test('on loopback a 401 blames the port, not the key the server never checks', a
 // ── keys ─────────────────────────────────────────────────────
 
 test('keys that would need write endpoints are inert in attach mode', async (t) => {
-  const { tui, am, seen } = await makeSession(t);
-  am.applyStatus(statusFixture());
+  const { tui, accountManager, seen } = await makeSession(t);
+  accountManager.applyStatus(statusFixture());
   for (const k of ['g', 'd', 'p', 'a', 'r']) tui._key(k);
   await nothingHappens();
   assert.equal(tui.mode, 'normal');
@@ -419,8 +419,8 @@ test('R reports a failed reload instead of pretending it worked', async (t) => {
 });
 
 test('s switches the running server to the selected account', async (t) => {
-  const { tui, am, seen } = await makeSession(t);
-  am.applyStatus(statusFixture());
+  const { tui, accountManager, seen } = await makeSession(t);
+  accountManager.applyStatus(statusFixture());
 
   tui._key('s');
   assert.equal(tui.mode, 'select');
@@ -434,13 +434,13 @@ test('s switches the running server to the selected account', async (t) => {
 });
 
 test('switching to an account that cannot serve says so', async (t) => {
-  const { tui, am } = await makeSession(t, {
+  const { tui, accountManager } = await makeSession(t, {
     routes: {
       'GET /jaynshare/status': json(statusFixture()),
       'POST /jaynshare/switch': json({ ok: true, account: 'alpha', eligible: false }),
     },
   });
-  am.applyStatus(statusFixture());
+  accountManager.applyStatus(statusFixture());
   tui._key('s');
   tui._key('enter');
   await logged(tui);
@@ -448,7 +448,7 @@ test('switching to an account that cannot serve says so', async (t) => {
 });
 
 test('the server\'s own reason for ineligibility is what gets shown', async (t) => {
-  const { tui, am } = await makeSession(t, {
+  const { tui, accountManager } = await makeSession(t, {
     routes: {
       'GET /jaynshare/status': json(statusFixture()),
       'POST /jaynshare/switch': json({
@@ -457,7 +457,7 @@ test('the server\'s own reason for ineligibility is what gets shown', async (t) 
       }),
     },
   });
-  am.applyStatus(statusFixture());
+  accountManager.applyStatus(statusFixture());
   tui._key('s');
   tui._key('enter');
   await logged(tui);
@@ -465,7 +465,7 @@ test('the server\'s own reason for ineligibility is what gets shown', async (t) 
 });
 
 test('a reason carrying control characters cannot corrupt the frame', async (t) => {
-  const { tui, am } = await makeSession(t, {
+  const { tui, accountManager } = await makeSession(t, {
     routes: {
       'GET /jaynshare/status': json(statusFixture()),
       'POST /jaynshare/switch': json({
@@ -474,7 +474,7 @@ test('a reason carrying control characters cannot corrupt the frame', async (t) 
       }),
     },
   });
-  am.applyStatus(statusFixture());
+  accountManager.applyStatus(statusFixture());
   tui._key('s');
   tui._key('enter');
   await logged(tui);
@@ -487,14 +487,14 @@ test('a reason carrying control characters cannot corrupt the frame', async (t) 
 });
 
 test('a switch reports the name the server settled on', async (t) => {
-  const { tui, am } = await makeSession(t, {
+  const { tui, accountManager } = await makeSession(t, {
     routes: {
       'GET /jaynshare/status': json(statusFixture()),
       // resolveAccountPin canonicalises what it is given; the echo is the truth.
       'POST /jaynshare/switch': json({ ok: true, account: 'bravo (Acme)' }),
     },
   });
-  am.applyStatus(statusFixture());
+  accountManager.applyStatus(statusFixture());
   tui._key('s');
   tui._key('enter');
   await logged(tui);
@@ -502,10 +502,10 @@ test('a switch reports the name the server settled on', async (t) => {
 });
 
 test('a rejected switch is reported and leaves the view alone', async (t) => {
-  const { tui, am } = await makeSession(t, {
+  const { tui, accountManager } = await makeSession(t, {
     routes: { 'GET /jaynshare/status': json(statusFixture()) }, // no switch route
   });
-  am.applyStatus(statusFixture());
+  accountManager.applyStatus(statusFixture());
   tui._key('s');
   tui._key('enter');
   await logged(tui);
@@ -514,11 +514,11 @@ test('a rejected switch is reported and leaves the view alone', async (t) => {
 });
 
 test('a row that vanished between polls reports that nothing happened', async (t) => {
-  const { tui, am, seen } = await makeSession(t);
-  am.applyStatus(statusFixture());
+  const { tui, accountManager, seen } = await makeSession(t);
+  accountManager.applyStatus(statusFixture());
   tui._key('s');
   tui._key('down'); // cursor on the second account
-  am.applyStatus(statusFixture({ accounts: [statusFixture().accounts[0]] })); // it goes away
+  accountManager.applyStatus(statusFixture({ accounts: [statusFixture().accounts[0]] })); // it goes away
   tui._key('enter');
   await logged(tui);
 
@@ -528,8 +528,8 @@ test('a row that vanished between polls reports that nothing happened', async (t
 });
 
 test('route pinning is not offered in attach mode', async (t) => {
-  const { tui, am } = await makeSession(t);
-  am.applyStatus(statusFixture());
+  const { tui, accountManager } = await makeSession(t);
+  accountManager.applyStatus(statusFixture());
   tui._key('s');
   tui._key('right');
   tui._key('tab');
@@ -537,8 +537,8 @@ test('route pinning is not offered in attach mode', async (t) => {
 });
 
 test('switching with nothing marked current starts at the first account', async (t) => {
-  const { tui, am, seen } = await makeSession(t);
-  am.applyStatus(statusFixture({ currentAccount: 'gone' }));
+  const { tui, accountManager, seen } = await makeSession(t);
+  accountManager.applyStatus(statusFixture({ currentAccount: 'gone' }));
   tui._key('s');
   tui._key('enter');
   await logged(tui);
@@ -564,8 +564,8 @@ function renderToString(tui) {
 }
 
 test('the dashboard renders accounts from a status payload alone', async (t) => {
-  const { tui, am } = await makeSession(t);
-  am.applyStatus(statusFixture());
+  const { tui, accountManager } = await makeSession(t);
+  accountManager.applyStatus(statusFixture());
   const out = renderToString(tui);
 
   assert.match(out, /alpha/);
@@ -577,9 +577,9 @@ test('the dashboard renders accounts from a status payload alone', async (t) => 
 });
 
 test('a stale dashboard says so instead of looking live', async (t) => {
-  const { tui, am } = await makeSession(t);
-  am.applyStatus(statusFixture());
-  am.markDisconnected(new Error('ECONNREFUSED'));
+  const { tui, accountManager } = await makeSession(t);
+  accountManager.applyStatus(statusFixture());
+  accountManager.markDisconnected(new Error('ECONNREFUSED'));
   const out = renderToString(tui);
 
   assert.match(out, /▼/); // disconnected marker in the header
@@ -587,8 +587,8 @@ test('a stale dashboard says so instead of looking live', async (t) => {
 });
 
 test('attach mode does not present an activity stream it cannot see', async (t) => {
-  const { tui, am } = await makeSession(t);
-  am.applyStatus(statusFixture());
+  const { tui, accountManager } = await makeSession(t);
+  accountManager.applyStatus(statusFixture());
   const out = renderToString(tui);
   assert.doesNotMatch(out, /Activity/);
 });

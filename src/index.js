@@ -290,8 +290,8 @@ function persistRefreshedTokens(accountManager, config) {
 async function createSxManager(config) {
   const sx = new SxManager({ log: console.error });
   if (config.sx?.apiKey) {
-    const r = await sx.configure(config.sx.apiKey, config.sx.mode);
-    if (!r.ok) console.error(`[Jaynshare] sx.org disabled: ${r.error}`);
+    const configured = await sx.configure(config.sx.apiKey, config.sx.mode);
+    if (!configured.ok) console.error(`[Jaynshare] sx.org disabled: ${configured.error}`);
   } else if (config.sx?.mode) {
     await sx.setMode(config.sx.mode);
   }
@@ -332,12 +332,12 @@ function makeReloadAccounts({ config, accountManager, sx, prober, warmer }) {
 function writeRuntimeConfig(diskConfig, config, accountManager) {
   // Live tokens win; disk-only fields (importFrom) survive.
   diskConfig.accounts = config.accounts.map((a, i) => {
-    const am = accountManager.accounts[i];
-    const live = am ? {
+    const liveAccount = accountManager.accounts[i];
+    const live = liveAccount ? {
       ...a,
-      accessToken: am.credential,
-      refreshToken: am.refreshToken,
-      expiresAt: am.expiresAt,
+      accessToken: liveAccount.credential,
+      refreshToken: liveAccount.refreshToken,
+      expiresAt: liveAccount.expiresAt,
     } : a;
     const diskAcct = diskConfig.accounts.find(d => sameIdentity(d, a));
     return diskAcct ? { ...diskAcct, ...live } : live;
@@ -617,10 +617,10 @@ async function runCommand() {
 
 // jaynshare flags come before an optional `--`; everything after it goes to claude verbatim.
 function splitRunArgs(rest) {
-  const sep = rest.indexOf('--');
-  if (sep >= 0) return { flags: rest.slice(0, sep), claudeArgs: rest.slice(sep + 1) };
-  const ours = new Set(['--mitm', '--no-mitm', '--auto-fallback']); // --mitm is a no-op
-  return { flags: rest, claudeArgs: rest.filter(a => !ours.has(a)) };
+  const separatorIndex = rest.indexOf('--');
+  if (separatorIndex >= 0) return { flags: rest.slice(0, separatorIndex), claudeArgs: rest.slice(separatorIndex + 1) };
+  const jaynshareFlags = new Set(['--mitm', '--no-mitm', '--auto-fallback']); // --mitm is a no-op
+  return { flags: rest, claudeArgs: rest.filter(a => !jaynshareFlags.has(a)) };
 }
 
 /** The child's environment, pointed at the proxy in forward-proxy or base-URL mode. */
@@ -1010,13 +1010,13 @@ async function serviceCommand() {
 
   switch (sub) {
     case 'install': {
-      const res = await installService({ configPath });
-      if (!res.ok) { console.error(`jaynshare service install failed: ${res.error}`); process.exit(1); }
+      const result = await installService({ configPath });
+      if (!result.ok) { console.error(`jaynshare service install failed: ${result.error}`); process.exit(1); }
       break;
     }
     case 'uninstall': {
-      const res = await uninstallService();
-      if (!res.ok) { console.error(`jaynshare service uninstall failed: ${res.error}`); process.exit(1); }
+      const result = await uninstallService();
+      if (!result.ok) { console.error(`jaynshare service uninstall failed: ${result.error}`); process.exit(1); }
       break;
     }
     case 'print':
@@ -1223,8 +1223,8 @@ function listRoutes(config) {
 
 async function addRoute(config) {
   const route = readRouteFlags(config);
-  const at = config.routes.findIndex(r => r.name === route.name);
-  if (at >= 0) { config.routes[at] = route; console.log(`Updated route "${route.name}"`); }
+  const existingIndex = config.routes.findIndex(r => r.name === route.name);
+  if (existingIndex >= 0) { config.routes[existingIndex] = route; console.log(`Updated route "${route.name}"`); }
   else { config.routes.push(route); console.log(`Added route "${route.name}"`); }
   await saveConfig(config);
   await notifyRunningServer(config);
@@ -1294,8 +1294,8 @@ async function priorityCommand() {
   } else if (args.includes('--last')) {
     priority = Math.max(0, ...priorities) + 1;
   } else {
-    const numTok = args.slice(2).find(t => /^-?\d+$/.test(t));
-    priority = numTok != null ? parseInt(numTok, 10) : NaN;
+    const priorityToken = args.slice(2).find(t => /^-?\d+$/.test(t));
+    priority = priorityToken != null ? parseInt(priorityToken, 10) : NaN;
     if (Number.isNaN(priority)) {
       console.error('Provide an integer priority, or --first / --last.');
       process.exit(1);
@@ -1600,10 +1600,10 @@ async function upsertOAuthAccount(config, { name, creds, source = 'unknown' }) {
   }
   const account = oauthEntry({ name: name || derivedAccountName(config.accounts, profile), creds, source, profile });
 
-  const at = findUpsertTarget(config.accounts, account);
-  if (at >= 0) {
-    const prev = config.accounts[at];
-    config.accounts[at] = { ...prev, ...account, name: prev.name }; // keeps disk-only fields
+  const existingIndex = findUpsertTarget(config.accounts, account);
+  if (existingIndex >= 0) {
+    const prev = config.accounts[existingIndex];
+    config.accounts[existingIndex] = { ...prev, ...account, name: prev.name }; // keeps disk-only fields
     console.log(`Updated account "${prev.name}"`);
   } else {
     // A name the user chose stands as typed; only a derived one gains an org suffix.
@@ -1651,21 +1651,21 @@ async function syncAccountsFromDisk(diskConfig, memConfig, accountManager) {
   let added = 0;
   const claim = oneToOneClaim(accountManager);
 
-  for (const diskAcct of diskConfig.accounts) {
-    const mgrIdx = claim(diskAcct);
+  for (const diskAccount of diskConfig.accounts) {
+    const managerIndex = claim(diskAccount);
 
-    if (mgrIdx < 0) {
-      memConfig.accounts.push(diskAcct);
-      accountManager.addAccount(diskAcct);
+    if (managerIndex < 0) {
+      memConfig.accounts.push(diskAccount);
+      accountManager.addAccount(diskAccount);
       added++;
-      console.log(`[Jaynshare] Picked up new account "${diskAcct.name}" from config`);
+      console.log(`[Jaynshare] Picked up new account "${diskAccount.name}" from config`);
       continue;
     }
 
-    const mgr = accountManager.accounts[mgrIdx];
-    applyDiskFields(mgr, diskAcct, accountManager);
-    const freshCred = await readDiskCredential(diskAcct);
-    if (freshCred) applyCredential(mgr, freshCred, accountManager);
+    const account = accountManager.accounts[managerIndex];
+    applyDiskFields(account, diskAccount, accountManager);
+    const freshCredential = await readDiskCredential(diskAccount);
+    if (freshCredential) applyCredential(account, freshCredential, accountManager);
   }
   return added;
 }
@@ -1673,9 +1673,9 @@ async function syncAccountsFromDisk(diskConfig, memConfig, accountManager) {
 /** Each disk entry claims one manager account, so same-person/different-org entries pair 1:1. */
 function oneToOneClaim(accountManager) {
   const claimed = new Set();
-  return (diskAcct) => {
+  return (diskAccount) => {
     for (let i = 0; i < accountManager.accounts.length; i++) {
-      if (!claimed.has(i) && sameIdentity(accountManager.accounts[i], diskAcct)) {
+      if (!claimed.has(i) && sameIdentity(accountManager.accounts[i], diskAccount)) {
         claimed.add(i);
         return i;
       }
@@ -1685,48 +1685,48 @@ function oneToOneClaim(accountManager) {
   };
 }
 
-function applyDiskFields(mgr, diskAcct, accountManager) {
-  if (diskAcct.orgUuid && !mgr.orgUuid) mgr.orgUuid = diskAcct.orgUuid;
-  if (diskAcct.orgName && !mgr.orgName) mgr.orgName = diskAcct.orgName;
-  if (diskAcct.name && mgr.name !== diskAcct.name) mgr.name = diskAcct.name;
-  if (diskAcct.priority != null && mgr.priority !== diskAcct.priority) mgr.priority = diskAcct.priority;
-  const wantDisabled = !!diskAcct.disabled;
-  if (mgr.disabled !== wantDisabled) accountManager.setDisabled(mgr.index, wantDisabled);
+function applyDiskFields(account, diskAccount, accountManager) {
+  if (diskAccount.orgUuid && !account.orgUuid) account.orgUuid = diskAccount.orgUuid;
+  if (diskAccount.orgName && !account.orgName) account.orgName = diskAccount.orgName;
+  if (diskAccount.name && account.name !== diskAccount.name) account.name = diskAccount.name;
+  if (diskAccount.priority != null && account.priority !== diskAccount.priority) account.priority = diskAccount.priority;
+  const wantDisabled = !!diskAccount.disabled;
+  if (account.disabled !== wantDisabled) accountManager.setDisabled(account.index, wantDisabled);
 }
 
 /** The credential the disk entry now carries, re-imported when it names a source file. */
-async function readDiskCredential(diskAcct) {
-  if (diskAcct.type === 'apikey') return diskAcct.apiKey ? { apiKey: diskAcct.apiKey } : null;
-  if (diskAcct.type !== 'oauth') return null;
-  if (diskAcct.importFrom) {
+async function readDiskCredential(diskAccount) {
+  if (diskAccount.type === 'apikey') return diskAccount.apiKey ? { apiKey: diskAccount.apiKey } : null;
+  if (diskAccount.type !== 'oauth') return null;
+  if (diskAccount.importFrom) {
     try {
-      const creds = await importCredentials(diskAcct.importFrom);
+      const creds = await importCredentials(diskAccount.importFrom);
       return { accessToken: creds.accessToken, refreshToken: creds.refreshToken, expiresAt: creds.expiresAt };
     } catch (err) {
-      console.error(`[Jaynshare] Re-import failed for "${diskAcct.name}": ${err.message}`);
+      console.error(`[Jaynshare] Re-import failed for "${diskAccount.name}": ${err.message}`);
       return null;
     }
   }
-  if (!diskAcct.accessToken) return null;
-  return { accessToken: diskAcct.accessToken, refreshToken: diskAcct.refreshToken, expiresAt: diskAcct.expiresAt };
+  if (!diskAccount.accessToken) return null;
+  return { accessToken: diskAccount.accessToken, refreshToken: diskAccount.refreshToken, expiresAt: diskAccount.expiresAt };
 }
 
-function applyCredential(mgr, freshCred, accountManager) {
-  if (freshCred.accessToken) {
-    const changed = mgr.credential !== freshCred.accessToken
-      || mgr.refreshToken !== freshCred.refreshToken;
-    const diskIsStaler = freshCred.expiresAt && mgr.expiresAt
-      && freshCred.expiresAt < mgr.expiresAt;
+function applyCredential(account, freshCredential, accountManager) {
+  if (freshCredential.accessToken) {
+    const changed = account.credential !== freshCredential.accessToken
+      || account.refreshToken !== freshCredential.refreshToken;
+    const diskIsStaler = freshCredential.expiresAt && account.expiresAt
+      && freshCredential.expiresAt < account.expiresAt;
     if (changed && !diskIsStaler) {
-      accountManager.updateAccountTokens(mgr.index, freshCred);
-      console.log(`[Jaynshare] Refreshed credentials for "${mgr.name}"`);
+      accountManager.updateAccountTokens(account.index, freshCredential);
+      console.log(`[Jaynshare] Refreshed credentials for "${account.name}"`);
     }
     return;
   }
-  if (freshCred.apiKey && mgr.credential !== freshCred.apiKey) {
-    mgr.credential = freshCred.apiKey;
-    if (mgr.status === 'error') mgr.status = 'active';
-    console.log(`[Jaynshare] Updated API key for "${mgr.name}"`);
+  if (freshCredential.apiKey && account.credential !== freshCredential.apiKey) {
+    account.credential = freshCredential.apiKey;
+    if (account.status === 'error') account.status = 'active';
+    console.log(`[Jaynshare] Updated API key for "${account.name}"`);
   }
 }
 
