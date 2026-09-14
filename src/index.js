@@ -30,7 +30,6 @@ import { AuditLog, auditHooks } from './audit-log.js';
 const args = process.argv.slice(2);
 const command = args[0];
 
-// One handler per command name; aliases share a handler.
 const COMMANDS = {
   server: serverCommand,
   run: runCommand,
@@ -63,23 +62,16 @@ const COMMANDS = {
   '-h': showHelp,
 };
 
-// Commands that must NOT be followed by process.exit(0). `server` and `run`
-// return while still owning the process — exiting there would kill the proxy the
-// moment it finished starting — and help lets stdout drain on its own rather
-// than risk an exit truncating a piped write.
+// `server` and `run` return while still owning the process; help lets a piped stdout drain.
 const NO_EXIT = new Set(['server', 'run', 'help', '--help', '-h']);
 
 const [handler, exitWhenDone] = resolveCommand(command);
 await handler();
 if (exitWhenDone) process.exit(0);
 
-/** Map a command name to its handler and whether to exit once it returns. */
 function resolveCommand(name) {
-  // Object.hasOwn rather than a truthiness check: `jaynshare toString` would
-  // otherwise resolve to an inherited Object.prototype method and "succeed".
   if (Object.hasOwn(COMMANDS, name)) return [COMMANDS[name], !NO_EXIT.has(name)];
-  // No command at all, or a bare server flag like `--headless`: start the server.
-  if (!name || name.startsWith('-')) return [serverCommand, false];
+  if (!name || name.startsWith('-')) return [serverCommand, false]; // bare flags start the server
   console.error(`Unknown command: ${name}\n`);
   showHelp();
   process.exit(1);
@@ -100,16 +92,12 @@ async function serverCommand() {
   await restoreQuota(accountManager);
   persistRefreshedTokens(accountManager, config);
 
-  // Persisted every minute below, and once more on shutdown.
   const persistQuotaState = () =>
     saveState({ quota: accountManager.exportQuotaState() })
       .catch(err => console.error(`[Jaynshare] Failed to save quota state: ${err.message}`));
 
   const port = config.proxy.port;
-  // Bind loopback by default so the proxy isn't reachable off-box (it injects
-  // account tokens and — via CONNECT — can relay arbitrarily). Opt into a wider
-  // bind explicitly with JAYNSHARE_HOST or config.proxy.host (e.g. '0.0.0.0'),
-  // in which case set proxy.apiKey so the auth gate protects remote clients.
+  // A wider bind needs proxy.apiKey: the proxy injects tokens and relays CONNECT.
   const bindHost = process.env.JAYNSHARE_HOST || config.proxy.host || '127.0.0.1';
   const headless = args.includes('--headless') || args.includes('--no-tui');
   const useTUI = !headless && process.stdout.isTTY && process.stdin.isTTY;
@@ -118,11 +106,6 @@ async function serverCommand() {
 
   const sx = await createSxManager(config);
 
-  // Both schedulers are opt-in (quotaProbeSeconds / warmupSeconds, 0 = off) and
-  // inert until start(), so they are constructed here — the TUI, the reload path
-  // and the status hook all need to reach them — and started once we listen.
-  // The warmer spawns a minimal `claude` per idle account through this proxy,
-  // pinned via /jaynshare-account/<index>, so it needs our own port and key.
   const prober = new Prober(accountManager, { intervalMs: (config.quotaProbeSeconds || 0) * 1000 });
   const warmer = new Warmer(accountManager, {
     intervalMs: (config.warmupSeconds || 0) * 1000,
@@ -139,12 +122,8 @@ async function serverCommand() {
       accountManager, config, sx, activityLogPath,
       saveConfig: () => atomicConfigUpdate(diskConfig => writeRuntimeConfig(diskConfig, config, accountManager)),
       syncAccounts: reloadAccounts,
-      // `p` key: on-demand fleet-wide quota refresh.
       probeQuota: () => prober.probeAll(),
-      // ctrl-c / q from the TUI: funnel through the same idempotent shutdown as
-      // POSIX signals (defined below). In raw mode ctrl-c never reaches the OS as
-      // a signal, so without this the process would only tear down via keypress.
-      onQuit: () => shutdown(),
+      onQuit: () => shutdown(), // raw mode: ctrl-c never reaches the OS as a signal
     });
     hooks = {
       onRequestStart: (id, info) => tui.onRequestStart(id, info),
@@ -160,12 +139,8 @@ async function serverCommand() {
     hooks = auditHooks(new AuditLog(config.auditLog), hooks);
   }
 
-  // Expose reload to the proxy's control endpoint (works with or without TUI).
   hooks.reload = reloadAccounts;
   hooks.getStatusExtra = () => ({
-    // Read live from the shared config (not a startup snapshot) so the TUI's
-    // blocklist editor shows up in `status` immediately, the same way the
-    // per-request gate in server.js picks it up.
     blockedModels: [...(config.blockedModels || [])],
     server: {
       startedAt: new Date(serverStartedAt).toISOString(),
@@ -178,16 +153,11 @@ async function serverCommand() {
   });
 
   const server = createProxyServer(accountManager, config, hooks, sx);
-  // Catch bind-time errors (e.g. EADDRINUSE) only. Once the socket is bound we
-  // remove this handler so a later runtime 'error' isn't misreported as a
-  // listen failure and exit the whole proxy.
   const onListenError = err => handleServerListenError(err, port);
   server.once('error', onListenError);
 
   server.listen(port, bindHost, () => {
-    // Bind succeeded: stop treating errors as listen failures, but keep a
-    // benign runtime handler so a later 'error' is logged rather than thrown.
-    server.removeListener('error', onListenError);
+    server.removeListener('error', onListenError); // a runtime error is not a listen failure
     server.on('error', err => console.error(`[Jaynshare] Server error: ${err.message}`));
     announceUpstreamProxy();
     if (tui) {
@@ -198,31 +168,19 @@ async function serverCommand() {
     }
   });
 
-  // Reflect the active account in the terminal title so a backgrounded/tabbed
-  // server is glanceable. Works in both TUI and headless modes.
   const stopTitle = startTerminalTitleUpdater(accountManager);
 
-  // Persist quota every minute; unref so it never keeps the process alive.
   const quotaSaveInterval = setInterval(persistQuotaState, 60_000);
   quotaSaveInterval.unref?.();
 
   prober.start();
   warmer.start();
 
-  // Background self-update for a backgrounded (headless) server. Skipped under
-  // the TUI, where npm's install output would corrupt the display — interactive
-  // users update via `jaynshare run` (post-session) or `jaynshare update`.
-  if (!tui) autoUpdate({ config }).catch(() => {});
+  if (!tui) autoUpdate({ config }).catch(() => {}); // npm output would corrupt the TUI
 
-  // One idempotent shutdown funnel for BOTH modes and BOTH triggers: POSIX
-  // signals (SIGINT/SIGTERM) and the TUI's ctrl-c / q keypress (which in raw mode
-  // never reaches the OS as a signal). Guards re-entry: a second ctrl-c — an
-  // impatient user, or a signal racing the keypress — forces an immediate exit
-  // instead of re-running teardown, which would re-arm server.close() and leak a
-  // 'close' listener on the server each time (MaxListenersExceededWarning).
   let shuttingDown = false;
   async function shutdown() {
-    if (shuttingDown) process.exit(0); // second ctrl-c: stop waiting, just go
+    if (shuttingDown) process.exit(0); // second ctrl-c
     shuttingDown = true;
     try { tui?.stop(); } catch { /* terminal already restored */ }
     stopTitle();
@@ -231,9 +189,6 @@ async function serverCommand() {
     warmer.stop();
     clearInterval(quotaSaveInterval);
     await persistQuotaState();
-    // Don't linger waiting on keep-alive / streaming connections: actively
-    // destroy them so server.close() can complete promptly, and hard-exit after a
-    // short grace period in case anything still hangs.
     setTimeout(() => process.exit(0), 2000).unref?.();
     server.closeAllConnections?.();
     server.close(() => process.exit(0));
@@ -244,16 +199,9 @@ async function serverCommand() {
 
 // ── server startup phases ───────────────────────────────────
 
-/**
- * Load config for a server run, apply `--log-to`, and enforce the guards that
- * must hold before anything starts. Exits the process when one doesn't.
- */
+/** Exits the process when a startup guard fails. */
 async function loadServerConfig() {
-  // Installed first: the server is the long-lived process, it runs under a TUI
-  // that repaints over anything Node prints on the way out, and a crash here
-  // takes every routed session with it. Without this, a proxy that vanished
-  // overnight leaves nothing behind to explain why.
-  installCrashHandlers(getCrashLogPath());
+  installCrashHandlers(getCrashLogPath()); // the TUI repaints over anything Node prints on the way out
 
   const config = await loadOrCreateConfig();
 
@@ -276,7 +224,7 @@ async function loadServerConfig() {
   return config;
 }
 
-/** Resolve configured accounts into usable ones, or exit if none survive. */
+/** Exits if no account survives resolution. */
 async function resolveServerAccounts(config) {
   const accounts = await resolveAccounts(config);
   if (accounts.length === 0) {
@@ -284,13 +232,6 @@ async function resolveServerAccounts(config) {
     process.exit(1);
   }
 
-  // `accounts[].models` is superseded by the `routes` table. Routes do the same
-  // job with glob matching, several accounts per rule and a bucket override —
-  // and, unlike `models`, they don't silently change eligibility fleet-wide the
-  // moment one account declares a list (see _accountOwnsModel). Behaviour is
-  // unchanged; this only tells older configs what to migrate to before the
-  // field goes away. Reported against config.accounts so the notice
-  // names what is actually written on disk, whatever resolution does with it.
   for (const acct of config.accounts) {
     if (!acct.models?.length) continue;
     const route = { name: acct.name, match: acct.models, accounts: [acct.name] };
@@ -300,13 +241,6 @@ async function resolveServerAccounts(config) {
   return accounts;
 }
 
-/**
- * Restore quota observed in a previous run so a restart doesn't lose rotation
- * state (passive — we never call the API to re-learn it). Stale windows are
- * cleared automatically on first use by _clearExpiredQuotas. With quota back,
- * pick the best account up front (highest priority / soonest-resetting weekly
- * window) instead of defaulting to the first one.
- */
 async function restoreQuota(accountManager) {
   const savedState = await loadState().catch(err => {
     console.error(`[Jaynshare] Could not read saved state: ${err.message}`);
@@ -316,32 +250,23 @@ async function restoreQuota(accountManager) {
   accountManager.selectActiveAccount();
 }
 
-/**
- * Persist refreshed tokens back to config, re-reading from disk to avoid
- * clobbering accounts added externally (e.g. by `jaynshare import` while the
- * server is running).
- */
 function persistRefreshedTokens(accountManager, config) {
   accountManager.onTokenRefresh((idx, newTokens) => {
     const account = accountManager.accounts[idx];
     if (!account) return;
-    // Keep config.accounts in sync so TUI saveConfig doesn't clobber fresh tokens
-    if (config.accounts[idx]) {
+    if (config.accounts[idx]) { // a TUI save would otherwise clobber the fresh tokens
       config.accounts[idx].accessToken = newTokens.accessToken;
       config.accounts[idx].refreshToken = newTokens.refreshToken;
       config.accounts[idx].expiresAt = newTokens.expiresAt;
     }
     atomicConfigUpdate(diskConfig => {
-      // Pick up any new accounts from disk so index matching stays correct
-      // (only add, don't refresh credentials — we're about to write the authoritative tokens)
-      for (const diskAcct of diskConfig.accounts) {
+      for (const diskAcct of diskConfig.accounts) { // accounts added externally while running
         const known = config.accounts.some(a => sameIdentity(a, diskAcct));
         if (!known) {
           config.accounts.push(diskAcct);
           accountManager.addAccount(diskAcct);
         }
       }
-      // Match by UUID first, then by name — index may have shifted
       const cfgIdx = findConfigAccount(diskConfig, account);
       if (cfgIdx >= 0) {
         diskConfig.accounts[cfgIdx].accessToken = newTokens.accessToken;
@@ -352,10 +277,6 @@ function persistRefreshedTokens(accountManager, config) {
   });
 }
 
-/**
- * sx.org proxy (IP-based-429 workaround). Dormant unless an API key is set in
- * config.sx.apiKey; when set we provision a proxy and route upstream through it.
- */
 async function createSxManager(config) {
   const sx = new SxManager({ log: console.error });
   if (config.sx?.apiKey) {
@@ -367,25 +288,15 @@ async function createSxManager(config) {
   return sx;
 }
 
-/**
- * Build the re-sync-from-disk routine, which applies config changes without a
- * restart. The TUI's 'R' key, the POST /jaynshare/reload endpoint, and the CLI
- * notify after add/change all funnel through here. Returns the number of newly
- * added accounts. Also picks up changed probe/warm intervals so `jaynshare
- * probe` applies live.
- */
+/** Applies disk config changes to the running server; returns the number of accounts added. */
 function makeReloadAccounts({ config, accountManager, sx, prober, warmer }) {
   return async () => {
     const diskConfig = await loadConfig();
     if (!diskConfig) return 0;
     const added = await syncAccountsFromDisk(diskConfig, config, accountManager);
-    // Authentication is read from the shared config object on every request,
-    // so client revocation and rotation become effective with this reload.
-    config.proxy = diskConfig.proxy || { port: config.proxy?.port || 3456, clients: [] };
-    // Pick up route table edits (jaynshare route …, TUI editor, or a hand edit).
+    config.proxy = diskConfig.proxy || { port: config.proxy?.port || 3456, clients: [] }; // client auth reads it live
     config.routes = diskConfig.routes || [];
     accountManager.setRoutes(config.routes);
-    // Apply an sx.org key/mode change made on disk (e.g. via POST /jaynshare/reload).
     const diskSxKey = diskConfig.sx?.apiKey || null;
     const diskSxMode = diskConfig.sx?.mode || 'always';
     if (diskSxKey !== sx.apiKey || diskSxMode !== sx.mode) {
@@ -407,11 +318,9 @@ function makeReloadAccounts({ config, accountManager, sx, prober, warmer }) {
   };
 }
 
-/** Project the server's live state onto the config being written (TUI save). */
+/** Projects the server's live state onto the config being written. */
 function writeRuntimeConfig(diskConfig, config, accountManager) {
-  // Write in-memory accounts as the authoritative state, preserving
-  // extra disk-only fields (e.g. importFrom) where the account still exists.
-  // Use live tokens from AccountManager (not the stale config.accounts copy).
+  // Live tokens win; disk-only fields (importFrom) survive.
   diskConfig.accounts = config.accounts.map((a, i) => {
     const am = accountManager.accounts[i];
     const live = am ? {
@@ -423,30 +332,22 @@ function writeRuntimeConfig(diskConfig, config, accountManager) {
     const diskAcct = diskConfig.accounts.find(d => sameIdentity(d, a));
     return diskAcct ? { ...diskAcct, ...live } : live;
   });
-  // Persist sx.org settings (set/cleared from the TUI settings screen).
   if (config.sx) diskConfig.sx = config.sx; else delete diskConfig.sx;
-  // Persist other runtime-tunable settings edited from the TUI.
   if (config.switchThreshold != null) diskConfig.switchThreshold = config.switchThreshold;
   if (config.quotaProbeSeconds != null) diskConfig.quotaProbeSeconds = config.quotaProbeSeconds;
   if (config.warmupSeconds != null) diskConfig.warmupSeconds = config.warmupSeconds;
-  // Persist the route table (edited from the TUI routes screen).
   if (config.routes != null) diskConfig.routes = config.routes;
 }
 
-/**
- * Headless equivalent of the TUI's activity pane: request hooks plus a tee of
- * console output into the activity log file.
- */
+/** The headless equivalent of the TUI's activity pane. */
 function activityLogHooks(activityLogPath) {
   const aStream = createWriteStream(activityLogPath, { flags: 'a' });
   aStream.on('error', err => process.stderr.write(`[Jaynshare] activity log error: ${err.message}\n`));
   const ts = () => new Date().toLocaleTimeString('en-US', { hour12: false });
   const writeActivity = msg => {
-    // Strip [Jaynshare] prefix to match TUI behaviour
     aStream.write(`${ts()}  ${msg.replace(/^\[Jaynshare\]\s*/, '')}\n`);
   };
 
-  // Capture request completions via the hook
   const inFlight = new Map();
   const hooks = {
     onRequestStart: (id, info) => inFlight.set(id, { ...info, started: Date.now() }),
@@ -470,7 +371,6 @@ function activityLogHooks(activityLogPath) {
     },
   };
 
-  // Tee console output to the activity log as well
   const origLog = console.log;
   const origErr = console.error;
   console.log = (...a) => { const m = a.join(' '); origLog(m); writeActivity(m); };
@@ -480,11 +380,6 @@ function activityLogHooks(activityLogPath) {
   return hooks;
 }
 
-/**
- * Announce an egress proxy, especially one inherited from the environment: it
- * changes where every upstream byte goes, and a value nobody typed here should
- * never be in force silently.
- */
 function announceUpstreamProxy() {
   const egressProxy = getUpstreamProxy();
   if (!egressProxy.proxy) return;
@@ -492,7 +387,6 @@ function announceUpstreamProxy() {
   console.log(`[Jaynshare] Upstream proxy: ${describeProxy(egressProxy.proxy)}${via}`);
 }
 
-/** The headless "we're up" banner, printed once the socket is bound. */
 function printStartupBanner({ bindHost, port, accounts, threshold, config }) {
   const sep = '='.repeat(60);
   console.log('');
@@ -523,9 +417,7 @@ async function importCommand() {
   const jsonStr = argValue('--json');
 
   let creds;
-  if (jsonStr) {
-    // Accept raw JSON: --json '{"claudeAiOauth":{"accessToken":"...","refreshToken":"...","expiresAt":...}}'
-    // or flat: --json '{"accessToken":"...","refreshToken":"...","expiresAt":...}'
+  if (jsonStr) { // the credentials file's shape, or its claudeAiOauth object alone
     try {
       const raw = JSON.parse(jsonStr);
       const data = raw.claudeAiOauth || raw;
@@ -567,13 +459,11 @@ async function loginCommand() {
     return;
   }
 
-  // Default to OAuth if not a TTY
   if (!process.stdout.isTTY) {
     await loginOAuthCommand();
     return;
   }
 
-  // Interactive menu
   const rl = createInterface({ input: process.stdin, output: process.stderr });
   console.log('Select login method:\n');
   console.log('  1. Claude subscription  (Pro, Max, Team, Enterprise)');
@@ -637,17 +527,9 @@ async function loginOAuthCommand() {
 
 // ── env ─────────────────────────────────────────────────────
 
-// `jaynshare env [--no-mitm]` — print the export lines that point Claude Code
-// at the proxy, for `eval "$(jaynshare env)"`. Mirrors `jaynshare run`'s
-// environment (MITM forward-proxy by default; --no-mitm for base-URL only) so a
-// tool that spawns claude itself — an agent multiplexer, a CI job, a manual
-// shell — gets the same routing without going through `run`. Only the export
-// lines go to stdout; all guidance goes to stderr so the output stays eval-safe.
+// For `eval "$(jaynshare env)"`: only the export lines go to stdout.
 async function envCommand() {
-  // Use loadConfig (not loadOrCreateConfig): a query command must never write to
-  // stdout — creating a config prints "Created config at …", which would poison
-  // `eval "$(jaynshare env)"` — nor silently create config as a side effect.
-  const config = await loadConfig();
+  const config = await loadConfig(); // creating one would print to stdout
   if (!config) {
     process.stderr.write(`No config found at ${getConfigPath()}. Add an account first: jaynshare login\n`);
     process.exit(1);
@@ -658,7 +540,6 @@ async function envCommand() {
   let caPath = null;
   if (useMitm) ({ caPath } = await ensureCerts(upstreamHost(config)));
 
-  // Same pin as `jaynshare run`, so `eval "$(jaynshare env)"` and `run` agree.
   const account = (process.env.JAYNSHARE_ACCOUNT || '').trim();
   const lines = buildClaudeEnvLines({
     port, useMitm, caPath, holdSeconds: config.holdSeconds,
@@ -670,8 +551,6 @@ async function envCommand() {
   process.stderr.write(`# Jaynshare env: ${mode} mode, localhost:${port}\n`);
   if (account) {
     process.stderr.write(`# pinned to account "${account}" (JAYNSHARE_ACCOUNT)\n`);
-    // Warn, don't fail: the account list can change before the shell is used,
-    // and this command must stay eval-safe.
     if (!(config.accounts || []).some((a, i) => a.name === account || String(i) === account)) {
       process.stderr.write(`# warning: no account named "${account}" in the config — the proxy will refuse this pin\n`);
     }
@@ -690,11 +569,7 @@ async function envCommand() {
 async function runCommand() {
   const config = await loadOrCreateConfig();
 
-  // Args after 'run'. jaynshare flags (e.g. --no-mitm) are recognized only
-  // before an optional `--` separator; everything after `--` goes verbatim to
-  // claude. MITM forward-proxy mode is the default so hardcoded api.anthropic.com
-  // endpoints are intercepted too; --no-mitm opts back into base-URL-only routing.
-  // --mitm is still accepted (now a no-op) for backward compatibility.
+  // jaynshare flags come before an optional `--`; everything after it goes to claude verbatim.
   const rest = args.slice(1);
   const sep = rest.indexOf('--');
   const tcFlags = sep >= 0 ? rest.slice(0, sep) : rest;
@@ -702,36 +577,18 @@ async function runCommand() {
   const autoFallback = tcFlags.includes('--auto-fallback');
   const claudeArgs = sep >= 0
     ? rest.slice(sep + 1)
-    : rest.filter(a => a !== '--mitm' && a !== '--no-mitm' && a !== '--auto-fallback');
+    : rest.filter(a => a !== '--mitm' && a !== '--no-mitm' && a !== '--auto-fallback'); // --mitm is a no-op
 
-  // Route through the proxy when it's up. When it's down we refuse by default —
-  // silently launching claude directly hides that requests are bypassing the
-  // proxy (no rotation, spending the user's own quota). Pass --auto-fallback to
-  // opt back into the transparent direct launch (e.g. for a dumb shell alias).
   const port = config.proxy.port;
   const env = { ...process.env };
-  // JAYNSHARE_ACCOUNT pins this session to one account, in either mode. It is jaynshare's
-  // own knob, so it never reaches the child: claude has no use for it, and an
-  // account name is not something to leak into a subprocess environment that
-  // gets inherited by every tool and MCP server claude spawns.
   const tcAcct = (process.env.JAYNSHARE_ACCOUNT || '').trim();
-  delete env.JAYNSHARE_ACCOUNT;
-  // Legacy: a caller-supplied ANTHROPIC_BASE_URL of http://<this proxy>/jaynshare-account/…
-  // also pins. JAYNSHARE_ACCOUNT is the supported way — it works in MITM mode
-  // too, and keeps the pin out of the API path.
-  const pinnedBase = isLocalAccountPin(process.env.ANTHROPIC_BASE_URL, port);
+  delete env.JAYNSHARE_ACCOUNT; // never inherited by claude's tools and MCP servers
+  const pinnedBase = isLocalAccountPin(process.env.ANTHROPIC_BASE_URL, port); // legacy pin form
   if (await isProxyUp(port)) {
     if (useMitm) {
-      // Route ALL of claude's traffic through us as an HTTPS forward proxy, so
-      // even hardcoded api.anthropic.com endpoints (e.g. the design MCP) get the
-      // real token injected. claude trusts our MITM leaf via NODE_EXTRA_CA_CERTS.
       const host = upstreamHost(config);
       const { caPath } = await ensureCerts(host);
-      // The pin rides in the proxy URL's userinfo, which the client forwards as
-      // `Proxy-Authorization: Basic <acct>:<key>` on each CONNECT — the only pin
-      // channel an HTTPS_PROXY env var can express. The password slot keeps the
-      // proxy apiKey, matching the existing `--proxy http://<key>@host:port`
-      // form, so auth and pinning coexist in one URL.
+      // The pin travels as `Proxy-Authorization: Basic <acct>:<key>` on each CONNECT.
       const userinfo = tcAcct
         ? `${encodePinComponent(tcAcct)}:${encodePinComponent(config.proxy?.apiKey || '')}@`
         : '';
@@ -746,12 +603,7 @@ async function runCommand() {
       }
       delete env.ANTHROPIC_BASE_URL;
     } else {
-      // Only set ANTHROPIC_BASE_URL — Claude Code keeps its own OAuth token
-      // which the proxy accepts from localhost. Not setting ANTHROPIC_API_KEY
-      // lets Claude Code stay in subscription mode (full model access).
-      // JAYNSHARE_ACCOUNT wins; jaynshare builds the pinned URL itself rather than making
-      // the caller hand-write one. Otherwise an existing /jaynshare-account/ base URL
-      // pointing at this proxy is preserved for configs written against that form.
+      // No ANTHROPIC_API_KEY: Claude Code stays in subscription mode.
       if (tcAcct) {
         env.ANTHROPIC_BASE_URL = `http://localhost:${port}/jaynshare-account/${encodePinComponent(tcAcct)}`;
         console.error(`[Jaynshare] Pinned to account "${tcAcct}" (JAYNSHARE_ACCOUNT)`);
@@ -768,20 +620,15 @@ async function runCommand() {
     process.exit(1);
   }
 
-  // If holdSeconds is set, ensure API_TIMEOUT_MS on the Claude Code side is
-  // large enough for the hold to complete. Add 60s padding (one extra poll
-  // cycle) so the client doesn't time out while we're still waiting.
-  // Claude Code defaults API_TIMEOUT_MS to 600000ms (10 min) when unset, so
-  // use that as the baseline to avoid accidentally lowering the timeout.
+  // Claude Code must not time out while the proxy holds a request.
   const holdMs = (config.holdSeconds || 0) * 1000;
   if (holdMs > 0) {
-    const needed = holdMs + 60_000;
+    const needed = holdMs + 60_000; // one extra poll cycle
     const API_TIMEOUT_DEFAULT_MS = 600_000;
     const current = parseInt(env.API_TIMEOUT_MS || '0', 10) || API_TIMEOUT_DEFAULT_MS;
     if (current < needed) env.API_TIMEOUT_MS = String(needed);
   }
 
-  // Use spawnSync so the Node process blocks entirely — behaves like execvp.
   const result = spawnSync('claude', claudeArgs, {
     stdio: 'inherit',
     shell: process.platform === 'win32',
@@ -797,9 +644,6 @@ async function runCommand() {
     process.exit(1);
   }
 
-  // Session over — check for a newer jaynshare and (for a global npm install)
-  // self-update. Throttled to once/day, so this is a no-op on almost every run;
-  // it applies to the NEXT launch, never the session that just ran.
   await autoUpdate({ config }).catch(() => {});
 
   process.exit(result.status ?? 1);
@@ -833,22 +677,13 @@ async function statusCommand() {
 
 // ── attach ──────────────────────────────────────────────────
 
-// The interactive dashboard against a server that is ALREADY running. A proxy
-// installed as a background service has no foreground TUI, so this is the only
-// way to watch and steer it live; it renders from polled status and can only do
-// what the control plane exposes (switch, reload).
+// The dashboard against an already running server, from polled status.
 async function attachCommand() {
   const config = await loadOrCreateConfig();
   const port = config.proxy.port;
-  // Reach the server where it actually binds (see serverCommand): a host set in
-  // the config or the environment is not reachable as localhost, and reporting
-  // "not running" for a server that is plainly up is the worst of the answers.
-  // A wildcard bind is not an address to dial, so dial this machine instead.
   const bound = process.env.JAYNSHARE_HOST || config.proxy.host || '127.0.0.1';
   const host = (bound === '0.0.0.0' || bound === '::') ? '127.0.0.1' : bound;
 
-  // Checked before connecting: the dashboard needs raw-mode input, and failing
-  // on that after a successful poll would be a confusing order to report it in.
   if (!process.stdin.isTTY) {
     console.error('jaynshare attach needs a terminal. For a one-shot readout use: jaynshare status');
     process.exit(1);
@@ -857,7 +692,7 @@ async function attachCommand() {
   const control = new RemoteControl({ port, host, apiKey: config.proxy.apiKey });
   let first;
   try {
-    first = await control.status(); // fail here, with a usable message, not inside the TUI
+    first = await control.status(); // fail here, not inside the TUI
   } catch (err) {
     console.error(`Cannot connect to proxy at ${host}:${port}`);
     console.error('Is the server running? Start with: jaynshare server');
@@ -867,8 +702,6 @@ async function attachCommand() {
 
   await new Promise(resolve => {
     const session = createAttachSession({ control, config, onQuit: resolve });
-    // The status just fetched is the first frame: without it the alt-screen opens
-    // on a disconnected, empty dashboard until the first poll lands.
     session.am.applyStatus(first);
     session.start();
   });
@@ -876,11 +709,7 @@ async function attachCommand() {
 
 // ── switch ──────────────────────────────────────────────────
 
-// Manual account switch against a RUNNING server — the headless equivalent of
-// pressing 's' in the TUI, which is unreachable when the proxy runs as a
-// background service. Nothing is written to the config: like the TUI's switch
-// this is a runtime preference that dies with the process, so the server is the
-// only place that can answer or apply it.
+// A runtime preference held by the server; nothing is written to the config.
 async function switchCommand() {
   const config = await loadOrCreateConfig();
   const port = config.proxy.port;
@@ -890,9 +719,6 @@ async function switchCommand() {
   try {
     if (!name) {
       const res = await fetch(`http://localhost:${port}/jaynshare/status`, { headers });
-      // Something answered on the port. Whether it is our proxy is a separate
-      // question, and getting it wrong would blame a down server for a reply we
-      // simply could not read — or report an unreadable reply as an empty fleet.
       const data = res.ok ? await res.json().catch(() => null) : null;
       if (!data || !Array.isArray(data.accounts)) {
         console.error(`Unexpected reply from localhost:${port} (HTTP ${res.status}) — no account list in it.`);
@@ -904,9 +730,6 @@ async function switchCommand() {
         return;
       }
       for (const a of data.accounts) {
-        // Flag what would stop traffic reaching an account. The TUI shows this in
-        // its table, so leaving it out here would make the headless half of the
-        // feature the only place a disabled account looks switchable.
         const state = a.disabled ? 'disabled' : (a.status && a.status !== 'active' ? a.status : null);
         console.log(`${a.name === data.currentAccount ? '*' : ' '} ${a.name}${state ? `  (${state})` : ''}`);
       }
@@ -921,9 +744,7 @@ async function switchCommand() {
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
-      // Our own errors are strings. A server too old to know this endpoint
-      // forwards the request upstream instead, and Anthropic's error is an
-      // object — printing that raw gives the user "[object Object]".
+      // An older server forwards the request upstream, whose error is an object.
       const detail = typeof data.error === 'string' ? data.error : null;
       console.error(detail || `Switch failed: unexpected reply from localhost:${port} (HTTP ${res.status}).`);
       if (!detail) console.error('An older server without this endpoint answers this way; restart it to pick up the new version.');
@@ -934,8 +755,6 @@ async function switchCommand() {
       process.exit(1);
     }
     console.log(`Switched to "${data.account}"`);
-    // Recorded is not the same as in effect: rotation skips an account it cannot
-    // use on the very next request, so saying nothing here would be a quiet lie.
     if (data.eligible === false) {
       console.error(`Warning: "${data.account}" is ${data.reason || 'not currently eligible'}, so requests will not route to it until that changes.`);
     }
@@ -959,73 +778,13 @@ async function accountsCommand() {
     return;
   }
 
-  // Refresh expired tokens before fetching profiles
-  let configDirty = false;
-  await Promise.all(config.accounts.map(async (a) => {
-    if (a.type !== 'oauth' || !a.refreshToken) return;
-    if (!isTokenExpiringSoon(a.expiresAt)) return;
-    try {
-      const newTokens = await refreshAccessToken(a.refreshToken);
-      a.accessToken = newTokens.accessToken;
-      a.refreshToken = newTokens.refreshToken;
-      a.expiresAt = newTokens.expiresAt;
-      configDirty = true;
-    } catch {
-      // refresh failed — fetchProfile will report the specific error
-    }
-  }));
-  if (configDirty) await saveConfig(config);
+  if (await refreshExpiringTokens(config.accounts)) await saveConfig(config);
+  const profiles = await fetchProfiles(config.accounts);
 
-  // Fetch profiles in parallel for all OAuth accounts
-  const profiles = await Promise.all(
-    config.accounts.map(a =>
-      a.type === 'oauth' && a.accessToken ? fetchProfile(a.accessToken) : null
-    )
-  );
-
-  // Backfill account+org identity from profiles, then deduplicate by
-  // (accountUuid, org): the same person in a different org is a distinct
-  // account, not a duplicate. Keep the last (most recently added) entry.
-  const seen = new Map();
-  let removed = 0;
-  let touched = false;
-  for (let i = config.accounts.length - 1; i >= 0; i--) {
-    const a = config.accounts[i];
-    const p = profiles[i];
-    if (p && !p.error) {
-      if (p.accountUuid && a.accountUuid !== p.accountUuid) { a.accountUuid = p.accountUuid; touched = true; }
-      if (p.orgUuid && a.orgUuid !== p.orgUuid) { a.orgUuid = p.orgUuid; touched = true; }
-      if (p.orgName && a.orgName !== p.orgName) { a.orgName = p.orgName; touched = true; }
-    }
-    const uuid = a.accountUuid;
-    if (!uuid) continue;
-    const key = `${uuid}::${orgKey(a) || ''}`;
-    if (seen.has(key)) {
-      config.accounts.splice(i, 1);
-      profiles.splice(i, 1);
-      removed++;
-      touched = true;
-    } else {
-      seen.set(key, i);
-    }
-  }
-
-  // Name accounts from their email: plain when the person has a single org,
-  // "email (Org)" when the same person spans multiple orgs. Names must stay
-  // unique — they are the user-facing key for remove/api/selection.
-  const orgCount = new Map();
-  for (const a of config.accounts) {
-    if (a.accountUuid) orgCount.set(a.accountUuid, (orgCount.get(a.accountUuid) || 0) + 1);
-  }
-  for (const [i, a] of config.accounts.entries()) {
-    const p = profiles[i];
-    const email = (p && !p.error && p.email) ? p.email : null;
-    if (!email) continue;
-    const newName = orgCount.get(a.accountUuid) > 1 ? `${email} (${orgLabel(a)})` : email;
-    if (a.name !== newName) { a.name = newName; touched = true; }
-  }
-
-  if (touched) await saveConfig(config);
+  const identityTouched = backfillIdentity(config.accounts, profiles);
+  const removed = dedupeByIdentity(config.accounts, profiles);
+  const renamed = nameFromEmail(config.accounts, profiles);
+  if (identityTouched || removed > 0 || renamed) await saveConfig(config);
   if (removed > 0) console.log(`Removed ${removed} duplicate account(s)\n`);
 
   for (const [i, a] of config.accounts.entries()) {
@@ -1036,7 +795,6 @@ async function accountsCommand() {
       continue;
     }
 
-    // OAuth account
     const hasProfile = p && !p.error;
     const tier = hasProfile ? (p.hasClaudeMax ? 'Max' : p.hasClaudePro ? 'Pro' : 'subscription') : null;
     const status = hasProfile ? `Claude ${tier}` : `unknown (${p?.error || 'no token'})`;
@@ -1044,7 +802,6 @@ async function accountsCommand() {
     console.log(`  [${i + 1}] ${a.name} (${status}${src})`);
     if (hasProfile && p.email && p.email !== a.name) console.log(`       Email: ${p.email}`);
     if (hasProfile && p.orgName) console.log(`       Org:   ${p.orgName}`);
-    // The stable pin identity (JAYNSHARE_ACCOUNT), unlike the display name above.
     if (a.accountUuid) console.log(`       ID:    ${a.accountUuid}`);
     if (verbose && a.expiresAt) {
       const remaining = a.expiresAt - Date.now();
@@ -1058,6 +815,79 @@ async function accountsCommand() {
       }
     }
   }
+}
+
+/** Returns whether any token changed. A failed refresh is left for fetchProfile to report. */
+async function refreshExpiringTokens(accounts) {
+  let changed = false;
+  await Promise.all(accounts.map(async (a) => {
+    if (a.type !== 'oauth' || !a.refreshToken) return;
+    if (!isTokenExpiringSoon(a.expiresAt)) return;
+    try {
+      const newTokens = await refreshAccessToken(a.refreshToken);
+      a.accessToken = newTokens.accessToken;
+      a.refreshToken = newTokens.refreshToken;
+      a.expiresAt = newTokens.expiresAt;
+      changed = true;
+    } catch {
+      // reported by fetchProfile
+    }
+  }));
+  return changed;
+}
+
+function fetchProfiles(accounts) {
+  return Promise.all(accounts.map(a =>
+    a.type === 'oauth' && a.accessToken ? fetchProfile(a.accessToken) : null
+  ));
+}
+
+function backfillIdentity(accounts, profiles) {
+  let touched = false;
+  for (const [i, a] of accounts.entries()) {
+    const p = profiles[i];
+    if (!p || p.error) continue;
+    if (p.accountUuid && a.accountUuid !== p.accountUuid) { a.accountUuid = p.accountUuid; touched = true; }
+    if (p.orgUuid && a.orgUuid !== p.orgUuid) { a.orgUuid = p.orgUuid; touched = true; }
+    if (p.orgName && a.orgName !== p.orgName) { a.orgName = p.orgName; touched = true; }
+  }
+  return touched;
+}
+
+/** Same person, different org is a distinct account. The most recently added entry survives. */
+function dedupeByIdentity(accounts, profiles) {
+  const seen = new Set();
+  let removed = 0;
+  for (let i = accounts.length - 1; i >= 0; i--) {
+    const a = accounts[i];
+    if (!a.accountUuid) continue;
+    const key = `${a.accountUuid}::${orgKey(a) || ''}`;
+    if (seen.has(key)) {
+      accounts.splice(i, 1);
+      profiles.splice(i, 1);
+      removed++;
+    } else {
+      seen.add(key);
+    }
+  }
+  return removed;
+}
+
+/** "email", or "email (Org)" when the person spans several orgs; names are the user-facing key. */
+function nameFromEmail(accounts, profiles) {
+  const orgCount = new Map();
+  for (const a of accounts) {
+    if (a.accountUuid) orgCount.set(a.accountUuid, (orgCount.get(a.accountUuid) || 0) + 1);
+  }
+  let touched = false;
+  for (const [i, a] of accounts.entries()) {
+    const p = profiles[i];
+    const email = (p && !p.error && p.email) ? p.email : null;
+    if (!email) continue;
+    const newName = orgCount.get(a.accountUuid) > 1 ? `${email} (${orgLabel(a)})` : email;
+    if (a.name !== newName) { a.name = newName; touched = true; }
+  }
+  return touched;
 }
 
 // ── api ─────────────────────────────────────────────────────
@@ -1103,14 +933,12 @@ async function apiCommand() {
 
   const res = await fetch(url, fetchOpts);
 
-  // Print response headers to stderr
   console.error(`${res.status} ${res.statusText}`);
   for (const [k, v] of res.headers.entries()) {
     console.error(`  ${k}: ${v}`);
   }
   console.error('');
 
-  // Print body to stdout
   const body = await res.text();
   try {
     console.log(JSON.stringify(JSON.parse(body), null, 2));
@@ -1142,11 +970,7 @@ async function serviceCommand() {
     console.error('Run the proxy yourself with: jaynshare server --headless');
     process.exit(1);
   }
-  // Carry an explicit config path into the unit: a service started by launchd or
-  // systemd does not inherit the shell's JAYNSHARE_CONFIG, so a non-default
-  // config would silently be ignored and the service would serve a different
-  // (or empty) account list than the CLI does.
-  const configPath = process.env.JAYNSHARE_CONFIG || null;
+  const configPath = process.env.JAYNSHARE_CONFIG || null; // the unit does not inherit the shell's
 
   switch (sub) {
     case 'install': {
@@ -1285,14 +1109,7 @@ async function updateCommand() {
 
 // ── remove ──────────────────────────────────────────────────
 
-/**
- * Resolve a single account from a name-or-email query.
- *
- * An exact display-name match wins. Otherwise match by email (the part before a
- * " (org)" suffix), optionally narrowed by --org. If still ambiguous across
- * orgs, print the candidates and exit so the caller can disambiguate with --org.
- * Returns the matched account, or null if nothing matched.
- */
+/** Exits when the query is ambiguous across orgs. */
 function resolveAccount(accounts, query, orgFilter) {
   const matches = matchAccounts(accounts, query, orgFilter);
   if (matches.length === 1) return matches[0];
@@ -1431,7 +1248,6 @@ async function priorityCommand() {
   } else if (args.includes('--last')) {
     priority = Math.max(0, ...priorities) + 1;
   } else {
-    // Accept the integer in any position (e.g. after --org) — first int-looking token.
     const numTok = args.slice(2).find(t => /^-?\d+$/.test(t));
     priority = numTok != null ? parseInt(numTok, 10) : NaN;
     if (Number.isNaN(priority)) {
@@ -1713,13 +1529,11 @@ Crash log: ${getCrashLogPath()} (server; written when the process dies unexpecte
 
 // ── shared account upsert ────────────────────────────────────
 
-/** Short human label for an account's organization, for disambiguating names. */
 function orgLabel(a) {
   return a.orgName || (a.orgUuid ? a.orgUuid.slice(0, 8) : 'org');
 }
 
 async function upsertOAuthAccount(config, name, creds, source = 'unknown') {
-  // Fetch profile to auto-name and deduplicate by account+org identity.
   const userNamed = !!name;
   const profile = await fetchProfile(creds.accessToken);
   const profileOk = profile && !profile.error;
@@ -1749,20 +1563,14 @@ async function upsertOAuthAccount(config, name, creds, source = 'unknown') {
     expiresAt: creds.expiresAt,
   };
 
-  // Deduplicate by account+org identity (same email in a different org is a
-  // distinct account), then by name — but only where the name is not standing in
-  // for a different account+org, which is exactly the multi-org case below.
   const idx = findUpsertTarget(config.accounts, account);
 
   if (idx >= 0) {
-    // Same account+org: refresh credentials and org info, but keep the existing
-    // display name and any disk-only fields (e.g. importFrom).
     const prev = config.accounts[idx];
-    config.accounts[idx] = { ...prev, ...account, name: prev.name };
+    config.accounts[idx] = { ...prev, ...account, name: prev.name }; // keeps disk-only fields
     console.log(`Updated account "${prev.name}"`);
   } else {
-    // New org for this person: if another entry shares the accountUuid, the bare
-    // email name would collide — disambiguate both with " (org)".
+    // A second org for the same person: the email-derived names collide.
     if (!userNamed && account.accountUuid) {
       const collisions = config.accounts.filter(
         a => a.accountUuid === account.accountUuid && !sameIdentity(a, account)
@@ -1789,17 +1597,10 @@ function findConfigAccount(diskConfig, account) {
   return diskConfig.accounts.findIndex(a => sameIdentity(a, account));
 }
 
-/**
- * Sync accounts from disk config: add new accounts and refresh credentials
- * for existing ones (handles re-imported OAuth tokens, rotated API keys, etc.).
- * Returns the number of new accounts added.
- */
+/** Returns the number of accounts added. */
 async function syncAccountsFromDisk(diskConfig, memConfig, accountManager) {
   let added = 0;
-  // Greedy 1:1 pairing of disk entries to in-memory accounts, account+org aware.
-  // Each disk entry claims at most one unclaimed manager account, so multiple
-  // same-person/different-org entries pair correctly instead of all matching the
-  // first one with that accountUuid.
+  // Each disk entry claims one manager account, so same-person/different-org entries pair 1:1.
   const claimed = new Set();
   const claim = (diskAcct) => {
     for (let i = 0; i < accountManager.accounts.length; i++) {
@@ -1815,7 +1616,6 @@ async function syncAccountsFromDisk(diskConfig, memConfig, accountManager) {
     const mgrIdx = claim(diskAcct);
 
     if (mgrIdx < 0) {
-      // New account discovered on disk — add to running server
       memConfig.accounts.push(diskAcct);
       accountManager.addAccount(diskAcct);
       claimed.add(accountManager.accounts.length - 1);
@@ -1826,17 +1626,13 @@ async function syncAccountsFromDisk(diskConfig, memConfig, accountManager) {
 
     const mgr = accountManager.accounts[mgrIdx];
 
-    // Backfill org identity and pick up renames/priority onto the running
-    // account (e.g. after disk-side org disambiguation or a `priority` change).
     if (diskAcct.orgUuid && !mgr.orgUuid) mgr.orgUuid = diskAcct.orgUuid;
     if (diskAcct.orgName && !mgr.orgName) mgr.orgName = diskAcct.orgName;
     if (diskAcct.name && mgr.name !== diskAcct.name) mgr.name = diskAcct.name;
     if (diskAcct.priority != null && mgr.priority !== diskAcct.priority) mgr.priority = diskAcct.priority;
-    // Pick up enable/disable toggles; re-enabling clears a stuck error state.
     const wantDisabled = !!diskAcct.disabled;
     if (mgr.disabled !== wantDisabled) accountManager.setDisabled(mgr.index, wantDisabled);
 
-    // Existing account — resolve fresh credentials from disk
     let freshCred = null;
     if (diskAcct.type === 'oauth' && diskAcct.importFrom) {
       try {
@@ -1856,8 +1652,6 @@ async function syncAccountsFromDisk(diskConfig, memConfig, accountManager) {
     if (freshCred.accessToken) {
       const changed = mgr.credential !== freshCred.accessToken ||
         mgr.refreshToken !== freshCred.refreshToken;
-      // Don't overwrite in-memory credentials with staler ones from disk
-      // (e.g. after a TUI import updated the AM before saveConfig wrote to disk)
       const diskIsStaler = freshCred.expiresAt && mgr.expiresAt &&
         freshCred.expiresAt < mgr.expiresAt;
       if (changed && !diskIsStaler) {
@@ -1875,17 +1669,13 @@ async function syncAccountsFromDisk(diskConfig, memConfig, accountManager) {
 
 // ── helpers ─────────────────────────────────────────────────
 
-// Is `url` a /jaynshare-account/<name> account pin aimed at OUR proxy? Parsed rather than
-// prefix-matched so every local spelling counts (localhost, 127.0.0.1, [::1]),
-// while a pin URL for a different host/port is not ours to honour.
+// Whether `url` is a /jaynshare-account/ pin aimed at this proxy, under any local spelling.
 function isLocalAccountPin(url, port) {
   if (!url) return false;
   let u;
   try { u = new URL(url); } catch { return false; }
   const host = u.hostname.replace(/^\[|\]$/g, '');
   const isLocal = host === 'localhost' || host === '127.0.0.1' || host === '::1';
-  // An omitted port means the scheme default, which still matches a proxy that
-  // happens to run on 80/443.
   const urlPort = u.port || (u.protocol === 'https:' ? '443' : '80');
   return isLocal && urlPort === String(port) && u.pathname.startsWith('/jaynshare-account/');
 }
@@ -1895,18 +1685,12 @@ function argValue(flag) {
   return (i >= 0 && args[i + 1]) ? args[i + 1] : null;
 }
 
-// Hostname of the configured upstream (the host MITM-intercepts under `run`).
 function upstreamHost(config) {
   try { return new URL(config.upstream || 'https://api.anthropic.com').hostname; }
   catch { return 'api.anthropic.com'; }
 }
 
-// Keep the terminal title in sync with the active account (e.g. "jaynshare 2/4
-// work") so a backgrounded or tabbed `jaynshare server` is glanceable. TTY-only
-// — never emit escapes into a pipe, a `--log-to` redirect, or a systemd journal;
-// opt out entirely with JAYNSHARE_NO_TITLE. Polls (rather than hooking every
-// currentIndex mutation) and writes only when the title actually changes.
-// Returns an idempotent stop() that restores the shell's previous title.
+/** Returns an idempotent stop() that restores the shell's title. */
 function startTerminalTitleUpdater(accountManager) {
   const out = process.stdout;
   if (!out.isTTY || process.env.JAYNSHARE_NO_TITLE) return () => {};
@@ -1920,7 +1704,7 @@ function startTerminalTitleUpdater(accountManager) {
     if (title !== last) { last = title; out.write(titleSequence(title)); }
   };
 
-  out.write(TITLE_STACK_PUSH); // save whatever title the shell had
+  out.write(TITLE_STACK_PUSH);
   render();
   const timer = setInterval(render, 2000);
   timer.unref?.();
@@ -1932,15 +1716,11 @@ function startTerminalTitleUpdater(accountManager) {
     clearInterval(timer);
     try { out.write(TITLE_STACK_POP); } catch { /* terminal gone */ }
   };
-  process.on('exit', stop); // backstop for exits that bypass shutdown()
+  process.on('exit', stop);
   return stop;
 }
 
-// Best-effort: tell a running server (if any) to re-sync accounts from config so
-// CLI changes take effect without a restart. A closed local port refuses the
-// connection immediately, so this is a no-op (and near-instant) when nothing is
-// running. Reload picks up new accounts, credential, priority, and enable/disable
-// changes; account removals still need a restart.
+// Best effort; account removals still need a restart.
 async function notifyRunningServer(config) {
   const port = config?.proxy?.port;
   if (!port) return;
@@ -1953,17 +1733,12 @@ async function notifyRunningServer(config) {
     });
     if (res.ok) {
       const data = await res.json().catch(() => ({}));
-      // Keep stdout machine-safe: client add/rotate/admin rotate write their
-      // one-time secret there so callers can redirect it straight to a 0600
-      // file. Status belongs on stderr and must never contaminate that file.
+      // stderr: `client add` writes its one-time secret to stdout.
       console.error(`Reloaded running server${data.added ? ` (+${data.added} new account)` : ''}.`);
     }
-  } catch { /* no server running — nothing to notify */ }
+  } catch { /* no server running */ }
 }
 
-// Quick liveness probe: is something listening on the local proxy port?
-// A successful TCP connect is enough (the proxy is local). Times out fast so a
-// down proxy doesn't add noticeable latency to `claude` launches via the alias.
 function isProxyUp(port, timeout = 600) {
   return new Promise(resolve => {
     const socket = net.connect({ host: '127.0.0.1', port });
