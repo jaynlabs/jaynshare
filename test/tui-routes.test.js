@@ -215,7 +215,7 @@ test('TUI: the F7 (Fable) marker sits on exactly one account — the routing tar
   const familyTarget = { fable: am.previewRouteIndex('claude-fable-5'), sonnet: null };
 
   const rows = am.accounts.map((_, i) =>
-    stripAnsi(tui._renderAcct(i, 8, true, routes, [], familyTarget)));
+    stripAnsi(tui._renderAcct(i, { barWidth: 8, showBoth: true, routes, genRoutes: [], familyTarget })));
   const marked = rows.filter(r => /►\s*F7/.test(r));
   assert.equal(marked.length, 1, 'exactly one F7 marker across all accounts');
   // ...and it is NOT the Fable-spent account a (which instead shows the ⊘ tag).

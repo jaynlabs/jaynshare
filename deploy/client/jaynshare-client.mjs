@@ -569,40 +569,47 @@ async function showDashboard(config) {
   }
 }
 
+const USAGE = 'Jaynshare desktop client\n\n  jaynshare status [--json|--line]\n  jaynshare dashboard\n';
+
 async function main(argv = process.argv.slice(2)) {
   const command = argv[0] || 'help';
-  if (command === 'title-hook') {
-    const output = titleHook(await readStdin());
-    if (output) process.stdout.write(JSON.stringify(output));
-    return;
-  }
-  if (command === 'pick-account' || command === 'resolve-account') {
-    const config = await loadClientConfig();
-    const usage = await fetchUsage(config);
-    const selected = command === 'pick-account'
-      ? await pickAccount(usage)
-      : argv[1];
-    if (command === 'resolve-account' && (typeof selected !== 'string' || !selected)) {
-      throw new Error('missing account selector');
-    }
-    if (selected == null) {
-      process.stdout.write(config.id);
-      return;
-    }
-    const resolved = await resolveAccountSelection(config, selected, { usage });
-    if (!resolved.available) {
-      process.stderr.write(`jaynshare: ${resolved.account} is currently ${resolved.reason || 'unavailable'}; normal failover will apply\n`);
-    }
-    process.stdout.write(encodeAccountPreference(resolved.account));
-    return;
-  }
+  if (command === 'title-hook') return runTitleHook();
+  if (command === 'pick-account' || command === 'resolve-account') return runAccountCommand(command, argv);
   if (command !== 'status' && command !== 'dashboard') {
-    process.stdout.write('Jaynshare desktop client\n\n  jaynshare status [--json|--line]\n  jaynshare dashboard\n');
+    process.stdout.write(USAGE);
     return;
   }
 
   const config = await loadClientConfig();
   if (command === 'dashboard') return showDashboard(config);
+  return runStatus(config, argv);
+}
+
+async function runTitleHook() {
+  const output = titleHook(await readStdin());
+  if (output) process.stdout.write(JSON.stringify(output));
+}
+
+/** Prints the account a launcher should pin to: either the operator's pick or the named one. */
+async function runAccountCommand(command, argv) {
+  const config = await loadClientConfig();
+  const usage = await fetchUsage(config);
+  const selected = command === 'pick-account' ? await pickAccount(usage) : argv[1];
+  if (command === 'resolve-account' && (typeof selected !== 'string' || !selected)) {
+    throw new Error('missing account selector');
+  }
+  if (selected == null) {
+    process.stdout.write(config.id);
+    return;
+  }
+  const resolved = await resolveAccountSelection(config, selected, { usage });
+  if (!resolved.available) {
+    process.stderr.write(`jaynshare: ${resolved.account} is currently ${resolved.reason || 'unavailable'}; normal failover will apply\n`);
+  }
+  process.stdout.write(encodeAccountPreference(resolved.account));
+}
+
+async function runStatus(config, argv) {
   try {
     const lineInput = argv.includes('--line') ? parseStatusLineInput(await readOptionalStdin()) : { sessionId: null };
     const status = await fetchUsage(config, { sessionId: lineInput.sessionId });
@@ -610,11 +617,8 @@ async function main(argv = process.argv.slice(2)) {
     else if (argv.includes('--line')) process.stdout.write(renderStatusLine(status, { ansi: true }) + '\n'); // Claude renders the pipe in the terminal
     else process.stdout.write(renderStatus(status) + '\n');
   } catch (err) {
-    if (argv.includes('--line')) {
-      process.stdout.write(`${yellow(true, '◆ JAYNSHARE')} ${color(true, 31, 'offline')}\n`);
-      return;
-    }
-    throw err;
+    if (!argv.includes('--line')) throw err;
+    process.stdout.write(`${yellow(true, '◆ JAYNSHARE')} ${color(true, 31, 'offline')}\n`);
   }
 }
 

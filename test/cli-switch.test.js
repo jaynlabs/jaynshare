@@ -65,7 +65,7 @@ function runCli(configPath, cliArgs) {
 
 async function withProxy(fn) {
   const am = new AccountManager(ACCTS, 0.98);
-  const proxy = createProxyServer(am, { proxy: { apiKey: 'tc-test' }, upstream: 'https://api.anthropic.com' }, {});
+  const proxy = createProxyServer(am, { proxy: { apiKey: 'tc-test' }, upstream: 'https://api.anthropic.com' }, { hooks: {} });
   const port = await listen(proxy);
   const configPath = await writeConfig(port);
   try {
@@ -115,7 +115,7 @@ async function withDisabled(fn) {
     { name: 'off@example.com', type: 'apikey', apiKey: 'k2', disabled: true },
   ];
   const am = new AccountManager(accts, 0.98);
-  const proxy = createProxyServer(am, { proxy: { apiKey: 'tc-test' }, upstream: 'https://api.anthropic.com' }, {});
+  const proxy = createProxyServer(am, { proxy: { apiKey: 'tc-test' }, upstream: 'https://api.anthropic.com' }, { hooks: {} });
   const port = await listen(proxy);
   const dir = await mkdtemp(join(tmpdir(), 'jaynshare-switch-'));
   const path = join(dir, 'config.json');

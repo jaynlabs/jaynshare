@@ -26,7 +26,7 @@ async function setup(eventLogging) {
     onRequestStart: (_id, info) => shown.start.push(info.path),
     onRequestEnd: (_id, info) => shown.end.push(info.path),
   };
-  const proxy = createProxyServer(am, { proxy: { apiKey: 'k' }, upstream: `http://127.0.0.1:${upstreamPort}`, eventLogging }, hooks);
+  const proxy = createProxyServer(am, { proxy: { apiKey: 'k' }, upstream: `http://127.0.0.1:${upstreamPort}`, eventLogging }, { hooks: hooks });
   const proxyPort = await listen(proxy);
 
   return {

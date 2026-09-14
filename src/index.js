@@ -9,7 +9,7 @@ import { installCrashHandlers } from './crash-log.js';
 import { AccountManager } from './account-manager.js';
 import { createProxyServer } from './server.js';
 import { importCredentials, loginOAuth, fetchProfile, refreshAccessToken, isTokenExpiringSoon } from './oauth.js';
-import { sameIdentity, orgKey, matchAccounts, findUpsertTarget } from './identity.js';
+import { sameIdentity, orgKey, matchAccounts, findUpsertTarget, orgLabel, withOrgSuffixes } from './identity.js';
 import { resolveAccounts } from './resolve-accounts.js';
 import * as alias from './alias.js';
 import { ensureCerts } from './mitm.js';
@@ -44,8 +44,8 @@ const COMMANDS = {
   switch: switchCommand,
   remove: removeCommand,
   priority: priorityCommand,
-  disable: () => setDisabledCommand(true),
-  enable: () => setDisabledCommand(false),
+  disable: () => setAccountRotation(DISABLE),
+  enable: () => setAccountRotation(ENABLE),
   api: apiCommand,
   alias: aliasCommand,
   service: serviceCommand,
@@ -64,10 +64,6 @@ const COMMANDS = {
 
 // `server` and `run` return while still owning the process; help lets a piped stdout drain.
 const NO_EXIT = new Set(['server', 'run', 'help', '--help', '-h']);
-
-const [handler, exitWhenDone] = resolveCommand(command);
-await handler();
-if (exitWhenDone) process.exit(0);
 
 function resolveCommand(name) {
   if (Object.hasOwn(COMMANDS, name)) return [COMMANDS[name], !NO_EXIT.has(name)];
@@ -92,67 +88,33 @@ async function serverCommand() {
   await restoreQuota(accountManager);
   persistRefreshedTokens(accountManager, config);
 
-  const persistQuotaState = () =>
-    saveState({ quota: accountManager.exportQuotaState() })
-      .catch(err => console.error(`[Jaynshare] Failed to save quota state: ${err.message}`));
-
   const port = config.proxy.port;
   // A wider bind needs proxy.apiKey: the proxy injects tokens and relays CONNECT.
   const bindHost = process.env.JAYNSHARE_HOST || config.proxy.host || '127.0.0.1';
   const headless = args.includes('--headless') || args.includes('--no-tui');
   const useTUI = !headless && process.stdout.isTTY && process.stdin.isTTY;
   const activityLogPath = argValue('--activity-log') || null;
-  const serverStartedAt = Date.now();
 
   const sx = await createSxManager(config);
-
   const prober = new Prober(accountManager, { intervalMs: (config.quotaProbeSeconds || 0) * 1000 });
   const warmer = new Warmer(accountManager, {
     intervalMs: (config.warmupSeconds || 0) * 1000,
     port,
     apiKey: config.proxy?.apiKey,
   });
-
+  const background = { prober, warmer };
   const reloadAccounts = makeReloadAccounts({ config, accountManager, sx, prober, warmer });
 
-  let tui = null;
-  let hooks = {};
-  if (useTUI) {
-    tui = new TUI({
-      accountManager, config, sx, activityLogPath,
-      saveConfig: () => atomicConfigUpdate(diskConfig => writeRuntimeConfig(diskConfig, config, accountManager)),
-      syncAccounts: reloadAccounts,
-      probeQuota: () => prober.probeAll(),
-      onQuit: () => shutdown(), // raw mode: ctrl-c never reaches the OS as a signal
-    });
-    hooks = {
-      onRequestStart: (id, info) => tui.onRequestStart(id, info),
-      onRequestModel: (id, info) => tui.onRequestModel(id, info),
-      onRequestRouted: (id, info) => tui.onRequestRouted(id, info),
-      onRequestEnd: (id, info) => tui.onRequestEnd(id, info),
-    };
-  } else if (activityLogPath) {
-    hooks = activityLogHooks(activityLogPath);
-  }
+  const tui = useTUI ? new TUI({
+    accountManager, config, sx, activityLogPath,
+    saveConfig: () => atomicConfigUpdate(diskConfig => writeRuntimeConfig(diskConfig, config, accountManager)),
+    syncAccounts: reloadAccounts,
+    probeQuota: () => prober.probeAll(),
+    onQuit: () => shutdown(), // raw mode: ctrl-c never reaches the OS as a signal
+  }) : null;
 
-  if (config.auditLog?.path) {
-    hooks = auditHooks(new AuditLog(config.auditLog), hooks);
-  }
-
-  hooks.reload = reloadAccounts;
-  hooks.getStatusExtra = () => ({
-    blockedModels: [...(config.blockedModels || [])],
-    server: {
-      startedAt: new Date(serverStartedAt).toISOString(),
-      uptimeSeconds: Math.round((Date.now() - serverStartedAt) / 1000),
-      port,
-      upstream: config.upstream || 'https://api.anthropic.com',
-    },
-    probe: prober.getStatus(),
-    warm: warmer.getStatus(),
-  });
-
-  const server = createProxyServer(accountManager, config, hooks, sx);
+  const hooks = serverHooks({ tui, activityLogPath }, { config, background, reloadAccounts });
+  const server = createProxyServer(accountManager, config, { hooks, sx });
   const onListenError = err => handleServerListenError(err, port);
   server.once('error', onListenError);
 
@@ -169,32 +131,80 @@ async function serverCommand() {
   });
 
   const stopTitle = startTerminalTitleUpdater(accountManager);
-
-  const quotaSaveInterval = setInterval(persistQuotaState, 60_000);
-  quotaSaveInterval.unref?.();
+  const stopQuotaPersistence = persistQuotaPeriodically(accountManager);
 
   prober.start();
   warmer.start();
 
   if (!tui) autoUpdate({ config }).catch(() => {}); // npm output would corrupt the TUI
 
+  const shutdown = makeShutdown({ server, tui, background, stop: [stopTitle, stopQuotaPersistence] });
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
+}
+
+function saveQuotaState(accountManager) {
+  return saveState({ quota: accountManager.exportQuotaState() })
+    .catch(err => console.error(`[Jaynshare] Failed to save quota state: ${err.message}`));
+}
+
+/** Returns a stop() that also flushes the state one last time. */
+function persistQuotaPeriodically(accountManager, everyMs = 60_000) {
+  const timer = setInterval(() => saveQuotaState(accountManager), everyMs);
+  timer.unref?.();
+  return () => {
+    clearInterval(timer);
+    return saveQuotaState(accountManager);
+  };
+}
+
+/** Request hooks: the TUI's activity pane, a headless log, or neither — plus the audit log and control-plane extras. */
+function serverHooks({ tui, activityLogPath }, { config, background, reloadAccounts }) {
+  const startedAt = Date.now();
+  let hooks = {};
+  if (tui) {
+    hooks = {
+      onRequestStart: (id, info) => tui.onRequestStart(id, info),
+      onRequestModel: (id, info) => tui.onRequestModel(id, info),
+      onRequestRouted: (id, info) => tui.onRequestRouted(id, info),
+      onRequestEnd: (id, info) => tui.onRequestEnd(id, info),
+    };
+  } else if (activityLogPath) {
+    hooks = activityLogHooks(activityLogPath);
+  }
+
+  if (config.auditLog?.path) hooks = auditHooks(new AuditLog(config.auditLog), hooks);
+
+  hooks.reload = reloadAccounts;
+  hooks.getStatusExtra = () => ({
+    blockedModels: [...(config.blockedModels || [])],
+    server: {
+      startedAt: new Date(startedAt).toISOString(),
+      uptimeSeconds: Math.round((Date.now() - startedAt) / 1000),
+      port: config.proxy.port,
+      upstream: config.upstream || 'https://api.anthropic.com',
+    },
+    probe: background.prober.getStatus(),
+    warm: background.warmer.getStatus(),
+  });
+  return hooks;
+}
+
+/** Idempotent; a second signal exits at once rather than waiting for the drain. */
+function makeShutdown({ server, tui, background, stop }) {
   let shuttingDown = false;
-  async function shutdown() {
+  return async () => {
     if (shuttingDown) process.exit(0); // second ctrl-c
     shuttingDown = true;
     try { tui?.stop(); } catch { /* terminal already restored */ }
-    stopTitle();
     if (!tui) console.log('\n[Jaynshare] Shutting down...');
-    prober.stop();
-    warmer.stop();
-    clearInterval(quotaSaveInterval);
-    await persistQuotaState();
+    background.prober.stop();
+    background.warmer.stop();
+    await Promise.all(stop.map(fn => fn()));
     setTimeout(() => process.exit(0), 2000).unref?.();
     server.closeAllConnections?.();
     server.close(() => process.exit(0));
-  }
-  process.on('SIGINT', shutdown);
-  process.on('SIGTERM', shutdown);
+  };
 }
 
 // ── server startup phases ───────────────────────────────────
@@ -444,7 +454,7 @@ async function importCommand() {
     }
   }
 
-  await upsertOAuthAccount(config, name, creds, 'import');
+  await upsertOAuthAccount(config, { name, creds, source: 'import' });
 }
 
 // ── login ───────────────────────────────────────────────────
@@ -522,7 +532,7 @@ async function loginOAuthCommand() {
     process.exit(1);
   }
 
-  await upsertOAuthAccount(config, name, creds, 'login');
+  await upsertOAuthAccount(config, { name, creds, source: 'login' });
 }
 
 // ── env ─────────────────────────────────────────────────────
@@ -536,17 +546,20 @@ async function envCommand() {
   }
   const port = config.proxy.port;
   const useMitm = !args.slice(1).includes('--no-mitm');
-
-  let caPath = null;
-  if (useMitm) ({ caPath } = await ensureCerts(upstreamHost(config)));
-
+  const caPath = useMitm ? (await ensureCerts(upstreamHost(config))).caPath : null;
   const account = (process.env.JAYNSHARE_ACCOUNT || '').trim();
+
   const lines = buildClaudeEnvLines({
     port, useMitm, caPath, holdSeconds: config.holdSeconds,
     account, proxyApiKey: config.proxy?.apiKey || '',
   });
   process.stdout.write(`${lines.join('\n')}\n`);
 
+  await printEnvNotes(config, { port, useMitm, account });
+}
+
+/** Everything the operator reads rather than evals, so stdout stays pure shell. */
+async function printEnvNotes(config, { port, useMitm, account }) {
   const mode = useMitm ? 'MITM forward-proxy' : 'base-URL';
   process.stderr.write(`# Jaynshare env: ${mode} mode, localhost:${port}\n`);
   if (account) {
@@ -568,66 +581,19 @@ async function envCommand() {
 
 async function runCommand() {
   const config = await loadOrCreateConfig();
-
-  // jaynshare flags come before an optional `--`; everything after it goes to claude verbatim.
-  const rest = args.slice(1);
-  const sep = rest.indexOf('--');
-  const tcFlags = sep >= 0 ? rest.slice(0, sep) : rest;
-  const useMitm = !tcFlags.includes('--no-mitm');
-  const autoFallback = tcFlags.includes('--auto-fallback');
-  const claudeArgs = sep >= 0
-    ? rest.slice(sep + 1)
-    : rest.filter(a => a !== '--mitm' && a !== '--no-mitm' && a !== '--auto-fallback'); // --mitm is a no-op
-
+  const { flags, claudeArgs } = splitRunArgs(args.slice(1));
   const port = config.proxy.port;
-  const env = { ...process.env };
-  const tcAcct = (process.env.JAYNSHARE_ACCOUNT || '').trim();
-  delete env.JAYNSHARE_ACCOUNT; // never inherited by claude's tools and MCP servers
-  const pinnedBase = isLocalAccountPin(process.env.ANTHROPIC_BASE_URL, port); // legacy pin form
-  if (await isProxyUp(port)) {
-    if (useMitm) {
-      const host = upstreamHost(config);
-      const { caPath } = await ensureCerts(host);
-      // The pin travels as `Proxy-Authorization: Basic <acct>:<key>` on each CONNECT.
-      const userinfo = tcAcct
-        ? `${encodePinComponent(tcAcct)}:${encodePinComponent(config.proxy?.apiKey || '')}@`
-        : '';
-      const proxyUrl = `http://${userinfo}127.0.0.1:${port}`;
-      env.HTTPS_PROXY = env.HTTP_PROXY = env.https_proxy = env.http_proxy = proxyUrl;
-      env.NO_PROXY = env.no_proxy = 'localhost,127.0.0.1,::1';
-      env.NODE_EXTRA_CA_CERTS = caPath;
-      if (tcAcct) console.error(`[Jaynshare] Pinned to account "${tcAcct}" (JAYNSHARE_ACCOUNT)`);
-      else if (pinnedBase) {
-        console.error('[Jaynshare] Account pin in ANTHROPIC_BASE_URL ignored: MITM mode does not use a base URL.');
-        console.error('[Jaynshare] Use JAYNSHARE_ACCOUNT=<account> instead — it pins in both modes.');
-      }
-      delete env.ANTHROPIC_BASE_URL;
-    } else {
-      // No ANTHROPIC_API_KEY: Claude Code stays in subscription mode.
-      if (tcAcct) {
-        env.ANTHROPIC_BASE_URL = `http://localhost:${port}/jaynshare-account/${encodePinComponent(tcAcct)}`;
-        console.error(`[Jaynshare] Pinned to account "${tcAcct}" (JAYNSHARE_ACCOUNT)`);
-      } else if (!pinnedBase) {
-        env.ANTHROPIC_BASE_URL = `http://localhost:${port}`;
-      }
-    }
-  } else if (autoFallback) {
-    console.error(`[Jaynshare] Proxy not running on port ${port} — launching claude directly (--auto-fallback; start it with: jaynshare server)`);
-  } else {
-    console.error(`[Jaynshare] Proxy not running on port ${port}.`);
-    console.error('Start it with: jaynshare server');
-    console.error('Or pass --auto-fallback to launch claude directly (bypassing the proxy) when it is down.');
-    process.exit(1);
-  }
 
-  // Claude Code must not time out while the proxy holds a request.
-  const holdMs = (config.holdSeconds || 0) * 1000;
-  if (holdMs > 0) {
-    const needed = holdMs + 60_000; // one extra poll cycle
-    const API_TIMEOUT_DEFAULT_MS = 600_000;
-    const current = parseInt(env.API_TIMEOUT_MS || '0', 10) || API_TIMEOUT_DEFAULT_MS;
-    if (current < needed) env.API_TIMEOUT_MS = String(needed);
+  const account = (process.env.JAYNSHARE_ACCOUNT || '').trim();
+  let env = { ...process.env };
+  delete env.JAYNSHARE_ACCOUNT; // never seen by claude's tools and MCP servers
+
+  if (await isProxyUp(port)) {
+    env = await withProxyEnv(env, { config, account, useMitm: !flags.includes('--no-mitm') });
+  } else {
+    refuseOrFallBack(port, flags.includes('--auto-fallback'));
   }
+  env = withHoldTimeout(env, config.holdSeconds);
 
   const result = spawnSync('claude', claudeArgs, {
     stdio: 'inherit',
@@ -647,6 +613,73 @@ async function runCommand() {
   await autoUpdate({ config }).catch(() => {});
 
   process.exit(result.status ?? 1);
+}
+
+// jaynshare flags come before an optional `--`; everything after it goes to claude verbatim.
+function splitRunArgs(rest) {
+  const sep = rest.indexOf('--');
+  if (sep >= 0) return { flags: rest.slice(0, sep), claudeArgs: rest.slice(sep + 1) };
+  const ours = new Set(['--mitm', '--no-mitm', '--auto-fallback']); // --mitm is a no-op
+  return { flags: rest, claudeArgs: rest.filter(a => !ours.has(a)) };
+}
+
+/** The child's environment, pointed at the proxy in forward-proxy or base-URL mode. */
+async function withProxyEnv(env, { config, account, useMitm }) {
+  const port = config.proxy.port;
+  const pinnedBase = isLocalAccountPin(env.ANTHROPIC_BASE_URL, port); // legacy pin form
+
+  if (!useMitm) {
+    // No ANTHROPIC_API_KEY: Claude Code stays in subscription mode.
+    if (account) {
+      console.error(`[Jaynshare] Pinned to account "${account}" (JAYNSHARE_ACCOUNT)`);
+      return { ...env, ANTHROPIC_BASE_URL: `http://localhost:${port}/jaynshare-account/${encodePinComponent(account)}` };
+    }
+    return pinnedBase ? env : { ...env, ANTHROPIC_BASE_URL: `http://localhost:${port}` };
+  }
+
+  const { caPath } = await ensureCerts(upstreamHost(config));
+  // The pin travels as `Proxy-Authorization: Basic <acct>:<key>` on each CONNECT.
+  const userinfo = account
+    ? `${encodePinComponent(account)}:${encodePinComponent(config.proxy?.apiKey || '')}@`
+    : '';
+  const proxyUrl = `http://${userinfo}127.0.0.1:${port}`;
+
+  if (account) console.error(`[Jaynshare] Pinned to account "${account}" (JAYNSHARE_ACCOUNT)`);
+  else if (pinnedBase) {
+    console.error('[Jaynshare] Account pin in ANTHROPIC_BASE_URL ignored: MITM mode does not use a base URL.');
+    console.error('[Jaynshare] Use JAYNSHARE_ACCOUNT=<account> instead — it pins in both modes.');
+  }
+
+  const rest = { ...env };
+  delete rest.ANTHROPIC_BASE_URL; // the two modes must not stack
+  return {
+    ...rest,
+    HTTPS_PROXY: proxyUrl, HTTP_PROXY: proxyUrl, https_proxy: proxyUrl, http_proxy: proxyUrl,
+    NO_PROXY: 'localhost,127.0.0.1,::1', no_proxy: 'localhost,127.0.0.1,::1',
+    NODE_EXTRA_CA_CERTS: caPath,
+  };
+}
+
+/** Exits unless the caller opted into launching claude without the proxy. */
+function refuseOrFallBack(port, autoFallback) {
+  if (autoFallback) {
+    console.error(`[Jaynshare] Proxy not running on port ${port} — launching claude directly (--auto-fallback; start it with: jaynshare server)`);
+    return;
+  }
+  console.error(`[Jaynshare] Proxy not running on port ${port}.`);
+  console.error('Start it with: jaynshare server');
+  console.error('Or pass --auto-fallback to launch claude directly (bypassing the proxy) when it is down.');
+  process.exit(1);
+}
+
+// Claude Code must not time out while the proxy holds a request.
+function withHoldTimeout(env, holdSeconds) {
+  const holdMs = (holdSeconds || 0) * 1000;
+  if (holdMs <= 0) return env;
+  const needed = holdMs + 60_000; // one extra poll cycle
+  const API_TIMEOUT_DEFAULT_MS = 600_000;
+  const current = parseInt(env.API_TIMEOUT_MS || '0', 10) || API_TIMEOUT_DEFAULT_MS;
+  return current < needed ? { ...env, API_TIMEOUT_MS: String(needed) } : env;
 }
 
 // ── status ──────────────────────────────────────────────────
@@ -717,52 +750,56 @@ async function switchCommand() {
   const name = args[1] && !args[1].startsWith('-') ? args[1] : null;
 
   try {
-    if (!name) {
-      const res = await fetch(`http://localhost:${port}/jaynshare/status`, { headers });
-      const data = res.ok ? await res.json().catch(() => null) : null;
-      if (!data || !Array.isArray(data.accounts)) {
-        console.error(`Unexpected reply from localhost:${port} (HTTP ${res.status}) — no account list in it.`);
-        console.error('Something is listening there, but it does not answer like this jaynshare version.');
-        process.exit(1);
-      }
-      if (!data.accounts.length) {
-        console.log('No accounts configured.');
-        return;
-      }
-      for (const a of data.accounts) {
-        const state = a.disabled ? 'disabled' : (a.status && a.status !== 'active' ? a.status : null);
-        console.log(`${a.name === data.currentAccount ? '*' : ' '} ${a.name}${state ? `  (${state})` : ''}`);
-      }
-      console.log('\nSwitch with: jaynshare switch <name>');
-      return;
-    }
-
-    const res = await fetch(`http://localhost:${port}/jaynshare/switch`, {
-      method: 'POST',
-      headers: { ...headers, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ account: name }),
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) {
-      // An older server forwards the request upstream, whose error is an object.
-      const detail = typeof data.error === 'string' ? data.error : null;
-      console.error(detail || `Switch failed: unexpected reply from localhost:${port} (HTTP ${res.status}).`);
-      if (!detail) console.error('An older server without this endpoint answers this way; restart it to pick up the new version.');
-      if (data.accounts?.length) {
-        console.error('Known accounts:');
-        for (const n of data.accounts) console.error(`  ${n}`);
-      }
-      process.exit(1);
-    }
-    console.log(`Switched to "${data.account}"`);
-    if (data.eligible === false) {
-      console.error(`Warning: "${data.account}" is ${data.reason || 'not currently eligible'}, so requests will not route to it until that changes.`);
-    }
+    if (name) await requestSwitch({ port, headers, name });
+    else await listServerAccounts({ port, headers });
   } catch (err) {
     console.error('Cannot connect to proxy at localhost:' + port);
     console.error('Is the server running? Start with: jaynshare server');
     if (err?.message) console.error(`Details: ${err.message}`);
     process.exit(1);
+  }
+}
+
+async function listServerAccounts({ port, headers }) {
+  const res = await fetch(`http://localhost:${port}/jaynshare/status`, { headers });
+  const data = res.ok ? await res.json().catch(() => null) : null;
+  if (!data || !Array.isArray(data.accounts)) {
+    console.error(`Unexpected reply from localhost:${port} (HTTP ${res.status}) — no account list in it.`);
+    console.error('Something is listening there, but it does not answer like this jaynshare version.');
+    process.exit(1);
+  }
+  if (!data.accounts.length) {
+    console.log('No accounts configured.');
+    return;
+  }
+  for (const a of data.accounts) {
+    const state = a.disabled ? 'disabled' : (a.status && a.status !== 'active' ? a.status : null);
+    console.log(`${a.name === data.currentAccount ? '*' : ' '} ${a.name}${state ? `  (${state})` : ''}`);
+  }
+  console.log('\nSwitch with: jaynshare switch <name>');
+}
+
+async function requestSwitch({ port, headers, name }) {
+  const res = await fetch(`http://localhost:${port}/jaynshare/switch`, {
+    method: 'POST',
+    headers: { ...headers, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ account: name }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    // An older server forwards the request upstream, whose error is an object.
+    const detail = typeof data.error === 'string' ? data.error : null;
+    console.error(detail || `Switch failed: unexpected reply from localhost:${port} (HTTP ${res.status}).`);
+    if (!detail) console.error('An older server without this endpoint answers this way; restart it to pick up the new version.');
+    if (data.accounts?.length) {
+      console.error('Known accounts:');
+      for (const n of data.accounts) console.error(`  ${n}`);
+    }
+    process.exit(1);
+  }
+  console.log(`Switched to "${data.account}"`);
+  if (data.eligible === false) {
+    console.error(`Warning: "${data.account}" is ${data.reason || 'not currently eligible'}, so requests will not route to it until that changes.`);
   }
 }
 
@@ -779,42 +816,17 @@ async function accountsCommand() {
   }
 
   if (await refreshExpiringTokens(config.accounts)) await saveConfig(config);
-  const profiles = await fetchProfiles(config.accounts);
 
-  const identityTouched = backfillIdentity(config.accounts, profiles);
-  const removed = dedupeByIdentity(config.accounts, profiles);
-  const renamed = nameFromEmail(config.accounts, profiles);
+  const profiled = await withProfiles(config.accounts);
+  const identityTouched = backfillIdentity(profiled);
+  const unique = withoutDuplicateIdentities(profiled);
+  const removed = profiled.length - unique.length;
+  if (removed > 0) config.accounts = unique.map(entry => entry.account);
+  const renamed = nameFromEmail(unique);
   if (identityTouched || removed > 0 || renamed) await saveConfig(config);
   if (removed > 0) console.log(`Removed ${removed} duplicate account(s)\n`);
 
-  for (const [i, a] of config.accounts.entries()) {
-    const p = profiles[i];
-
-    if (a.type === 'apikey') {
-      console.log(`  [${i + 1}] ${a.name} (apikey)  ${a.apiKey?.slice(0, 15)}...`);
-      continue;
-    }
-
-    const hasProfile = p && !p.error;
-    const tier = hasProfile ? (p.hasClaudeMax ? 'Max' : p.hasClaudePro ? 'Pro' : 'subscription') : null;
-    const status = hasProfile ? `Claude ${tier}` : `unknown (${p?.error || 'no token'})`;
-    const src = a.source ? `, ${a.source}` : '';
-    console.log(`  [${i + 1}] ${a.name} (${status}${src})`);
-    if (hasProfile && p.email && p.email !== a.name) console.log(`       Email: ${p.email}`);
-    if (hasProfile && p.orgName) console.log(`       Org:   ${p.orgName}`);
-    if (a.accountUuid) console.log(`       ID:    ${a.accountUuid}`);
-    if (verbose && a.expiresAt) {
-      const remaining = a.expiresAt - Date.now();
-      if (remaining <= 0) {
-        console.log(`       Token: expired`);
-      } else {
-        const mins = Math.floor(remaining / 60000);
-        const hrs = Math.floor(mins / 60);
-        const expiry = hrs > 0 ? `${hrs}h ${mins % 60}m` : `${mins}m`;
-        console.log(`       Token: expires in ${expiry}`);
-      }
-    }
-  }
+  unique.forEach((entry, i) => printAccount(entry, { position: i + 1, verbose }));
 }
 
 /** Returns whether any token changed. A failed refresh is left for fetchProfile to report. */
@@ -836,58 +848,79 @@ async function refreshExpiringTokens(accounts) {
   return changed;
 }
 
-function fetchProfiles(accounts) {
-  return Promise.all(accounts.map(a =>
+/** Pairs each account with its live profile, so the two never drift out of step. */
+async function withProfiles(accounts) {
+  const profiles = await Promise.all(accounts.map(a =>
     a.type === 'oauth' && a.accessToken ? fetchProfile(a.accessToken) : null
   ));
+  return accounts.map((account, i) => ({ account, profile: profiles[i] }));
 }
 
-function backfillIdentity(accounts, profiles) {
+/** Copies identity the profile knows onto the config entry; returns whether anything changed. */
+function backfillIdentity(entries) {
   let touched = false;
-  for (const [i, a] of accounts.entries()) {
-    const p = profiles[i];
-    if (!p || p.error) continue;
-    if (p.accountUuid && a.accountUuid !== p.accountUuid) { a.accountUuid = p.accountUuid; touched = true; }
-    if (p.orgUuid && a.orgUuid !== p.orgUuid) { a.orgUuid = p.orgUuid; touched = true; }
-    if (p.orgName && a.orgName !== p.orgName) { a.orgName = p.orgName; touched = true; }
+  for (const { account, profile } of entries) {
+    if (!profile || profile.error) continue;
+    if (profile.accountUuid && account.accountUuid !== profile.accountUuid) { account.accountUuid = profile.accountUuid; touched = true; }
+    if (profile.orgUuid && account.orgUuid !== profile.orgUuid) { account.orgUuid = profile.orgUuid; touched = true; }
+    if (profile.orgName && account.orgName !== profile.orgName) { account.orgName = profile.orgName; touched = true; }
   }
   return touched;
 }
 
 /** Same person, different org is a distinct account. The most recently added entry survives. */
-function dedupeByIdentity(accounts, profiles) {
+function withoutDuplicateIdentities(entries) {
   const seen = new Set();
-  let removed = 0;
-  for (let i = accounts.length - 1; i >= 0; i--) {
-    const a = accounts[i];
-    if (!a.accountUuid) continue;
-    const key = `${a.accountUuid}::${orgKey(a) || ''}`;
-    if (seen.has(key)) {
-      accounts.splice(i, 1);
-      profiles.splice(i, 1);
-      removed++;
-    } else {
-      seen.add(key);
-    }
+  const kept = [];
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const { account } = entries[i];
+    const key = account.accountUuid ? `${account.accountUuid}::${orgKey(account) || ''}` : null;
+    if (key && seen.has(key)) continue;
+    if (key) seen.add(key);
+    kept.unshift(entries[i]);
   }
-  return removed;
+  return kept;
 }
 
 /** "email", or "email (Org)" when the person spans several orgs; names are the user-facing key. */
-function nameFromEmail(accounts, profiles) {
+function nameFromEmail(entries) {
   const orgCount = new Map();
-  for (const a of accounts) {
-    if (a.accountUuid) orgCount.set(a.accountUuid, (orgCount.get(a.accountUuid) || 0) + 1);
+  for (const { account } of entries) {
+    if (account.accountUuid) orgCount.set(account.accountUuid, (orgCount.get(account.accountUuid) || 0) + 1);
   }
   let touched = false;
-  for (const [i, a] of accounts.entries()) {
-    const p = profiles[i];
-    const email = (p && !p.error && p.email) ? p.email : null;
+  for (const { account, profile } of entries) {
+    const email = (profile && !profile.error && profile.email) ? profile.email : null;
     if (!email) continue;
-    const newName = orgCount.get(a.accountUuid) > 1 ? `${email} (${orgLabel(a)})` : email;
-    if (a.name !== newName) { a.name = newName; touched = true; }
+    const newName = orgCount.get(account.accountUuid) > 1 ? `${email} (${orgLabel(account)})` : email;
+    if (account.name !== newName) { account.name = newName; touched = true; }
   }
   return touched;
+}
+
+function printAccount({ account, profile }, { position, verbose }) {
+  if (account.type === 'apikey') {
+    console.log(`  [${position}] ${account.name} (apikey)  ${account.apiKey?.slice(0, 15)}...`);
+    return;
+  }
+
+  const hasProfile = profile && !profile.error;
+  const tier = hasProfile ? (profile.hasClaudeMax ? 'Max' : profile.hasClaudePro ? 'Pro' : 'subscription') : null;
+  const status = hasProfile ? `Claude ${tier}` : `unknown (${profile?.error || 'no token'})`;
+  const src = account.source ? `, ${account.source}` : '';
+  console.log(`  [${position}] ${account.name} (${status}${src})`);
+  if (hasProfile && profile.email && profile.email !== account.name) console.log(`       Email: ${profile.email}`);
+  if (hasProfile && profile.orgName) console.log(`       Org:   ${profile.orgName}`);
+  if (account.accountUuid) console.log(`       ID:    ${account.accountUuid}`);
+  if (verbose && account.expiresAt) console.log(`       Token: ${formatExpiry(account.expiresAt)}`);
+}
+
+function formatExpiry(expiresAt) {
+  const remaining = expiresAt - Date.now();
+  if (remaining <= 0) return 'expired';
+  const mins = Math.floor(remaining / 60000);
+  const hrs = Math.floor(mins / 60);
+  return `expires in ${hrs > 0 ? `${hrs}h ${mins % 60}m` : `${mins}m`}`;
 }
 
 // ── api ─────────────────────────────────────────────────────
@@ -902,37 +935,40 @@ async function apiCommand() {
     process.exit(1);
   }
 
-  const accountName = argValue('--account');
-  const method = (argValue('--method') || 'GET').toUpperCase();
-  const data = argValue('--data');
-
-  const accounts = await resolveAccounts(config);
-  let account;
-  if (accountName) {
-    account = resolveAccount(accounts, accountName, argValue('--org'));
-    if (!account) { console.error(`Account "${accountName}" not found`); process.exit(1); }
-  } else {
-    account = accounts.find(a => a.type === 'oauth') || accounts[0];
-    if (!account) { console.error('No accounts configured'); process.exit(1); }
-  }
-
-  const credential = account.accessToken || account.apiKey;
-  const isOAuth = account.type === 'oauth';
   const upstream = config.upstream || 'https://api.anthropic.com';
   const url = path.startsWith('http') ? path : `${upstream}${path}`;
+  const res = await fetch(url, apiRequestInit(await apiAccount(config)));
+  await printApiResponse(res);
+}
 
-  const headers = isOAuth
+/** The account named on the command line, else the first OAuth one. */
+async function apiAccount(config) {
+  const accounts = await resolveAccounts(config);
+  const named = argValue('--account');
+  if (named) {
+    const account = resolveAccount(accounts, named, argValue('--org'));
+    if (!account) { console.error(`Account "${named}" not found`); process.exit(1); }
+    return account;
+  }
+  const account = accounts.find(a => a.type === 'oauth') || accounts[0];
+  if (!account) { console.error('No accounts configured'); process.exit(1); }
+  return account;
+}
+
+function apiRequestInit(account) {
+  const credential = account.accessToken || account.apiKey;
+  const headers = account.type === 'oauth'
     ? { 'Authorization': `Bearer ${credential}` }
     : { 'x-api-key': credential };
+  const init = { method: (argValue('--method') || 'GET').toUpperCase(), headers };
 
-  const fetchOpts = { method, headers };
-  if (data) {
-    headers['Content-Type'] = 'application/json';
-    fetchOpts.body = data;
-  }
+  const data = argValue('--data');
+  if (data) return { ...init, headers: { ...headers, 'Content-Type': 'application/json' }, body: data };
+  return init;
+}
 
-  const res = await fetch(url, fetchOpts);
-
+/** Headers go to stderr so the body alone can be piped into a JSON tool. */
+async function printApiResponse(res) {
   console.error(`${res.status} ${res.statusText}`);
   for (const [k, v] of res.headers.entries()) {
     console.error(`  ${k}: ${v}`);
@@ -1013,21 +1049,11 @@ async function probeCommand() {
     return;
   }
 
-  let seconds;
-  if (arg === 'off' || arg === '0') {
-    seconds = 0;
-  } else {
-    seconds = parseInt(arg, 10);
-    if (Number.isNaN(seconds) || seconds < 0) {
-      console.error('Usage: jaynshare probe <off|seconds>');
-      process.exit(1);
-    }
-    if (seconds > 0 && seconds < 30) {
-      console.error('Minimum probe interval is 30s (to avoid hammering the usage endpoint).');
-      process.exit(1);
-    }
-  }
-
+  const seconds = readIntervalArg(arg, {
+    usage: 'Usage: jaynshare probe <off|seconds>',
+    minSeconds: 30,
+    tooShort: 'Minimum probe interval is 30s (to avoid hammering the usage endpoint).',
+  });
   config.quotaProbeSeconds = seconds;
   await saveConfig(config);
   console.log(seconds > 0
@@ -1051,27 +1077,32 @@ async function warmupCommand() {
     return;
   }
 
-  let seconds;
-  if (arg === 'off' || arg === '0') {
-    seconds = 0;
-  } else {
-    seconds = parseInt(arg, 10);
-    if (Number.isNaN(seconds) || seconds < 0) {
-      console.error('Usage: jaynshare warmup <off|seconds>');
-      process.exit(1);
-    }
-    if (seconds > 0 && seconds < 60) {
-      console.error('Minimum keep-warm interval is 60s.');
-      process.exit(1);
-    }
-  }
-
+  const seconds = readIntervalArg(arg, {
+    usage: 'Usage: jaynshare warmup <off|seconds>',
+    minSeconds: 60,
+    tooShort: 'Minimum keep-warm interval is 60s.',
+  });
   config.warmupSeconds = seconds;
   await saveConfig(config);
   console.log(seconds > 0
     ? `Keep-warm set to every ${seconds}s (spawns a minimal \`claude\` per idle account; spends a little quota).`
     : 'Keep-warm disabled.');
   await notifyRunningServer(config);
+}
+
+/** Seconds, or 0 for off. Exits on anything else. */
+function readIntervalArg(arg, { usage, minSeconds, tooShort }) {
+  if (arg === 'off' || arg === '0') return 0;
+  const seconds = parseInt(arg, 10);
+  if (Number.isNaN(seconds) || seconds < 0) {
+    console.error(usage);
+    process.exit(1);
+  }
+  if (seconds > 0 && seconds < minSeconds) {
+    console.error(tooShort);
+    process.exit(1);
+  }
+  return seconds;
 }
 
 // ── update ──────────────────────────────────────────────────
@@ -1160,66 +1191,81 @@ function splitList(value) {
   return (value || '').split(',').map(s => s.trim()).filter(Boolean);
 }
 
+const ROUTE_SUBCOMMANDS = {
+  list: listRoutes,
+  add: addRoute,
+  rm: removeRoute,
+  remove: removeRoute,
+  delete: removeRoute,
+};
+
 async function routeCommand() {
-  const sub = args[1] || 'list';
+  const sub = ROUTE_SUBCOMMANDS[args[1] || 'list'];
+  if (!sub) {
+    console.error(ROUTE_USAGE);
+    process.exit(1);
+  }
   const config = await loadOrCreateConfig();
   config.routes = Array.isArray(config.routes) ? config.routes : [];
+  await sub(config);
+}
 
-  if (sub === 'list') {
-    if (!config.routes.length) { console.log('No routes configured.'); return; }
-    for (const r of config.routes) {
-      const match = (Array.isArray(r.match) ? r.match : [r.match]).join(', ');
-      const accts = (r.accounts && r.accounts.length) ? r.accounts.join(', ') : '(all accounts)';
-      const bucket = r.bucket ? `  bucket=${r.bucket}` : '';
-      const color = r.color ? `  color=${r.color}` : '';
-      console.log(`${r.name || '(unnamed)'}: ${match} → ${accts}${bucket}${color}`);
-    }
-    return;
+function listRoutes(config) {
+  if (!config.routes.length) { console.log('No routes configured.'); return; }
+  for (const r of config.routes) {
+    const match = (Array.isArray(r.match) ? r.match : [r.match]).join(', ');
+    const accts = (r.accounts && r.accounts.length) ? r.accounts.join(', ') : '(all accounts)';
+    const bucket = r.bucket ? `  bucket=${r.bucket}` : '';
+    const color = r.color ? `  color=${r.color}` : '';
+    console.log(`${r.name || '(unnamed)'}: ${match} → ${accts}${bucket}${color}`);
+  }
+}
+
+async function addRoute(config) {
+  const route = readRouteFlags(config);
+  const at = config.routes.findIndex(r => r.name === route.name);
+  if (at >= 0) { config.routes[at] = route; console.log(`Updated route "${route.name}"`); }
+  else { config.routes.push(route); console.log(`Added route "${route.name}"`); }
+  await saveConfig(config);
+  await notifyRunningServer(config);
+}
+
+/** Exits on a malformed route; warns (but accepts) an account that does not exist yet. */
+function readRouteFlags(config) {
+  const name = args[2] && !args[2].startsWith('--') ? args[2] : null;
+  const match = splitList(argValue('--match'));
+  const accounts = splitList(argValue('--accounts'));
+  const bucket = argValue('--bucket');
+  const color = argValue('--color');
+
+  if (!name || !match.length) {
+    console.error(ROUTE_USAGE);
+    process.exit(1);
+  }
+  if (color && !ROUTE_COLORS.includes(color.toLowerCase())) {
+    console.error(`Unknown color "${color}" — expected one of: ${ROUTE_COLORS.join(', ')}`);
+    process.exit(1);
+  }
+  const known = new Set(config.accounts.map(a => a.name));
+  for (const a of accounts) {
+    if (!known.has(a) && !/^\d+$/.test(a)) console.error(`Warning: no account named "${a}" (yet)`);
   }
 
-  if (sub === 'add') {
-    const name = args[2] && !args[2].startsWith('--') ? args[2] : null;
-    const match = splitList(argValue('--match'));
-    const accounts = splitList(argValue('--accounts'));
-    const bucket = argValue('--bucket');
-    const color = argValue('--color');
-    if (!name || !match.length) {
-      console.error(ROUTE_USAGE);
-      process.exit(1);
-    }
-    if (color && !ROUTE_COLORS.includes(color.toLowerCase())) {
-      console.error(`Unknown color "${color}" — expected one of: ${ROUTE_COLORS.join(', ')}`);
-      process.exit(1);
-    }
-    const known = new Set(config.accounts.map(a => a.name));
-    for (const a of accounts) {
-      if (!known.has(a) && !/^\d+$/.test(a)) console.error(`Warning: no account named "${a}" (yet)`);
-    }
-    const route = { name, match };
-    if (accounts.length) route.accounts = accounts;
-    if (bucket) route.bucket = bucket;
-    if (color) route.color = color.toLowerCase();
-    const at = config.routes.findIndex(r => r.name === name);
-    if (at >= 0) { config.routes[at] = route; console.log(`Updated route "${name}"`); }
-    else { config.routes.push(route); console.log(`Added route "${name}"`); }
-    await saveConfig(config);
-    await notifyRunningServer(config);
-    return;
-  }
+  const route = { name, match };
+  if (accounts.length) route.accounts = accounts;
+  if (bucket) route.bucket = bucket;
+  if (color) route.color = color.toLowerCase();
+  return route;
+}
 
-  if (sub === 'rm' || sub === 'remove' || sub === 'delete') {
-    const name = args[2];
-    const before = config.routes.length;
-    config.routes = config.routes.filter(r => r.name !== name);
-    if (config.routes.length === before) { console.error(`Route "${name}" not found`); process.exit(1); }
-    await saveConfig(config);
-    await notifyRunningServer(config);
-    console.log(`Removed route "${name}"`);
-    return;
-  }
-
-  console.error(ROUTE_USAGE);
-  process.exit(1);
+async function removeRoute(config) {
+  const name = args[2];
+  const before = config.routes.length;
+  config.routes = config.routes.filter(r => r.name !== name);
+  if (config.routes.length === before) { console.error(`Route "${name}" not found`); process.exit(1); }
+  await saveConfig(config);
+  await notifyRunningServer(config);
+  console.log(`Removed route "${name}"`);
 }
 
 // ── priority ────────────────────────────────────────────────
@@ -1264,10 +1310,12 @@ async function priorityCommand() {
 
 // ── enable / disable ────────────────────────────────────────
 
-async function setDisabledCommand(disabled) {
+const DISABLE = { verb: 'disable', done: 'Disabled', apply: (a) => { a.disabled = true; } };
+const ENABLE = { verb: 'enable', done: 'Enabled', apply: (a) => { delete a.disabled; } };
+
+async function setAccountRotation({ verb, done, apply }) {
   const config = await loadOrCreateConfig();
   const name = args[1];
-  const verb = disabled ? 'disable' : 'enable';
 
   if (!name) {
     console.error(`Usage: jaynshare ${verb} <account-name|email> [--org <name|uuid>]`);
@@ -1280,124 +1328,140 @@ async function setDisabledCommand(disabled) {
     process.exit(1);
   }
 
-  if (disabled) {
-    account.disabled = true;
-  } else {
-    delete account.disabled;
-  }
+  apply(account);
   await saveConfig(config);
-  console.log(`${disabled ? 'Disabled' : 'Enabled'} account "${account.name}"`);
+  console.log(`${done} account "${account.name}"`);
   await notifyRunningServer(config);
 }
 
 // ── proxy clients ──────────────────────────────────────────
 
+const CLIENT_STATE_CHANGES = {
+  disable: { done: 'Disabled', apply: (client) => { client.disabled = true; } },
+  enable: { done: 'Enabled', apply: (client) => { client.disabled = false; } },
+  revoke: { done: 'Revoked', apply: (client, config) => { config.proxy.clients = config.proxy.clients.filter(c => c.id !== client.id); } },
+};
+
 async function clientCommand() {
   const sub = args[1] || 'list';
-  if (sub === 'list') {
-    const config = await loadOrCreateConfig();
-    const clients = config.proxy?.clients || [];
-    if (!clients.length) { console.log('No proxy clients configured.'); return; }
-    for (const client of clients) {
-      console.log(`${client.id}\t${client.disabled ? 'disabled' : 'enabled'}\t${client.name || client.id}`);
-    }
-    return;
-  }
-
-  if (sub === 'env') {
-    const id = args[2];
-    const host = argValue('--host');
-    const ca = argValue('--ca');
-    const config = await loadOrCreateConfig();
-    const port = Number(argValue('--port') || config.proxy?.port || 3456);
-    if (!clientById(config, id) || !host || !/^[A-Za-z0-9.-]+$/.test(host) || !ca
-        || !Number.isInteger(port) || port < 1 || port > 65535) {
-      clientUsage('Usage: jaynshare client env <id> --host <tailscale-host> --ca <path> [--port 3456]');
-    }
-    const secret = readFileSync(0, 'utf8').trim();
-    const principal = resolvePrincipal(config, secret);
-    if (!principal || principal.clientId !== id) clientUsage('The secret on stdin does not match that client.');
-    const quote = value => `'${String(value).replace(/'/g, `'"'"'`)}'`;
-    const proxyUrl = `http://${id}:${secret}@${host}:${port}`;
-    console.log(`export HTTPS_PROXY=${quote(proxyUrl)}`);
-    console.log(`export HTTP_PROXY=${quote(proxyUrl)}`);
-    console.log(`export https_proxy=${quote(proxyUrl)}`);
-    console.log(`export http_proxy=${quote(proxyUrl)}`);
-    console.log("export NO_PROXY='localhost,127.0.0.1,::1'");
-    console.log("export no_proxy='localhost,127.0.0.1,::1'");
-    console.log(`export NODE_EXTRA_CA_CERTS=${quote(ca)}`);
-    console.log('unset ANTHROPIC_BASE_URL ANTHROPIC_API_KEY');
-    return;
-  }
-
-  if (sub === 'add') {
-    const id = args[2];
-    if (!validClientId(id)) clientUsage('Client ID must use lowercase letters, numbers, _ or -.');
-    const name = argValue('--name') || id;
-    const secret = generateClientSecret();
-    const config = await atomicConfigUpdate(config => {
-      config.proxy ||= { port: 3456 };
-      config.proxy.clients ||= [];
-      if (clientById(config, id)) throw new Error(`proxy client "${id}" already exists`);
-      config.proxy.clients.push({ id, name, keyHash: hashClientSecret(secret), disabled: false });
-    }).catch(clientCommandError);
-    await notifyRunningServer(config);
-    process.stdout.write(`${secret}\n`);
-    process.stderr.write(`[Jaynshare] Added proxy client "${id}". This secret will not be shown again.\n`);
-    return;
-  }
-
-  if (['disable', 'enable', 'revoke', 'rotate'].includes(sub)) {
-    const id = args[2];
-    if (!id) clientUsage(`Usage: jaynshare client ${sub} <id>`);
-    const secret = sub === 'rotate' ? generateClientSecret() : null;
-    const config = await atomicConfigUpdate(config => {
-      const client = clientById(config, id);
-      if (!client) throw new Error(`proxy client "${id}" not found`);
-      if (sub === 'revoke') config.proxy.clients = config.proxy.clients.filter(c => c.id !== id);
-      else if (sub === 'disable') client.disabled = true;
-      else if (sub === 'enable') client.disabled = false;
-      else client.keyHash = hashClientSecret(secret);
-    }).catch(clientCommandError);
-    await notifyRunningServer(config);
-    if (secret) {
-      process.stdout.write(`${secret}\n`);
-      process.stderr.write(`[Jaynshare] Rotated proxy client "${id}". This secret will not be shown again.\n`);
-    } else {
-      console.log(`${sub === 'revoke' ? 'Revoked' : sub === 'disable' ? 'Disabled' : 'Enabled'} proxy client "${id}"`);
-    }
-    return;
-  }
-
-  if (sub === 'migrate') {
-    let migrated = false;
-    const config = await atomicConfigUpdate(config => {
-      const legacy = config.proxy?.apiKey;
-      if (!legacy) return;
-      config.proxy.clients ||= [];
-      if (clientById(config, 'legacy')) throw new Error('proxy client "legacy" already exists');
-      config.proxy.clients.push({ id: 'legacy', name: 'Migrated legacy client', keyHash: hashClientSecret(legacy), disabled: false });
-      delete config.proxy.apiKey;
-      migrated = true;
-    }).catch(clientCommandError);
-    await notifyRunningServer(config);
-    console.log(migrated ? 'Migrated proxy.apiKey to hashed client "legacy".' : 'No proxy.apiKey to migrate.');
-    return;
-  }
-
-  if (sub === 'admin' && args[2] === 'rotate') {
-    const secret = generateClientSecret().replace('jaynshare-client-', 'jaynshare-admin-');
-    const config = await atomicConfigUpdate(config => {
-      config.proxy ||= { port: 3456, clients: [] };
-      config.proxy.adminKeyHash = hashClientSecret(secret);
-    }).catch(clientCommandError);
-    await notifyRunningServer(config);
-    process.stdout.write(`${secret}\n`);
-    process.stderr.write('[Jaynshare] Rotated the operator credential. This secret will not be shown again.\n');
-    return;
-  }
-
+  if (sub === 'list') return listClients();
+  if (sub === 'env') return printClientEnv();
+  if (sub === 'add') return addClient();
+  if (sub === 'rotate') return rotateClientSecret();
+  if (CLIENT_STATE_CHANGES[sub]) return changeClientState(sub);
+  if (sub === 'migrate') return migrateLegacyKey();
+  if (sub === 'admin' && args[2] === 'rotate') return rotateAdminCredential();
   clientUsage();
+}
+
+async function listClients() {
+  const config = await loadOrCreateConfig();
+  const clients = config.proxy?.clients || [];
+  if (!clients.length) { console.log('No proxy clients configured.'); return; }
+  for (const client of clients) {
+    console.log(`${client.id}\t${client.disabled ? 'disabled' : 'enabled'}\t${client.name || client.id}`);
+  }
+}
+
+// The client's own secret arrives on stdin, so it is never re-read from disk (only its hash is stored).
+async function printClientEnv() {
+  const id = args[2];
+  const host = argValue('--host');
+  const ca = argValue('--ca');
+  const config = await loadOrCreateConfig();
+  const port = Number(argValue('--port') || config.proxy?.port || 3456);
+  if (!clientById(config, id) || !host || !/^[A-Za-z0-9.-]+$/.test(host) || !ca
+      || !Number.isInteger(port) || port < 1 || port > 65535) {
+    clientUsage('Usage: jaynshare client env <id> --host <tailscale-host> --ca <path> [--port 3456]');
+  }
+  const secret = readFileSync(0, 'utf8').trim();
+  const principal = resolvePrincipal(config, secret);
+  if (!principal || principal.clientId !== id) clientUsage('The secret on stdin does not match that client.');
+
+  const quote = value => `'${String(value).replace(/'/g, `'"'"'`)}'`;
+  const proxyUrl = `http://${id}:${secret}@${host}:${port}`;
+  console.log(`export HTTPS_PROXY=${quote(proxyUrl)}`);
+  console.log(`export HTTP_PROXY=${quote(proxyUrl)}`);
+  console.log(`export https_proxy=${quote(proxyUrl)}`);
+  console.log(`export http_proxy=${quote(proxyUrl)}`);
+  console.log("export NO_PROXY='localhost,127.0.0.1,::1'");
+  console.log("export no_proxy='localhost,127.0.0.1,::1'");
+  console.log(`export NODE_EXTRA_CA_CERTS=${quote(ca)}`);
+  console.log('unset ANTHROPIC_BASE_URL ANTHROPIC_API_KEY');
+}
+
+async function addClient() {
+  const id = args[2];
+  if (!validClientId(id)) clientUsage('Client ID must use lowercase letters, numbers, _ or -.');
+  const name = argValue('--name') || id;
+  const secret = generateClientSecret();
+  const config = await atomicConfigUpdate(config => {
+    config.proxy ||= { port: 3456 };
+    config.proxy.clients ||= [];
+    if (clientById(config, id)) throw new Error(`proxy client "${id}" already exists`);
+    config.proxy.clients.push({ id, name, keyHash: hashClientSecret(secret), disabled: false });
+  }).catch(clientCommandError);
+  await notifyRunningServer(config);
+  announceSecret(secret, `Added proxy client "${id}".`);
+}
+
+async function changeClientState(sub) {
+  const { done, apply } = CLIENT_STATE_CHANGES[sub];
+  const id = args[2];
+  if (!id) clientUsage(`Usage: jaynshare client ${sub} <id>`);
+  const config = await atomicConfigUpdate(config => {
+    apply(requireClient(config, id), config);
+  }).catch(clientCommandError);
+  await notifyRunningServer(config);
+  console.log(`${done} proxy client "${id}"`);
+}
+
+async function rotateClientSecret() {
+  const id = args[2];
+  if (!id) clientUsage('Usage: jaynshare client rotate <id>');
+  const secret = generateClientSecret();
+  const config = await atomicConfigUpdate(config => {
+    requireClient(config, id).keyHash = hashClientSecret(secret);
+  }).catch(clientCommandError);
+  await notifyRunningServer(config);
+  announceSecret(secret, `Rotated proxy client "${id}".`);
+}
+
+async function migrateLegacyKey() {
+  let migrated = false;
+  const config = await atomicConfigUpdate(config => {
+    const legacy = config.proxy?.apiKey;
+    if (!legacy) return;
+    config.proxy.clients ||= [];
+    if (clientById(config, 'legacy')) throw new Error('proxy client "legacy" already exists');
+    config.proxy.clients.push({ id: 'legacy', name: 'Migrated legacy client', keyHash: hashClientSecret(legacy), disabled: false });
+    delete config.proxy.apiKey;
+    migrated = true;
+  }).catch(clientCommandError);
+  await notifyRunningServer(config);
+  console.log(migrated ? 'Migrated proxy.apiKey to hashed client "legacy".' : 'No proxy.apiKey to migrate.');
+}
+
+async function rotateAdminCredential() {
+  const secret = generateClientSecret().replace('jaynshare-client-', 'jaynshare-admin-');
+  const config = await atomicConfigUpdate(config => {
+    config.proxy ||= { port: 3456, clients: [] };
+    config.proxy.adminKeyHash = hashClientSecret(secret);
+  }).catch(clientCommandError);
+  await notifyRunningServer(config);
+  announceSecret(secret, 'Rotated the operator credential.');
+}
+
+function requireClient(config, id) {
+  const client = clientById(config, id);
+  if (!client) throw new Error(`proxy client "${id}" not found`);
+  return client;
+}
+
+// stdout carries the secret alone, so a caller can capture it; the notice goes to stderr.
+function announceSecret(secret, notice) {
+  process.stdout.write(`${secret}\n`);
+  process.stderr.write(`[Jaynshare] ${notice} This secret will not be shown again.\n`);
 }
 
 function clientCommandError(err) {
@@ -1529,29 +1593,41 @@ Crash log: ${getCrashLogPath()} (server; written when the process dies unexpecte
 
 // ── shared account upsert ────────────────────────────────────
 
-function orgLabel(a) {
-  return a.orgName || (a.orgUuid ? a.orgUuid.slice(0, 8) : 'org');
-}
-
-async function upsertOAuthAccount(config, name, creds, source = 'unknown') {
-  const userNamed = !!name;
+async function upsertOAuthAccount(config, { name, creds, source = 'unknown' }) {
   const profile = await fetchProfile(creds.accessToken);
-  const profileOk = profile && !profile.error;
-
-  if (!profileOk) {
+  if (!profile || profile.error) {
     console.error(`Warning: could not fetch account profile — ${profile?.error || 'no token'}`);
   }
-  if (!name && profile?.email) {
-    name = profile.email;
-    const tier = profile.hasClaudeMax ? 'Max' : profile.hasClaudePro ? 'Pro' : null;
-    if (tier) console.log(`Detected Claude ${tier} account: ${profile.email}`);
-  }
-  if (!name) {
-    const n = config.accounts.filter(a => a.name.startsWith('account-')).length + 1;
-    name = `account-${n}`;
+  const account = oauthEntry({ name: name || derivedAccountName(config.accounts, profile), creds, source, profile });
+
+  const at = findUpsertTarget(config.accounts, account);
+  if (at >= 0) {
+    const prev = config.accounts[at];
+    config.accounts[at] = { ...prev, ...account, name: prev.name }; // keeps disk-only fields
+    console.log(`Updated account "${prev.name}"`);
+  } else {
+    // A name the user chose stands as typed; only a derived one gains an org suffix.
+    const named = name ? { accounts: config.accounts, incoming: account } : withOrgSuffixes(config.accounts, account);
+    config.accounts = [...named.accounts, named.incoming];
+    console.log(`Added account "${named.incoming.name}"`);
   }
 
-  const account = {
+  await saveConfig(config);
+  console.log(`Saved to ${getConfigPath()}`);
+  await notifyRunningServer(config);
+}
+
+function derivedAccountName(accounts, profile) {
+  if (profile?.email) {
+    const tier = profile.hasClaudeMax ? 'Max' : profile.hasClaudePro ? 'Pro' : null;
+    if (tier) console.log(`Detected Claude ${tier} account: ${profile.email}`);
+    return profile.email;
+  }
+  return `account-${accounts.filter(a => a.name.startsWith('account-')).length + 1}`;
+}
+
+function oauthEntry({ name, creds, source, profile }) {
+  return {
     name,
     type: 'oauth',
     source,
@@ -1562,33 +1638,6 @@ async function upsertOAuthAccount(config, name, creds, source = 'unknown') {
     refreshToken: creds.refreshToken,
     expiresAt: creds.expiresAt,
   };
-
-  const idx = findUpsertTarget(config.accounts, account);
-
-  if (idx >= 0) {
-    const prev = config.accounts[idx];
-    config.accounts[idx] = { ...prev, ...account, name: prev.name }; // keeps disk-only fields
-    console.log(`Updated account "${prev.name}"`);
-  } else {
-    // A second org for the same person: the email-derived names collide.
-    if (!userNamed && account.accountUuid) {
-      const collisions = config.accounts.filter(
-        a => a.accountUuid === account.accountUuid && !sameIdentity(a, account)
-      );
-      if (collisions.length > 0) {
-        for (const c of collisions) {
-          if (!c.name.includes(' (')) c.name = `${c.name} (${orgLabel(c)})`;
-        }
-        account.name = `${name} (${orgLabel(account)})`;
-      }
-    }
-    config.accounts.push(account);
-    console.log(`Added account "${account.name}"`);
-  }
-
-  await saveConfig(config);
-  console.log(`Saved to ${getConfigPath()}`);
-  await notifyRunningServer(config);
 }
 
 // ── config sync helpers ─────────────────────────────────────
@@ -1600,17 +1649,7 @@ function findConfigAccount(diskConfig, account) {
 /** Returns the number of accounts added. */
 async function syncAccountsFromDisk(diskConfig, memConfig, accountManager) {
   let added = 0;
-  // Each disk entry claims one manager account, so same-person/different-org entries pair 1:1.
-  const claimed = new Set();
-  const claim = (diskAcct) => {
-    for (let i = 0; i < accountManager.accounts.length; i++) {
-      if (!claimed.has(i) && sameIdentity(accountManager.accounts[i], diskAcct)) {
-        claimed.add(i);
-        return i;
-      }
-    }
-    return -1;
-  };
+  const claim = oneToOneClaim(accountManager);
 
   for (const diskAcct of diskConfig.accounts) {
     const mgrIdx = claim(diskAcct);
@@ -1618,53 +1657,77 @@ async function syncAccountsFromDisk(diskConfig, memConfig, accountManager) {
     if (mgrIdx < 0) {
       memConfig.accounts.push(diskAcct);
       accountManager.addAccount(diskAcct);
-      claimed.add(accountManager.accounts.length - 1);
       added++;
       console.log(`[Jaynshare] Picked up new account "${diskAcct.name}" from config`);
       continue;
     }
 
     const mgr = accountManager.accounts[mgrIdx];
-
-    if (diskAcct.orgUuid && !mgr.orgUuid) mgr.orgUuid = diskAcct.orgUuid;
-    if (diskAcct.orgName && !mgr.orgName) mgr.orgName = diskAcct.orgName;
-    if (diskAcct.name && mgr.name !== diskAcct.name) mgr.name = diskAcct.name;
-    if (diskAcct.priority != null && mgr.priority !== diskAcct.priority) mgr.priority = diskAcct.priority;
-    const wantDisabled = !!diskAcct.disabled;
-    if (mgr.disabled !== wantDisabled) accountManager.setDisabled(mgr.index, wantDisabled);
-
-    let freshCred = null;
-    if (diskAcct.type === 'oauth' && diskAcct.importFrom) {
-      try {
-        const creds = await importCredentials(diskAcct.importFrom);
-        freshCred = { accessToken: creds.accessToken, refreshToken: creds.refreshToken, expiresAt: creds.expiresAt };
-      } catch (err) {
-        console.error(`[Jaynshare] Re-import failed for "${diskAcct.name}": ${err.message}`);
-      }
-    } else if (diskAcct.type === 'oauth' && diskAcct.accessToken) {
-      freshCred = { accessToken: diskAcct.accessToken, refreshToken: diskAcct.refreshToken, expiresAt: diskAcct.expiresAt };
-    } else if (diskAcct.type === 'apikey' && diskAcct.apiKey) {
-      freshCred = { apiKey: diskAcct.apiKey };
-    }
-
-    if (!freshCred) continue;
-
-    if (freshCred.accessToken) {
-      const changed = mgr.credential !== freshCred.accessToken ||
-        mgr.refreshToken !== freshCred.refreshToken;
-      const diskIsStaler = freshCred.expiresAt && mgr.expiresAt &&
-        freshCred.expiresAt < mgr.expiresAt;
-      if (changed && !diskIsStaler) {
-        accountManager.updateAccountTokens(mgr.index, freshCred);
-        console.log(`[Jaynshare] Refreshed credentials for "${mgr.name}"`);
-      }
-    } else if (freshCred.apiKey && mgr.credential !== freshCred.apiKey) {
-      mgr.credential = freshCred.apiKey;
-      if (mgr.status === 'error') mgr.status = 'active';
-      console.log(`[Jaynshare] Updated API key for "${mgr.name}"`);
-    }
+    applyDiskFields(mgr, diskAcct, accountManager);
+    const freshCred = await readDiskCredential(diskAcct);
+    if (freshCred) applyCredential(mgr, freshCred, accountManager);
   }
   return added;
+}
+
+/** Each disk entry claims one manager account, so same-person/different-org entries pair 1:1. */
+function oneToOneClaim(accountManager) {
+  const claimed = new Set();
+  return (diskAcct) => {
+    for (let i = 0; i < accountManager.accounts.length; i++) {
+      if (!claimed.has(i) && sameIdentity(accountManager.accounts[i], diskAcct)) {
+        claimed.add(i);
+        return i;
+      }
+    }
+    claimed.add(accountManager.accounts.length); // the entry about to be added
+    return -1;
+  };
+}
+
+function applyDiskFields(mgr, diskAcct, accountManager) {
+  if (diskAcct.orgUuid && !mgr.orgUuid) mgr.orgUuid = diskAcct.orgUuid;
+  if (diskAcct.orgName && !mgr.orgName) mgr.orgName = diskAcct.orgName;
+  if (diskAcct.name && mgr.name !== diskAcct.name) mgr.name = diskAcct.name;
+  if (diskAcct.priority != null && mgr.priority !== diskAcct.priority) mgr.priority = diskAcct.priority;
+  const wantDisabled = !!diskAcct.disabled;
+  if (mgr.disabled !== wantDisabled) accountManager.setDisabled(mgr.index, wantDisabled);
+}
+
+/** The credential the disk entry now carries, re-imported when it names a source file. */
+async function readDiskCredential(diskAcct) {
+  if (diskAcct.type === 'apikey') return diskAcct.apiKey ? { apiKey: diskAcct.apiKey } : null;
+  if (diskAcct.type !== 'oauth') return null;
+  if (diskAcct.importFrom) {
+    try {
+      const creds = await importCredentials(diskAcct.importFrom);
+      return { accessToken: creds.accessToken, refreshToken: creds.refreshToken, expiresAt: creds.expiresAt };
+    } catch (err) {
+      console.error(`[Jaynshare] Re-import failed for "${diskAcct.name}": ${err.message}`);
+      return null;
+    }
+  }
+  if (!diskAcct.accessToken) return null;
+  return { accessToken: diskAcct.accessToken, refreshToken: diskAcct.refreshToken, expiresAt: diskAcct.expiresAt };
+}
+
+function applyCredential(mgr, freshCred, accountManager) {
+  if (freshCred.accessToken) {
+    const changed = mgr.credential !== freshCred.accessToken
+      || mgr.refreshToken !== freshCred.refreshToken;
+    const diskIsStaler = freshCred.expiresAt && mgr.expiresAt
+      && freshCred.expiresAt < mgr.expiresAt;
+    if (changed && !diskIsStaler) {
+      accountManager.updateAccountTokens(mgr.index, freshCred);
+      console.log(`[Jaynshare] Refreshed credentials for "${mgr.name}"`);
+    }
+    return;
+  }
+  if (freshCred.apiKey && mgr.credential !== freshCred.apiKey) {
+    mgr.credential = freshCred.apiKey;
+    if (mgr.status === 'error') mgr.status = 'active';
+    console.log(`[Jaynshare] Updated API key for "${mgr.name}"`);
+  }
 }
 
 // ── helpers ─────────────────────────────────────────────────
@@ -1764,3 +1827,9 @@ function handleServerListenError(err, port) {
   }
   process.exit(1);
 }
+
+// Runs last: a command body reaches every const in this module only once the
+// module has finished evaluating.
+const [handler, exitWhenDone] = resolveCommand(command);
+await handler();
+if (exitWhenDone) process.exit(0);

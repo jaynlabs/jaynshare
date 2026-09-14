@@ -13,8 +13,8 @@ function mgr(names, opts = {}) {
 test('distribution off: session id does not change quota-driven selection', () => {
   const am = mgr(['a', 'b']); // distributeSessions defaults false
   // Two different sessions both land on the current account (index 0), as before.
-  const s1 = am.getActiveAccount(null, null, null, 'sess-1');
-  const s2 = am.getActiveAccount(null, null, null, 'sess-2');
+  const s1 = am.getActiveAccount({ sessionId: 'sess-1' });
+  const s2 = am.getActiveAccount({ sessionId: 'sess-2' });
   assert.equal(s1.name, 'a');
   assert.equal(s2.name, 'a');
 });
@@ -22,23 +22,23 @@ test('distribution off: session id does not change quota-driven selection', () =
 test('distribution on: a new session goes to the least-loaded account', () => {
   const am = mgr(['a', 'b'], { distributeSessions: true });
   // Session 1 routes and is recorded on 'a'.
-  const s1 = am.getActiveAccount(null, null, null, 'sess-1');
+  const s1 = am.getActiveAccount({ sessionId: 'sess-1' });
   am.recordSession('sess-1', s1.index);
   assert.equal(s1.name, 'a');
   // Session 2, now that 'a' carries an active session, should spill to 'b'.
-  const s2 = am.getActiveAccount(null, null, null, 'sess-2');
+  const s2 = am.getActiveAccount({ sessionId: 'sess-2' });
   assert.equal(s2.name, 'b');
 });
 
 test('distribution on: an existing session stays pinned to its account (cache affinity)', () => {
   const am = mgr(['a', 'b'], { distributeSessions: true });
-  const first = am.getActiveAccount(null, null, null, 'sess-1');
+  const first = am.getActiveAccount({ sessionId: 'sess-1' });
   am.recordSession('sess-1', first.index);
   // Load up 'b' with two other sessions so it is now the busier account.
   am.recordSession('sess-x', 1);
   am.recordSession('sess-y', 1);
   // sess-1 must still return its original account, not the (now) less-loaded one.
-  const again = am.getActiveAccount(null, null, null, 'sess-1');
+  const again = am.getActiveAccount({ sessionId: 'sess-1' });
   assert.equal(again.index, first.index);
 });
 
@@ -46,7 +46,7 @@ test('distribution on: three sessions spread across three accounts', () => {
   const am = mgr(['a', 'b', 'c'], { distributeSessions: true });
   const seen = new Set();
   for (const sid of ['s1', 's2', 's3']) {
-    const acc = am.getActiveAccount(null, null, null, sid);
+    const acc = am.getActiveAccount({ sessionId: sid });
     am.recordSession(sid, acc.index);
     seen.add(acc.name);
   }
@@ -60,7 +60,7 @@ test('distribution on: priority still wins over session load-balancing', () => {
   ], 0.98, { distributeSessions: true });
   // New sessions stay in the higher-priority tier even as it fills up.
   for (const sid of ['s1', 's2', 's3']) {
-    const acc = am.getActiveAccount(null, null, null, sid);
+    const acc = am.getActiveAccount({ sessionId: sid });
     am.recordSession(sid, acc.index);
     assert.equal(acc.name, 'a');
   }
@@ -70,7 +70,7 @@ test('distribution on: a pinned session whose account is exhausted re-routes', (
   const am = mgr(['a', 'b'], { distributeSessions: true });
   am.recordSession('sess-1', 0);
   am.accounts[0].status = 'exhausted'; // 'a' no longer available
-  const acc = am.getActiveAccount(null, null, null, 'sess-1');
+  const acc = am.getActiveAccount({ sessionId: 'sess-1' });
   assert.equal(acc.name, 'b');
 });
 

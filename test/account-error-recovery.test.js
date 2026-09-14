@@ -13,23 +13,23 @@ function expiring(name) {
 
 // ── per-request failover (getActiveAccount exclude) ─────────────────────────
 
-test('getActiveAccount(exclude) fails over to another account', () => {
+test('getActiveAccount excludes the accounts already tried', () => {
   const am = new AccountManager([oauth('a'), oauth('b')], 0.98);
   const first = am.getActiveAccount();
-  const second = am.getActiveAccount(new Set([first.index]));
+  const second = am.getActiveAccount({ exclude: new Set([first.index]) });
   assert.ok(second);
   assert.notEqual(second.index, first.index);
 });
 
 test('getActiveAccount returns null when every account is excluded', () => {
   const am = new AccountManager([oauth('a'), oauth('b')], 0.98);
-  assert.equal(am.getActiveAccount(new Set([0, 1])), null);
+  assert.equal(am.getActiveAccount({ exclude: new Set([0, 1]) }), null);
 });
 
 test('excluding an account for one request never changes its persistent status', () => {
   // A transport failover must not sideline the account it skipped.
   const am = new AccountManager([oauth('a'), oauth('b')], 0.98);
-  am.getActiveAccount(new Set([0]));
+  am.getActiveAccount({ exclude: new Set([0]) });
   assert.equal(am.accounts[0].status, 'active');
 });
 

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import net from 'node:net';
 import { once } from 'node:events';
-import { createProxyRequestListener, relayUpgrade } from '../src/server.js';
+import { createProxyRequestListener, createUpgradeRelay } from '../src/server.js';
 
 async function listen(handler) {
   const server = http.createServer(handler);
@@ -88,7 +88,7 @@ test('relays a WebSocket Upgrade handshake and echoes bytes both ways', async ()
   });
 
   const proxy = http.createServer();
-  proxy.on('upgrade', (req, socket, head) => relayUpgrade(req, socket, head, `http://127.0.0.1:${upstreamPort}`, null));
+  proxy.on('upgrade', createUpgradeRelay({ upstream: `http://127.0.0.1:${upstreamPort}` }));
   proxy.listen(0);
   await once(proxy, 'listening');
   const port = proxy.address().port;
@@ -129,7 +129,7 @@ test('an upstream socket that dies mid-relay tears down the pair instead of cras
   });
 
   const proxy = http.createServer();
-  proxy.on('upgrade', (req, socket, head) => relayUpgrade(req, socket, head, `http://127.0.0.1:${upstreamPort}`, null));
+  proxy.on('upgrade', createUpgradeRelay({ upstream: `http://127.0.0.1:${upstreamPort}` }));
   proxy.listen(0);
   await once(proxy, 'listening');
   const port = proxy.address().port;

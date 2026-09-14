@@ -64,7 +64,7 @@ test('ensureCerts generates a CA + leaf covering the host and the test host, ide
 test('CONNECT to the test host is intercepted and answered locally (proxy + CA proof)', async () => {
   const { caCertPem } = await ensureCerts('api.anthropic.com');
   const am = new AccountManager([{ name: 'k', type: 'apikey', apiKey: 'sk' }], 0.98);
-  const proxy = createProxyServer(am, { proxy: { apiKey: 'k' }, upstream: 'https://api.anthropic.com' }, {});
+  const proxy = createProxyServer(am, { proxy: { apiKey: 'k' }, upstream: 'https://api.anthropic.com' }, { hooks: {} });
   const port = await listen(proxy);
   try {
     const sock = await connectTls(port, `${TEST_HOST}:443`, caCertPem, TEST_HOST);
@@ -83,7 +83,7 @@ test('CONNECT to a non-intercepted host is blind-tunneled', async () => {
   const echo = net.createServer((s) => s.pipe(s));
   const echoPort = await listen(echo);
   const am = new AccountManager([{ name: 'k', type: 'apikey', apiKey: 'sk' }], 0.98);
-  const proxy = createProxyServer(am, { proxy: { apiKey: 'k' }, upstream: 'https://api.anthropic.com' }, {});
+  const proxy = createProxyServer(am, { proxy: { apiKey: 'k' }, upstream: 'https://api.anthropic.com' }, { hooks: {} });
   const port = await listen(proxy);
   try {
     const raw = net.connect(port, '127.0.0.1');

@@ -559,7 +559,7 @@ function renderToString(tui) {
   const chunks = [];
   const orig = process.stdout.write;
   process.stdout.write = chunk => { chunks.push(chunk); return true; };
-  try { tui.running = true; tui._render(); } finally { process.stdout.write = orig; }
+  try { tui.running = true; tui._paint(tui._frame()); } finally { process.stdout.write = orig; }
   return stripAnsi(chunks.join(''));
 }
 

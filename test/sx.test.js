@@ -113,7 +113,7 @@ test('upstreamFetch routes through the proxy and exposes the fetch-Response surf
 
   try {
     // Non-streaming: status, headers.get/.entries, text/arrayBuffer.
-    const res = await upstreamFetch(`https://localhost:${upPort}/json`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }, sx, true);
+    const res = await upstreamFetch(`https://localhost:${upPort}/json`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }, sx);
     assert.equal(res.status, 200);
     assert.equal(res.headers.get('x-test'), 'yes');
     assert.equal(res.headers.get('X-Test'), 'yes', 'header lookup is case-insensitive');
@@ -124,7 +124,7 @@ test('upstreamFetch routes through the proxy and exposes the fetch-Response surf
     assert.equal(seen.target, `localhost:${upPort}`);
 
     // Streaming: body is a web ReadableStream with a working reader.
-    const sse = await upstreamFetch(`https://localhost:${upPort}/sse`, {}, sx, true);
+    const sse = await upstreamFetch(`https://localhost:${upPort}/sse`, {}, sx);
     assert.equal(sse.headers.get('content-type'), 'text/event-stream');
     const reader = sse.body.getReader();
     let streamed = '';
@@ -136,16 +136,16 @@ test('upstreamFetch routes through the proxy and exposes the fetch-Response surf
   }
 });
 
-test('upstreamFetch is plain global fetch when useProxy is false', T, async () => {
+test('upstreamFetch goes direct when no sx manager routes the attempt', T, async () => {
   const server = http.createServer((req, res) => { res.writeHead(200, { 'content-type': 'application/json' }); res.end('{"direct":true}'); });
   const port = await listen(server);
   try {
-    const res = await upstreamFetch(`http://127.0.0.1:${port}/`, {}, null, true);
+    const res = await upstreamFetch(`http://127.0.0.1:${port}/`, {});
     assert.equal(res.status, 200);
     assert.deepEqual(JSON.parse(await res.text()), { direct: true });
-    // useProxy=false goes direct even when provisioned (port 1 would fail)
-    const sx = { isProvisioned: () => true, getProxy: () => ({ host: '127.0.0.1', port: 1 }) };
-    const res2 = await upstreamFetch(`http://127.0.0.1:${port}/`, {}, sx, false);
+    // An unprovisioned manager is ignored rather than dialed (port 1 would fail)
+    const sx = { isProvisioned: () => false, getProxy: () => ({ host: '127.0.0.1', port: 1 }) };
+    const res2 = await upstreamFetch(`http://127.0.0.1:${port}/`, {}, sx);
     assert.equal(res2.status, 200);
   } finally { closeHard(server); }
 });

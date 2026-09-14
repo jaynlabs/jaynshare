@@ -27,7 +27,7 @@ async function post(port, body) {
 
 async function withServer(fn, hooks = {}) {
   const am = new AccountManager(ACCTS, 0.98);
-  const proxy = createProxyServer(am, CONFIG, hooks);
+  const proxy = createProxyServer(am, CONFIG, { hooks: hooks });
   const port = await listen(proxy);
   try {
     await fn(am, port, proxy);
@@ -109,7 +109,7 @@ test('switching to a disabled account succeeds but reports it as ineligible', as
     { name: 'live@example.com', type: 'apikey', apiKey: 'k1' },
     { name: 'off@example.com', type: 'apikey', apiKey: 'k2', disabled: true },
   ], 0.98);
-  const proxy = createProxyServer(am, CONFIG, {});
+  const proxy = createProxyServer(am, CONFIG, { hooks: {} });
   const port = await listen(proxy);
   try {
     const res = await post(port, JSON.stringify({ account: 'off@example.com' }));
@@ -140,7 +140,7 @@ test('a switch that priority will immediately override is reported as ineligible
     { name: 'high@example.com', type: 'apikey', apiKey: 'k1', priority: 0 },
     { name: 'low@example.com', type: 'apikey', apiKey: 'k2', priority: 1 },
   ], 0.98);
-  const proxy = createProxyServer(am, CONFIG, {});
+  const proxy = createProxyServer(am, CONFIG, { hooks: {} });
   const port = await listen(proxy);
   try {
     const res = await post(port, JSON.stringify({ account: 'low@example.com' }));
@@ -162,7 +162,7 @@ test('switching to the highest-priority account is eligible', async () => {
     { name: 'high@example.com', type: 'apikey', apiKey: 'k1', priority: 0 },
     { name: 'low@example.com', type: 'apikey', apiKey: 'k2', priority: 1 },
   ], 0.98);
-  const proxy = createProxyServer(am, CONFIG, {});
+  const proxy = createProxyServer(am, CONFIG, { hooks: {} });
   const port = await listen(proxy);
   try {
     am.currentIndex = 1;
@@ -198,7 +198,7 @@ test('a successful switch is logged, and says so when the target is ineligible',
     { name: 'live@example.com', type: 'apikey', apiKey: 'k1' },
     { name: 'off@example.com', type: 'apikey', apiKey: 'k2', disabled: true },
   ], 0.98);
-  const proxy = createProxyServer(am, CONFIG, {});
+  const proxy = createProxyServer(am, CONFIG, { hooks: {} });
   const port = await listen(proxy);
   const lines = [];
   const origLog = console.log;

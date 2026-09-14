@@ -132,7 +132,7 @@ test('a route pins a model glob to an exclusive set of accounts', () => {
   assert.equal(am._isAvailable(am.accounts[0], OPUS), true);
   assert.equal(am._isAvailable(am.accounts[1], OPUS), true);
   // getActiveAccount honors the route: a Fable request only ever returns b.
-  assert.equal(am.getActiveAccount(null, FABLE).name, 'b');
+  assert.equal(am.getActiveAccount({ model: FABLE }).name, 'b');
 });
 
 test('a route can be matched by account index as well as name', () => {
@@ -175,7 +175,7 @@ test('previewRouteIndex names the ONE account a model routes to, matching getAct
   // Every account is Fable-eligible, yet the marker must resolve to exactly one.
   const target = am.previewRouteIndex(FABLE);
   assert.equal(typeof target, 'number');
-  assert.equal(am.accounts[target].name, am.getActiveAccount(null, FABLE).name,
+  assert.equal(am.accounts[target].name, am.getActiveAccount({ model: FABLE }).name,
     'preview matches the account a real request would be served by');
 });
 

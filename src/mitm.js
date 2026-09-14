@@ -9,7 +9,7 @@ import tls from 'node:tls';
 import http2 from 'node:http2';
 import { getConfigPath } from './config.js';
 import { generateCertChain } from './x509.js';
-import { createProxyRequestListener, safeKeyEqual, isLoopbackAddr, relayUpgrade, resolveAccountPin } from './server.js';
+import { createProxyRequestListener, createUpgradeRelay, safeKeyEqual, isLoopbackAddr, resolveAccountPin } from './server.js';
 import { resolvePrincipal } from './client-auth.js';
 import { decodeAccountPreference } from './account-preference.js';
 
@@ -90,11 +90,7 @@ export function createConnectHandler({ config, accountManager, ensureLeaf, logDi
   // One terminating h2/h1 server per (client, pin, preference), minted lazily: a
   // listener bound to the account is how a CONNECT pin reaches the requests inside.
   const serverPromises = new Map();
-  const getServer = (pin = '', principal = null, preference = '') => {
-    const serverKey = `${principal?.clientId || 'local'}\0${pin}\0${preference}`;
-    let p = serverPromises.get(serverKey);
-    if (p) return p;
-    p = (async () => {
+  const startTerminatingServer = async ({ pin, preference, principal }) => {
     const { key, cert } = await ensureLeaf();
     const srv = http2.createSecureServer({ key, cert, allowHTTP1: true });
     srv.on('request', createProxyRequestListener({
@@ -104,89 +100,104 @@ export function createConnectHandler({ config, accountManager, ensureLeaf, logDi
       forcedPrincipal: principal,
       egress,
     }));
-    srv.on('upgrade', (req, socket, head) => relayUpgrade(req, socket, head, upstream, sx));
+    srv.on('upgrade', createUpgradeRelay({ upstream, sx }));
     srv.on('sessionError', (e) => log(`[Jaynshare] MITM session error: ${e.message}`));
     srv.on('clientError', (e, sock) => { try { sock.destroy(); } catch { /* already gone */ } });
     return srv;
-    })().catch((err) => {
+  };
+  const getServer = ({ pin = null, preference = null, principal = null }) => {
+    const serverKey = `${principal?.clientId || 'local'}\0${pin || ''}\0${preference || ''}`;
+    const running = serverPromises.get(serverKey);
+    if (running) return running;
+    const starting = startTerminatingServer({ pin, preference, principal }).catch((err) => {
       serverPromises.delete(serverKey); // a cached rejection would dead-end the MITM path
       throw err;
     });
-    serverPromises.set(serverKey, p);
-    return p;
+    serverPromises.set(serverKey, starting);
+    return starting;
   };
 
   return (req, clientSocket, head) => {
     clientSocket.on('error', () => {});
 
-    // Same gate as the HTTP path; an unauthenticated remote client would otherwise
-    // get an account token injected, or an open relay.
+    // An unauthenticated remote client would otherwise get an account token
+    // injected, or an open relay.
     const principal = connectPrincipal(req, clientSocket, config);
-    if (!principal) {
-      try {
-        clientSocket.write('HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm="jaynshare"\r\nConnection: close\r\n\r\n');
-      } catch { /* client already gone */ }
-      clientSocket.destroy();
-      return;
-    }
+    if (!principal) { refuseConnect(clientSocket); return; }
 
     const [host, portStr] = (req.url || '').split(':');
     const port = parseInt(portStr, 10) || 443;
-    const mode = hostMode(host, config);
 
-    if (mode === 'tunnel') {
-      let established = false, closed = false;
-      // Tears down both sockets once; before the tunnel is live the client is still owed a status line.
-      const teardown = (statusLine) => {
-        if (closed) return;
-        closed = true;
-        if (!established && statusLine) {
-          try { clientSocket.write(`HTTP/1.1 ${statusLine}\r\nConnection: close\r\n\r\n`); } catch { /* client already gone */ }
-        }
-        up.destroy(); clientSocket.destroy();
-      };
-      const up = net.connect(port, host, () => {
-        established = true;
-        reply200Raw(clientSocket);
-        if (head && head.length) up.write(head);
-        up.pipe(clientSocket); clientSocket.pipe(up);
-      });
-      up.on('error', (err) => {
-        if (!established) log(`[Jaynshare] tunnel ${host}:${port} failed: ${err.message}`);
-        teardown('502 Bad Gateway');
-      });
-      up.on('close', () => teardown('502 Bad Gateway')); // a FIN before the tunnel is live is a failed dial
-      clientSocket.on('close', () => teardown());
-      up.setTimeout(30_000, () => teardown('504 Gateway Timeout'));
-      return;
+    switch (hostMode(host, config)) {
+      case 'tunnel':
+        blindTunnel({ clientSocket, head }, { host, port }, log);
+        return;
+      case 'test':
+        serveTestHost({ clientSocket, head }, ensureLeaf, log);
+        return;
+      default:
+        // Pins are resolved only here: clients send Proxy-Authorization on every
+        // CONNECT, and a pin is meaningless on a blind tunnel.
+        rewriteTunnel({ req, clientSocket, head }, { host, accountManager, config, principal, getServer }, log);
     }
-
-    if (mode === 'test') {
-      ensureLeaf().then(({ key, cert }) => {
-        reply200Raw(clientSocket);
-        serveTest(termClaude(clientSocket, head, key, cert, ['http/1.1']));
-      }).catch((err) => { log(`[Jaynshare] MITM ${host}: ${err.message}`); reply502Raw(clientSocket); clientSocket.destroy(); });
-      return;
-    }
-
-    // rewrite. Pins are resolved only here: clients send Proxy-Authorization on
-    // every CONNECT, and a pin is meaningless on a blind tunnel.
-    const { pin, preference, error } = resolveConnectPin(req, accountManager, config, principal);
-    if (error) {
-      log(`[Jaynshare] CONNECT ${host}: ${error}`);
-      try {
-        clientSocket.write(`HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm="jaynshare"\r\nConnection: close\r\n\r\n`);
-      } catch { /* client already gone */ }
-      clientSocket.destroy();
-      return;
-    }
-
-    getServer(pin || '', principal, preference || '').then((srv) => {
-      reply200Raw(clientSocket);
-      if (head && head.length) clientSocket.unshift(head);
-      srv.emit('connection', clientSocket);
-    }).catch((err) => { log(`[Jaynshare] MITM ${host}: ${err.message}`); reply502Raw(clientSocket); clientSocket.destroy(); });
   };
+}
+
+function refuseConnect(clientSocket) {
+  try {
+    clientSocket.write('HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm="jaynshare"\r\nConnection: close\r\n\r\n');
+  } catch { /* client already gone */ }
+  clientSocket.destroy();
+}
+
+/** Bytes in both directions, no TLS termination and no account logic. */
+function blindTunnel({ clientSocket, head }, { host, port }, log) {
+  let established = false, closed = false;
+  // Tears down both sockets once; before the tunnel is live the client is still owed a status line.
+  const teardown = (statusLine) => {
+    if (closed) return;
+    closed = true;
+    if (!established && statusLine) {
+      try { clientSocket.write(`HTTP/1.1 ${statusLine}\r\nConnection: close\r\n\r\n`); } catch { /* client already gone */ }
+    }
+    up.destroy(); clientSocket.destroy();
+  };
+  const up = net.connect(port, host, () => {
+    established = true;
+    reply200Raw(clientSocket);
+    if (head && head.length) up.write(head);
+    up.pipe(clientSocket); clientSocket.pipe(up);
+  });
+  up.on('error', (err) => {
+    if (!established) log(`[Jaynshare] tunnel ${host}:${port} failed: ${err.message}`);
+    teardown('502 Bad Gateway');
+  });
+  up.on('close', () => teardown('502 Bad Gateway')); // a FIN before the tunnel is live is a failed dial
+  clientSocket.on('close', () => teardown());
+  up.setTimeout(30_000, () => teardown('504 Gateway Timeout'));
+}
+
+function serveTestHost({ clientSocket, head }, ensureLeaf, log) {
+  ensureLeaf().then((leaf) => {
+    reply200Raw(clientSocket);
+    serveTest(terminateTls({ clientSocket, head }, leaf));
+  }).catch((err) => { log(`[Jaynshare] MITM ${TEST_HOST}: ${err.message}`); reply502Raw(clientSocket); clientSocket.destroy(); });
+}
+
+/** Hands the socket to a terminating h2/h1 server bound to this client's pin. */
+function rewriteTunnel({ req, clientSocket, head }, { host, accountManager, config, principal, getServer }, log) {
+  const { pin, preference, error } = resolveConnectPin(req, { accountManager, config, principal });
+  if (error) {
+    log(`[Jaynshare] CONNECT ${host}: ${error}`);
+    refuseConnect(clientSocket);
+    return;
+  }
+
+  getServer({ pin, preference, principal }).then((srv) => {
+    reply200Raw(clientSocket);
+    if (head && head.length) clientSocket.unshift(head);
+    srv.emit('connection', clientSocket);
+  }).catch((err) => { log(`[Jaynshare] MITM ${host}: ${err.message}`); reply502Raw(clientSocket); clientSocket.destroy(); });
 }
 
 // The Basic username of a CONNECT: the only pin channel an HTTPS_PROXY URL can express.
@@ -200,10 +211,10 @@ export function connectPinToken(req) {
 
 // The proxy key wins over an account of the same name. An unknown username is an
 // error, never a silently ignored pin.
-export function resolveConnectPin(req, accountManager, configOrKey, principal = null) {
+export function resolveConnectPin(req, { accountManager, config, principal = null }) {
   const token = connectPinToken(req);
   if (!token) return { pin: null, error: null };
-  const legacyKey = typeof configOrKey === 'string' ? configOrKey : configOrKey?.proxy?.apiKey;
+  const legacyKey = config?.proxy?.apiKey;
   if (legacyKey && safeKeyEqual(token, legacyKey)) return { pin: null, error: null };
   if (principal && token === principal.clientId) return { pin: null, error: null };
   let preference;
@@ -226,46 +237,31 @@ export function resolveConnectPin(req, accountManager, configOrKey, principal = 
   return { pin: token, error: null };
 }
 
-// Bearer <key>, or Basic with the key as username or password (`--proxy http://<key>@host:port`).
-export function connectAuthorized(req, socket, proxyApiKey) {
-  if (typeof proxyApiKey === 'object') return !!connectPrincipal(req, socket, proxyApiKey);
-  if (!proxyApiKey) return true;
-  if (isLoopbackAddr(socket?.remoteAddress)) return true;
+// The credential a CONNECT presents: Bearer <key>, or Basic with the key as the
+// password, else the username (`--proxy http://<key>@host:port`).
+function presentedCredential(req) {
   const m = /^\s*(basic|bearer)\s+(.+?)\s*$/i.exec(req?.headers?.['proxy-authorization'] || '');
-  if (!m) return false;
-  let presented = m[2];
-  if (m[1].toLowerCase() === 'basic') {
-    const dec = Buffer.from(m[2], 'base64').toString('utf8');
-    const i = dec.indexOf(':');
-    const user = i >= 0 ? dec.slice(0, i) : dec;
-    const pass = i >= 0 ? dec.slice(i + 1) : '';
-    presented = pass || user;
-  }
-  return safeKeyEqual(presented, proxyApiKey);
+  if (!m) return null;
+  if (m[1].toLowerCase() !== 'basic') return m[2];
+  const decoded = Buffer.from(m[2], 'base64').toString('utf8');
+  const colon = decoded.indexOf(':');
+  const user = colon >= 0 ? decoded.slice(0, colon) : decoded;
+  const pass = colon >= 0 ? decoded.slice(colon + 1) : '';
+  return pass || user;
 }
 
+/** The same gate as the HTTP path; loopback is exempt, as it is there. */
 export function connectPrincipal(req, socket, config) {
-  const local = isLoopbackAddr(socket?.remoteAddress);
-  if (local) return resolvePrincipal(config, null, { local: true });
-  const m = /^\s*(basic|bearer)\s+(.+?)\s*$/i.exec(req?.headers?.['proxy-authorization'] || '');
-  if (!m) return resolvePrincipal(config, null);
-  let presented = m[2];
-  if (m[1].toLowerCase() === 'basic') {
-    const decoded = Buffer.from(m[2], 'base64').toString('utf8');
-    const colon = decoded.indexOf(':');
-    const user = colon >= 0 ? decoded.slice(0, colon) : decoded;
-    const pass = colon >= 0 ? decoded.slice(colon + 1) : '';
-    presented = pass || user;
-  }
-  return resolvePrincipal(config, presented);
+  if (isLoopbackAddr(socket?.remoteAddress)) return resolvePrincipal(config, null, { local: true });
+  return resolvePrincipal(config, presentedCredential(req));
 }
 
 function reply200Raw(sock) { sock.write('HTTP/1.1 200 Connection Established\r\n\r\n'); }
 function reply502Raw(sock) { try { sock.write('HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n'); } catch { /* client already gone */ } }
 
-function termClaude(clientSocket, head, key, cert, alpn) {
+function terminateTls({ clientSocket, head }, { key, cert }) {
   if (head && head.length) clientSocket.unshift(head);
-  const t = new tls.TLSSocket(clientSocket, { isServer: true, key, cert, ALPNProtocols: alpn });
+  const t = new tls.TLSSocket(clientSocket, { isServer: true, key, cert, ALPNProtocols: ['http/1.1'] });
   t.on('error', () => t.destroy());
   return t;
 }

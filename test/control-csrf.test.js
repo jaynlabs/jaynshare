@@ -17,7 +17,7 @@ const ACCTS = [
 
 async function withServer(fn, hooks = {}) {
   const am = new AccountManager(ACCTS, 0.98);
-  const proxy = createProxyServer(am, CONFIG, hooks);
+  const proxy = createProxyServer(am, CONFIG, { hooks: hooks });
   const port = await listen(proxy);
   try {
     await fn(am, port);

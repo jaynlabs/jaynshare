@@ -30,11 +30,11 @@ test('a preference is tried first without changing global selection and then fal
     { name: 'global', type: 'apikey', apiKey: 'a' },
     { name: 'preferred', type: 'apikey', apiKey: 'b' },
   ]);
-  assert.equal(am.getActiveAccount(null, null, null, null, 1).name, 'preferred');
+  assert.equal(am.getActiveAccount({ preferredIndex: 1 }).name, 'preferred');
   assert.equal(am.currentIndex, 0);
-  assert.equal(am.getActiveAccount(new Set([1]), null, null, null, 1).name, 'global');
+  assert.equal(am.getActiveAccount({ exclude: new Set([1]), preferredIndex: 1 }).name, 'global');
   am.accounts[1].disabled = true;
-  assert.equal(am.getActiveAccount(null, null, null, null, 1).name, 'global');
+  assert.equal(am.getActiveAccount({ preferredIndex: 1 }).name, 'global');
 });
 
 test('a preference cannot bypass an exclusive model route', () => {
@@ -42,5 +42,5 @@ test('a preference cannot bypass an exclusive model route', () => {
     { name: 'route-owner', type: 'apikey', apiKey: 'a' },
     { name: 'preferred', type: 'apikey', apiKey: 'b' },
   ], 0.98, { routes: [{ name: 'special', match: ['special-*'], accounts: ['route-owner'] }] });
-  assert.equal(am.getActiveAccount(null, 'special-model', null, null, 1).name, 'route-owner');
+  assert.equal(am.getActiveAccount({ model: 'special-model', preferredIndex: 1 }).name, 'route-owner');
 });

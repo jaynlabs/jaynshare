@@ -13,7 +13,7 @@ const ACCT = [{ name: 'a', type: 'apikey', apiKey: 'k' }];
 test('POST /jaynshare/reload invokes hooks.reload and returns the added count', async () => {
   const am = new AccountManager(ACCT, 0.98);
   let called = 0;
-  const proxy = createProxyServer(am, CONFIG, { reload: async () => { called++; return 2; } });
+  const proxy = createProxyServer(am, CONFIG, { hooks: { reload: async () => { called++; return 2; } } });
   const port = await listen(proxy);
   try {
     const res = await fetch(`http://127.0.0.1:${port}/jaynshare/reload`, { method: 'POST' });
@@ -29,7 +29,7 @@ test('POST /jaynshare/reload invokes hooks.reload and returns the added count', 
 
 test('reload returns 501 when no reload handler is wired', async () => {
   const am = new AccountManager(ACCT, 0.98);
-  const proxy = createProxyServer(am, CONFIG, {});
+  const proxy = createProxyServer(am, CONFIG, { hooks: {} });
   const port = await listen(proxy);
   try {
     const res = await fetch(`http://127.0.0.1:${port}/jaynshare/reload`, { method: 'POST' });
@@ -43,7 +43,7 @@ test('reload returns 501 when no reload handler is wired', async () => {
 
 test('reload reports handler errors as 500', async () => {
   const am = new AccountManager(ACCT, 0.98);
-  const proxy = createProxyServer(am, CONFIG, { reload: async () => { throw new Error('boom'); } });
+  const proxy = createProxyServer(am, CONFIG, { hooks: { reload: async () => { throw new Error('boom'); } } });
   const port = await listen(proxy);
   try {
     const res = await fetch(`http://127.0.0.1:${port}/jaynshare/reload`, { method: 'POST' });

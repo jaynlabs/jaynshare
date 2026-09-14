@@ -50,3 +50,22 @@ export function matchAccounts(accounts, query, orgFilter) {
   }
   return matches;
 }
+
+export function orgLabel(acct) {
+  return acct.orgName || (acct.orgUuid ? acct.orgUuid.slice(0, 8) : 'org');
+}
+
+/**
+ * A second org for the same person: the email-derived names would collide, so the
+ * new entry and the ones it clashes with all gain an org suffix.
+ */
+export function withOrgSuffixes(accounts, incoming) {
+  const clashes = a => a.accountUuid && a.accountUuid === incoming.accountUuid && !sameIdentity(a, incoming);
+  if (!accounts.some(clashes)) return { accounts, incoming };
+  return {
+    accounts: accounts.map(a =>
+      clashes(a) && !a.name.includes(' (') ? { ...a, name: `${a.name} (${orgLabel(a)})` } : a
+    ),
+    incoming: { ...incoming, name: `${incoming.name} (${orgLabel(incoming)})` },
+  };
+}

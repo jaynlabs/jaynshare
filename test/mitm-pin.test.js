@@ -87,33 +87,33 @@ async function postOverTunnel(tlsSock, headers = {}) {
 
 test('the Basic username selects the account', () => {
   const am = { accounts: [{ name: 'work' }, { name: 'personal' }] };
-  assert.deepEqual(resolveConnectPin({ headers: { 'proxy-authorization': basic('work:k') } }, am, 'k'), { pin: 'work', error: null });
+  assert.deepEqual(resolveConnectPin({ headers: { 'proxy-authorization': basic('work:k') } }, { accountManager: am, config: { proxy: { apiKey: 'k' } } }), { pin: 'work', error: null });
   // No key configured — username alone still pins.
-  assert.deepEqual(resolveConnectPin({ headers: { 'proxy-authorization': basic('personal:') } }, am, null), { pin: 'personal', error: null });
+  assert.deepEqual(resolveConnectPin({ headers: { 'proxy-authorization': basic('personal:') } }, { accountManager: am, config: {} }), { pin: 'personal', error: null });
   // A rotation index is not a pin form — array position moves under deletion.
-  assert.deepEqual(resolveConnectPin({ headers: { 'proxy-authorization': basic('1:') } }, am, null), { pin: null, error: 'Unknown account pin "1"' });
+  assert.deepEqual(resolveConnectPin({ headers: { 'proxy-authorization': basic('1:') } }, { accountManager: am, config: {} }), { pin: null, error: 'Unknown account pin "1"' });
 });
 
 // The documented `--proxy http://<key>@host:port` form puts the key in the username slot.
 test('a username equal to the proxy key is auth, not a pin', () => {
   const am = { accounts: [{ name: 'work' }] };
-  assert.deepEqual(resolveConnectPin({ headers: { 'proxy-authorization': basic('secret:') } }, am, 'secret'), { pin: null, error: null });
+  assert.deepEqual(resolveConnectPin({ headers: { 'proxy-authorization': basic('secret:') } }, { accountManager: am, config: { proxy: { apiKey: 'secret' } } }), { pin: null, error: null });
   // Even when an account is (unwisely) named after the key, auth wins.
   const clash = { accounts: [{ name: 'secret' }] };
-  assert.deepEqual(resolveConnectPin({ headers: { 'proxy-authorization': basic('secret:') } }, clash, 'secret'), { pin: null, error: null });
+  assert.deepEqual(resolveConnectPin({ headers: { 'proxy-authorization': basic('secret:') } }, { accountManager: clash, config: { proxy: { apiKey: 'secret' } } }), { pin: null, error: null });
 });
 
 test('an unknown username is an error rather than an ignored pin', () => {
   const am = { accounts: [{ name: 'work' }] };
-  const { pin, error } = resolveConnectPin({ headers: { 'proxy-authorization': basic('typo:') } }, am, 'secret');
+  const { pin, error } = resolveConnectPin({ headers: { 'proxy-authorization': basic('typo:') } }, { accountManager: am, config: { proxy: { apiKey: 'secret' } } });
   assert.equal(pin, null);
   assert.match(error, /Unknown account pin "typo"/);
 });
 
 test('no header, or a Bearer key, yields no pin', () => {
   const am = { accounts: [{ name: 'work' }] };
-  assert.deepEqual(resolveConnectPin({ headers: {} }, am, 'secret'), { pin: null, error: null });
-  assert.deepEqual(resolveConnectPin({ headers: { 'proxy-authorization': 'Bearer secret' } }, am, 'secret'), { pin: null, error: null });
+  assert.deepEqual(resolveConnectPin({ headers: {} }, { accountManager: am, config: { proxy: { apiKey: 'secret' } } }), { pin: null, error: null });
+  assert.deepEqual(resolveConnectPin({ headers: { 'proxy-authorization': 'Bearer secret' } }, { accountManager: am, config: { proxy: { apiKey: 'secret' } } }), { pin: null, error: null });
   assert.equal(connectPinToken({ headers: {} }), null);
 });
 
@@ -121,13 +121,13 @@ test('a namespaced CONNECT username carries a soft preference, not a strict pin'
   const am = { accounts: [{ name: 'friend@example.com', accountUuid: 'account-id', orgUuid: 'org-id' }] };
   assert.deepEqual(resolveConnectPin({
     headers: { 'proxy-authorization': basic(`${encodeAccountPreference('friend@example.com')}:secret`) },
-  }, am, null), { pin: null, preference: 'account-id/org-id', error: null });
+  }, { accountManager: am, config: {} }), { pin: null, preference: 'account-id/org-id', error: null });
   assert.match(resolveConnectPin({
     headers: { 'proxy-authorization': basic(`${encodeAccountPreference('missing')}:secret`) },
-  }, am, null).error, /Unknown account preference/);
+  }, { accountManager: am, config: {} }).error, /Unknown account preference/);
   assert.match(resolveConnectPin({
     headers: { 'proxy-authorization': basic(`${ACCOUNT_PREFERENCE_PREFIX}!:secret`) },
-  }, am, null).error, /malformed account preference/);
+  }, { accountManager: am, config: {} }).error, /malformed account preference/);
 });
 
 // ── end to end through a real tunnel ──────────────────────────────────────────

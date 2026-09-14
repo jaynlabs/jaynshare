@@ -1,6 +1,6 @@
 import { createWriteStream } from 'node:fs';
 import { importCredentials, fetchProfile } from './oauth.js';
-import { sameIdentity, findUpsertTarget } from './identity.js';
+import { sameIdentity, findUpsertTarget, withOrgSuffixes } from './identity.js';
 import { parseProxyUrl, proxyToUrl, describeProxy, resolveUpstreamProxy, setUpstreamProxy, getUpstreamProxy } from './upstream-proxy.js';
 
 const SPINNER = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'.split('');
@@ -148,6 +148,41 @@ export function bar(ratio, w = 10, resetTs) {
 
 function timestamp() {
   return new Date().toLocaleTimeString('en-US', { hour12: false });
+}
+
+function accountStatusLabel(account, isCurrent) {
+  if (account.disabled) return gray('disabled');
+  switch (account.status) {
+    case 'active':    return isCurrent ? green('active') : 'active';
+    case 'throttled': return yellow('throttled');
+    case 'exhausted': return red('exhausted');
+    case 'error':     return red('error');
+    default:          return account.status || 'ready';
+  }
+}
+
+/** The two bars every row shows: subscription windows when known, else the API-key counters. */
+function quotaBars(q) {
+  if (q.unified5h != null || q.unified7d != null || q.unified7dSonnet != null || q.unified7dFable != null) {
+    return [
+      { label: 'Ses', ratio: q.unified5h, reset: q.unified5hReset },
+      { label: 'Wk ', ratio: q.unified7d, reset: q.unified7dReset },
+    ];
+  }
+  const reset = q.resetsAt ? new Date(q.resetsAt).getTime() : null;
+  const used = (remaining, limit) => (limit != null && remaining != null ? 1 - remaining / limit : null);
+  return [
+    { label: 'Tok', ratio: used(q.tokensRemaining, q.tokensLimit), reset },
+    { label: 'Req', ratio: used(q.requestsRemaining, q.requestsLimit), reset },
+  ];
+}
+
+/** Families whose own weekly bucket is at or over the switch threshold. */
+function spentFamilies(q, threshold) {
+  const spent = [];
+  if (q.unified7dSonnet != null && q.unified7dSonnet >= threshold) spent.push('Sonnet');
+  if (q.unified7dFable != null && q.unified7dFable >= threshold) spent.push('Fable');
+  return spent;
 }
 
 export class TUI {
@@ -761,71 +796,63 @@ export class TUI {
       this._addLog('Importing credentials...');
       const creds = await this._readCredentials('~/.claude/.credentials.json');
       const profile = await this._readProfile(creds.accessToken);
-      const profileOk = profile && !profile.error;
-
-      if (!profileOk) {
+      if (!profile || profile.error) {
         this._addLog(`Warning: could not fetch profile — ${profile?.error || 'no token'}`);
       }
 
-      let name;
-      if (profile?.email) {
-        name = profile.email;
-        const tier = profile.hasClaudeMax ? 'Max' : profile.hasClaudePro ? 'Pro' : null;
-        if (tier) this._addLog(`Detected Claude ${tier}: ${name}`);
-      } else {
-        const n = this.config.accounts.filter(a => a.name.startsWith('account-')).length + 1;
-        name = `account-${n}`;
-      }
-
-      const entry = {
-        name, type: 'oauth', source: 'import',
-        accountUuid: profile?.accountUuid || null,
-        orgUuid: profile?.orgUuid || null,
-        orgName: profile?.orgName || null,
-        accessToken: creds.accessToken,
-        refreshToken: creds.refreshToken,
-        expiresAt: creds.expiresAt,
-      };
-
-      const idx = findUpsertTarget(this.config.accounts, entry);
-
-      if (idx >= 0) {
-        const prev = this.config.accounts[idx];
-        this.config.accounts[idx] = { ...prev, ...entry, name: prev.name };
-        const amAcct = this.am.accounts.find(a => sameIdentity(a, entry)) || this.am.accounts[idx];
-        if (amAcct) {
-          amAcct.credential = creds.accessToken;
-          amAcct.refreshToken = creds.refreshToken;
-          amAcct.expiresAt = creds.expiresAt;
-          amAcct.accountUuid = entry.accountUuid;
-          amAcct.orgUuid = entry.orgUuid;
-          amAcct.orgName = entry.orgName;
-          if (amAcct.status === 'error') amAcct.status = 'active';
-        }
-        this._addLog(`Updated account "${prev.name}"`);
-      } else {
-        // A second org for the same person: the email-derived names collide.
-        if (profile?.accountUuid) {
-          const orgLbl = a => a.orgName || (a.orgUuid ? a.orgUuid.slice(0, 8) : 'org');
-          const collisions = this.config.accounts.filter(
-            a => a.accountUuid === entry.accountUuid && !sameIdentity(a, entry)
-          );
-          if (collisions.length > 0) {
-            for (const c of collisions) {
-              if (!c.name.includes(' (')) c.name = `${c.name} (${orgLbl(c)})`;
-            }
-            entry.name = `${name} (${orgLbl(entry)})`;
-          }
-        }
-        this.config.accounts.push(entry);
-        this.am.addAccount(entry);
-        this._addLog(`Imported account "${entry.name}"`);
-      }
+      const entry = this._importedEntry(creds, profile);
+      const at = findUpsertTarget(this.config.accounts, entry);
+      if (at >= 0) this._updateImported(at, entry);
+      else this._addImported(entry);
 
       await this.saveConfig(this.config);
     } catch (e) {
       this._addLog(`Import failed: ${e.message}`);
     }
+  }
+
+  _importedEntry(creds, profile) {
+    let name = profile?.email;
+    if (name) {
+      const tier = profile.hasClaudeMax ? 'Max' : profile.hasClaudePro ? 'Pro' : null;
+      if (tier) this._addLog(`Detected Claude ${tier}: ${name}`);
+    } else {
+      const n = this.config.accounts.filter(a => a.name.startsWith('account-')).length + 1;
+      name = `account-${n}`;
+    }
+    return {
+      name, type: 'oauth', source: 'import',
+      accountUuid: profile?.accountUuid || null,
+      orgUuid: profile?.orgUuid || null,
+      orgName: profile?.orgName || null,
+      accessToken: creds.accessToken,
+      refreshToken: creds.refreshToken,
+      expiresAt: creds.expiresAt,
+    };
+  }
+
+  /** Refreshes the config entry and, when it is already running, the live account. */
+  _updateImported(at, entry) {
+    const prev = this.config.accounts[at];
+    this.config.accounts[at] = { ...prev, ...entry, name: prev.name };
+    const live = this.am.accounts.find(a => sameIdentity(a, entry)) || this.am.accounts[at];
+    if (live) {
+      live.credential = entry.accessToken;
+      live.refreshToken = entry.refreshToken;
+      live.expiresAt = entry.expiresAt;
+      live.accountUuid = entry.accountUuid;
+      live.orgUuid = entry.orgUuid;
+      live.orgName = entry.orgName;
+      if (live.status === 'error') live.status = 'active';
+    }
+    this._addLog(`Updated account "${prev.name}"`);
+  }
+
+  _addImported(entry) {
+    const { accounts, incoming } = withOrgSuffixes(this.config.accounts, entry);
+    this.config.accounts = [...accounts, incoming];
+    this.am.addAccount(incoming);
+    this._addLog(`Imported account "${incoming.name}"`);
   }
 
   async _doAddKey(apiKey) {
@@ -864,29 +891,33 @@ export class TUI {
     if (this._rendering) return; // _addLog re-enters
     this._rendering = true;
     try {
-      this._render(force);
+      const frame = this._frame();
+      if (force) this._paint(frame);
+      else this._paintIfChanged(frame);
     } finally {
       this._rendering = false;
     }
   }
 
-  _paint(buf, force) {
+  _paintIfChanged(buf) {
     const stale = Date.now() - (this._lastPaintAt || 0) >= FORCE_REPAINT_MS;
-    if (!force && !stale && buf === this._lastFrame) return;
+    if (!stale && buf === this._lastFrame) return;
+    this._paint(buf);
+  }
+
+  _paint(buf) {
     this._lastFrame = buf;
     this._lastPaintAt = Date.now();
     process.stdout.write(buf);
   }
 
-  _render(force = false) {
+  /** Builds the whole screen; painting it is the caller's job. */
+  _frame() {
     this.am.refreshExpiredQuotas();
     const W = process.stdout.columns || 80;
     const H = process.stdout.rows || 24;
 
-    if (W < 40 || H < 8) {
-      this._paint(`${ESC}H${ESC}2JTerminal too small (need 40x8+)\r\n`, force);
-      return;
-    }
+    if (W < 40 || H < 8) return `${ESC}H${ESC}2JTerminal too small (need 40x8+)\r\n`;
 
     const footerH = 2;
     const lines = [];
@@ -919,7 +950,7 @@ export class TUI {
       if (i < H - 1) buf += '\r\n';
     }
     buf += this.mode === 'input' ? `${ESC}?25h` : `${ESC}?25l`;
-    this._paint(buf, force);
+    return buf;
   }
 
   _renderHeader(lines, W) {
@@ -948,17 +979,25 @@ export class TUI {
       ? Math.max(5, Math.min(20, Math.floor((W - 56) / 2)))
       : Math.max(5, Math.min(20, W - 45));
 
+    const layout = { barWidth: bw, showBoth, ...this._routeLayout() };
+    for (let i = 0; i < this.am.accounts.length; i++) {
+      lines.push(this._renderAcct(i, layout));
+    }
+  }
+
+  /** The route markers every account row shares: one column per general route, one ► per family. */
+  _routeLayout() {
     const routes = this.am.getRoutes();
-    const genRoutes = routes.filter(r => routeFamily(r) === null);
     const anyFable = this.am.accounts.some(a => a.quota.unified7dFable != null);
     const anySonnet = this.am.accounts.some(a => a.quota.unified7dSonnet != null);
-    const familyTarget = {
-      fable: anyFable ? this.am.previewRouteIndex('claude-fable-5') : null,
-      sonnet: anySonnet ? this.am.previewRouteIndex('claude-sonnet-4-6') : null,
+    return {
+      routes,
+      genRoutes: routes.filter(r => routeFamily(r) === null),
+      familyTarget: {
+        fable: anyFable ? this.am.previewRouteIndex('claude-fable-5') : null,
+        sonnet: anySonnet ? this.am.previewRouteIndex('claude-sonnet-4-6') : null,
+      },
     };
-    for (let i = 0; i < this.am.accounts.length; i++) {
-      lines.push(this._renderAcct(i, bw, showBoth, routes, genRoutes, familyTarget));
-    }
   }
 
   /** In-flight requests, then the completed log down to `maxLines`. Attach mode sees only its own messages. */
@@ -985,7 +1024,7 @@ export class TUI {
     }
   }
 
-  _renderAcct(idx, bw, showBoth, routes = this.am.getRoutes(), genRoutes = routes.filter(r => routeFamily(r) === null), familyTarget = {}) {
+  _renderAcct(idx, { barWidth, showBoth, routes = [], genRoutes = [], familyTarget = {} }) {
     const a = this.am.accounts[idx];
     const isCur = idx === this.am.currentIndex;
     const isSel = this.mode === 'select' && idx === this.selIdx;
@@ -1012,52 +1051,22 @@ export class TUI {
     const rawName = a.name.slice(0, 12).padEnd(12);
     const name = isSel ? bold(rawName) : rawName;
     const type = gray(a.type.padEnd(7));
-
-    let status;
-    if (a.disabled) {
-      status = gray('disabled');
-    } else switch (a.status) {
-      case 'active':    status = isCur ? green('active') : 'active'; break;
-      case 'throttled': status = yellow('throttled'); break;
-      case 'exhausted': status = red('exhausted'); break;
-      case 'error':     status = red('error'); break;
-      default:          status = a.status || 'ready';
-    }
-    status = rpad(status, 10);
+    const status = rpad(accountStatusLabel(a, isCur), 10);
 
     const q = a.quota;
-    let r1 = null, r2 = null, l1 = 'Ses', l2 = 'Wk ', t1 = null, t2 = null;
+    const [primary, secondary] = quotaBars(q);
 
-    if (q.unified5h != null || q.unified7d != null || q.unified7dSonnet != null || q.unified7dFable != null) {
-      r1 = q.unified5h;
-      r2 = q.unified7d;
-      t1 = q.unified5hReset;
-      t2 = q.unified7dReset;
-    } else {
-      l1 = 'Tok';
-      l2 = 'Req';
-      r1 = (q.tokensLimit != null && q.tokensRemaining != null)
-        ? 1 - q.tokensRemaining / q.tokensLimit : null;
-      r2 = (q.requestsLimit != null && q.requestsRemaining != null)
-        ? 1 - q.requestsRemaining / q.requestsLimit : null;
-      t1 = q.resetsAt ? new Date(q.resetsAt).getTime() : null;
-      t2 = t1;
-    }
-
-    let line = ` ${sel}${cur} ${startSlot}${name} ${type} ${status} ${l1} ${bar(r1, bw, t1)}`;
+    let line = ` ${sel}${cur} ${startSlot}${name} ${type} ${status} ${primary.label} ${bar(primary.ratio, barWidth, primary.reset)}`;
     if (showBoth) {
-      line += `  ${l2} ${bar(r2, bw, t2)}`;
+      line += `  ${secondary.label} ${bar(secondary.ratio, barWidth, secondary.reset)}`;
       if (q.unified7dSonnet != null) {
-        line += ` ${familyMark('sonnet')}S7  ${bar(q.unified7dSonnet, bw, q.unified7dSonnetReset)}`;
+        line += ` ${familyMark('sonnet')}S7  ${bar(q.unified7dSonnet, barWidth, q.unified7dSonnetReset)}`;
       }
       if (q.unified7dFable != null) {
-        line += ` ${familyMark('fable')}F7  ${bar(q.unified7dFable, bw, q.unified7dFableReset)}`;
+        line += ` ${familyMark('fable')}F7  ${bar(q.unified7dFable, barWidth, q.unified7dFableReset)}`;
       }
     }
-    const th = this.am.switchThreshold;
-    const blocked = [];
-    if (q.unified7dSonnet != null && q.unified7dSonnet >= th) blocked.push('Sonnet');
-    if (q.unified7dFable != null && q.unified7dFable >= th) blocked.push('Fable');
+    const blocked = spentFamilies(q, this.am.switchThreshold);
     if (blocked.length) line += `  ${red('⊘ ' + blocked.join(' '))}`;
     return line;
   }

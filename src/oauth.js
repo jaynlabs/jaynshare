@@ -49,63 +49,61 @@ const OAUTH_USAGE_BETA = 'oauth-2025-04-20';
 const DEFAULT_TOKEN_ENDPOINT = 'https://platform.claude.com/v1/oauth/token';
 const DEFAULT_CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e';
 
+const REFRESH_MAX_RETRIES = 2;
+const REFRESH_BASE_DELAY_MS = 500;
+
 export async function refreshAccessToken(refreshToken, endpoint = DEFAULT_TOKEN_ENDPOINT) {
-  const maxRetries = 2;
-  const baseDelayMs = 500;
-  const timeoutMs = Number(process.env.JAYNSHARE_REFRESH_TIMEOUT_MS) || 30_000;
-
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+  for (let attempt = 0; attempt <= REFRESH_MAX_RETRIES; attempt++) {
+    if (attempt > 0) {
+      await new Promise(resolve => setTimeout(resolve, REFRESH_BASE_DELAY_MS * 2 ** (attempt - 1)));
+    }
     try {
-      if (attempt > 0) {
-        const delay = baseDelayMs * 2 ** (attempt - 1);
-        await new Promise(resolve => setTimeout(resolve, delay));
-      }
-
-      const res = await proxyFetch(endpoint, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Accept': 'application/json, text/plain, */*',
-          'User-Agent': 'axios/1.13.6',
-        },
-        body: JSON.stringify({
-          grant_type: 'refresh_token',
-          refresh_token: refreshToken,
-          client_id: DEFAULT_CLIENT_ID,
-        }),
-        signal: AbortSignal.timeout(timeoutMs),
-      });
-
-      if (!res.ok) {
-        if (res.status >= 500 && attempt < maxRetries) {
-          await res.body?.cancel();
-          continue;
-        }
-        const text = await res.text();
-        const err = new Error(`Token refresh failed (${res.status}): ${text}`);
-        err.status = res.status; // lets callers tell an auth rejection from a transient error
-        throw err;
-      }
-
-      const data = await res.json();
-      return {
-        accessToken: data.access_token,
-        refreshToken: data.refresh_token || refreshToken,
-        expiresAt: normalizeExpiresAt(data.expires_at) || (Date.now() + (data.expires_in || 3600) * 1000),
-      };
+      return await requestTokenRefresh(refreshToken, endpoint);
     } catch (err) {
-      const isNetworkError = err instanceof Error &&
-        (err.name === 'TimeoutError' || err.name === 'AbortError' ||
-          err.message.includes('fetch failed') ||
-          (err.code === 'ECONNRESET' || err.code === 'ECONNREFUSED' ||
-           err.code === 'ETIMEDOUT' || err.code === 'UND_ERR_CONNECT_TIMEOUT'));
-
-      if (attempt < maxRetries && isNetworkError) {
-        continue;
-      }
-      throw err;
+      if (attempt === REFRESH_MAX_RETRIES || !isRetriableRefreshError(err)) throw err;
     }
   }
+}
+
+async function requestTokenRefresh(refreshToken, endpoint) {
+  const timeoutMs = Number(process.env.JAYNSHARE_REFRESH_TIMEOUT_MS) || 30_000;
+  const res = await proxyFetch(endpoint, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Accept': 'application/json, text/plain, */*',
+      'User-Agent': 'axios/1.13.6',
+    },
+    body: JSON.stringify({
+      grant_type: 'refresh_token',
+      refresh_token: refreshToken,
+      client_id: DEFAULT_CLIENT_ID,
+    }),
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    const err = new Error(`Token refresh failed (${res.status}): ${text}`);
+    err.status = res.status; // lets callers tell an auth rejection from a transient error
+    throw err;
+  }
+
+  const data = await res.json();
+  return {
+    accessToken: data.access_token,
+    refreshToken: data.refresh_token || refreshToken,
+    expiresAt: normalizeExpiresAt(data.expires_at) || (Date.now() + (data.expires_in || 3600) * 1000),
+  };
+}
+
+/** A server fault or a dropped connection; an auth rejection is final. */
+function isRetriableRefreshError(err) {
+  if (err?.status >= 500) return true;
+  if (!(err instanceof Error)) return false;
+  return err.name === 'TimeoutError' || err.name === 'AbortError'
+    || err.message.includes('fetch failed')
+    || ['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'UND_ERR_CONNECT_TIMEOUT'].includes(err.code);
 }
 
 export function normalizeExpiresAt(expiresAt) {

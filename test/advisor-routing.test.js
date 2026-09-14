@@ -70,16 +70,16 @@ test('an advisor request skips accounts whose advisor family bucket is spent', (
   am.accounts[0].quota.unified7dFableReset = Date.now() + 3600_000;
 
   // A plain Opus request still lands on a (current account, Fable bucket irrelevant)…
-  assert.equal(am.getActiveAccount(null, 'claude-opus-4-8').name, 'a');
+  assert.equal(am.getActiveAccount({ model: 'claude-opus-4-8' }).name, 'a');
   // …but the same request WITH a Fable advisor must go where the advisor can run.
-  assert.equal(am.getActiveAccount(null, 'claude-opus-4-8', 'claude-fable-5').name, 'b');
+  assert.equal(am.getActiveAccount({ model: 'claude-opus-4-8', advisorModel: 'claude-fable-5' }).name, 'b');
 });
 
 test('an advisor request honors the advisor model route pin when the executor has none', () => {
   const am = new AccountManager([oauth('a'), oauth('b')], 0.98);
   am.setRoutePin('fable', 1); // auto family pin
-  assert.equal(am.getActiveAccount(null, 'claude-opus-4-8').name, 'a');
-  assert.equal(am.getActiveAccount(null, 'claude-opus-4-8', 'claude-fable-5').name, 'b');
+  assert.equal(am.getActiveAccount({ model: 'claude-opus-4-8' }).name, 'a');
+  assert.equal(am.getActiveAccount({ model: 'claude-opus-4-8', advisorModel: 'claude-fable-5' }).name, 'b');
 });
 
 test('the executor route pin wins over the advisor model pin', () => {
@@ -88,15 +88,15 @@ test('the executor route pin wins over the advisor model pin', () => {
   });
   am.setRoutePin('main', 2);  // executor pinned to c
   am.setRoutePin('fable', 1); // advisor pinned to b
-  assert.equal(am.getActiveAccount(null, 'claude-opus-4-8', 'claude-fable-5').name, 'c');
+  assert.equal(am.getActiveAccount({ model: 'claude-opus-4-8', advisorModel: 'claude-fable-5' }).name, 'c');
 });
 
 test('an advisor request respects route exclusivity for the advisor model', () => {
   const am = new AccountManager([oauth('a'), oauth('b')], 0.98, {
     routes: [{ name: 'fable', match: ['*fable*'], accounts: ['b'] }], // only b may serve Fable
   });
-  assert.equal(am.getActiveAccount(null, 'claude-opus-4-8').name, 'a');
-  assert.equal(am.getActiveAccount(null, 'claude-opus-4-8', 'claude-fable-5').name, 'b');
+  assert.equal(am.getActiveAccount({ model: 'claude-opus-4-8' }).name, 'a');
+  assert.equal(am.getActiveAccount({ model: 'claude-opus-4-8', advisorModel: 'claude-fable-5' }).name, 'b');
 });
 
 test('selection degrades to executor-only when no account can serve the advisor model', () => {
@@ -106,5 +106,5 @@ test('selection degrades to executor-only when no account can serve the advisor 
     acc.quota.unified7dFableReset = Date.now() + 3600_000;
   }
   // Nobody can run the Fable advisor — the request must still flow on executor routing.
-  assert.equal(am.getActiveAccount(null, 'claude-opus-4-8', 'claude-fable-5').name, 'a');
+  assert.equal(am.getActiveAccount({ model: 'claude-opus-4-8', advisorModel: 'claude-fable-5' }).name, 'a');
 });

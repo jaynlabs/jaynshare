@@ -4,12 +4,13 @@ const ESC = '\x1b[';
 const RESET = `${ESC}0m`;
 
 export function renderStatus(status, { color = process.stdout.isTTY, now = Date.now() } = {}) {
-  const paint = colors(color);
-  const lines = [];
   const probe = status.probe || { enabled: false, intervalSeconds: 0, accounts: [] };
   const warm = status.warm || { enabled: false, intervalSeconds: 0, accounts: [] };
-  const accounts = status.accounts || [];
   const blocked = (status.blockedModels || []).filter(p => typeof p === 'string' && p.length);
+  // One render's ambient state, so a formatter takes only what it formats.
+  const view = { paint: colors(color), now, probe, blocked, threshold: status.switchThreshold };
+  const { paint } = view;
+  const lines = [];
 
   lines.push(paint.bold(paint.yellow('◆ JAYNSHARE status')));
   lines.push(`${paint.dim('Active'.padEnd(12))} ${paint.cyan(status.currentAccount || 'none')}`);
@@ -20,26 +21,26 @@ export function renderStatus(status, { color = process.stdout.isTTY, now = Date.
   if (status.sessions) {
     lines.push(`${paint.dim('Sessions'.padEnd(12))} ${formatSessions(status.sessions, paint)}`);
   }
-  lines.push(`${paint.dim('Probe'.padEnd(12))} ${formatProbeSummary(probe, now, paint)}`);
+  lines.push(`${paint.dim('Probe'.padEnd(12))} ${formatProbeSummary(probe, view)}`);
   if (warm.enabled) {
-    lines.push(`${paint.dim('Keep-warm'.padEnd(12))} ${formatProbeSummary(warm, now, paint)}`);
+    lines.push(`${paint.dim('Keep-warm'.padEnd(12))} ${formatProbeSummary(warm, view)}`);
   }
   if (status.server?.startedAt || status.server?.uptimeSeconds != null) {
     lines.push(`${paint.dim('Server'.padEnd(12))} ${formatServerSummary(status.server, now)}`);
   }
   lines.push('');
 
-  for (const line of routingLines(status.routes, blocked, paint)) lines.push(line);
+  for (const line of routingLines(status.routes, view)) lines.push(line);
 
-  for (const account of accounts) {
-    lines.push(renderAccountHeader(account, status.currentAccount, paint, now));
-    for (const quotaLine of quotaLines(account, now, paint)) {
+  for (const account of status.accounts || []) {
+    lines.push(renderAccountHeader(account, status.currentAccount, view));
+    for (const quotaLine of quotaLines(account, view)) {
       lines.push(`  ${quotaLine}`);
     }
-    const routing = modelRoutingLine(account, status.switchThreshold, blocked, now, paint);
+    const routing = modelRoutingLine(account, view);
     if (routing) lines.push(`  ${routing}`);
     lines.push(`  ${paint.dim('Usage'.padEnd(8))} ${formatUsage(account.usage, now)}`);
-    lines.push(`  ${paint.dim('Probe'.padEnd(8))} ${formatAccountProbe(account.name, probe, now, paint)}`);
+    lines.push(`  ${paint.dim('Probe'.padEnd(8))} ${formatAccountProbe(account.name, view)}`);
     lines.push('');
   }
 
@@ -68,7 +69,7 @@ function paintRoute(paint, color, value) {
   return fn(value);
 }
 
-function routingLines(routes, blocked, paint) {
+function routingLines(routes, { paint, blocked }) {
   if (!Array.isArray(routes) || routes.length === 0) return [];
   const lines = [paint.bold('Routing')];
   for (const route of routes) {
@@ -89,11 +90,12 @@ function routingLines(routes, blocked, paint) {
   return lines;
 }
 
-function renderAccountHeader(account, currentAccount, paint, now) {
+function renderAccountHeader(account, currentAccount, view) {
+  const { paint } = view;
   const current = account.name === currentAccount;
   const marker = current ? paint.cyan('>') : ' ';
   const name = current ? paint.bold(account.name) : account.name;
-  const status = formatAccountStatus(account, now, paint);
+  const status = formatAccountStatus(account, view);
   const org = account.orgName ? ` ${paint.dim(account.orgName)}` : '';
   const sess = account.sessions ? ` ${paint.dim(`${account.sessions} sess`)}` : '';
   return `${marker} ${name} ${paint.dim(`(${account.type}, prio ${account.priority || 0})`)} ${status}${org}${sess}`;
@@ -106,7 +108,7 @@ function formatSessions(sessions, paint) {
   return `${active} active / ${known} known ${paint.dim('·')} ${mode}`;
 }
 
-function formatAccountStatus(account, now, paint) {
+function formatAccountStatus(account, { paint, now }) {
   const parts = [];
   if (account.disabled) parts.push(paint.gray('disabled'));
 
@@ -129,7 +131,7 @@ function formatAccountStatus(account, now, paint) {
 }
 
 // Per-family eligibility, for accounts whose Sonnet or Fable weekly bucket is metered separately.
-function modelRoutingLine(account, threshold, blocked, now, paint) {
+function modelRoutingLine(account, { paint, now, blocked, threshold }) {
   const q = account.quota || {};
   if (q.unified7dSonnet == null && q.unified7dFable == null) return null;
   const t = Number(threshold);
@@ -152,35 +154,34 @@ function modelRoutingLine(account, threshold, blocked, now, paint) {
   return `${paint.dim('Models'.padEnd(8))} ${cells.join('   ')}`;
 }
 
-function quotaLines(account, now, paint) {
+function quotaLines(account, view) {
   const quota = account.quota || {};
+  const line = (label, ratio, resetAt) => formatQuotaLine({ label, ratio, resetAt }, view);
   const lines = [];
 
   if (quota.unified5h != null || quota.unified7d != null || quota.unified7dSonnet != null || quota.unified7dFable != null) {
-    lines.push(formatQuotaLine('Session', quota.unified5h, quota.unified5hReset, now, paint));
-    lines.push(formatQuotaLine('Weekly', quota.unified7d, quota.unified7dReset, now, paint));
+    lines.push(line('Session', quota.unified5h, quota.unified5hReset));
+    lines.push(line('Weekly', quota.unified7d, quota.unified7dReset));
     if (quota.unified7dSonnet != null) {
-      lines.push(formatQuotaLine('Sonnet', quota.unified7dSonnet, quota.unified7dSonnetReset, now, paint));
+      lines.push(line('Sonnet', quota.unified7dSonnet, quota.unified7dSonnetReset));
     }
     if (quota.unified7dFable != null) {
-      lines.push(formatQuotaLine('Fable', quota.unified7dFable, quota.unified7dFableReset, now, paint));
+      lines.push(line('Fable', quota.unified7dFable, quota.unified7dFableReset));
     }
     return lines;
   }
 
   if (quota.tokensLimit != null && quota.tokensRemaining != null) {
-    const ratio = 1 - quota.tokensRemaining / quota.tokensLimit;
-    lines.push(formatQuotaLine('Tokens', ratio, quota.resetsAt, now, paint));
+    lines.push(line('Tokens', 1 - quota.tokensRemaining / quota.tokensLimit, quota.resetsAt));
   }
   if (quota.requestsLimit != null && quota.requestsRemaining != null) {
-    const ratio = 1 - quota.requestsRemaining / quota.requestsLimit;
-    lines.push(formatQuotaLine('Requests', ratio, quota.resetsAt, now, paint));
+    lines.push(line('Requests', 1 - quota.requestsRemaining / quota.requestsLimit, quota.resetsAt));
   }
-  if (lines.length === 0) lines.push(`${paint.dim('Quota'.padEnd(8))} ${paint.gray('unknown')}`);
+  if (lines.length === 0) lines.push(`${view.paint.dim('Quota'.padEnd(8))} ${view.paint.gray('unknown')}`);
   return lines;
 }
 
-function formatQuotaLine(label, ratio, resetAt, now, paint) {
+function formatQuotaLine({ label, ratio, resetAt }, { paint, now }) {
   const resetTs = parseTs(resetAt);
   const reset = resetTs && resetTs > now ? ` reset ${formatDuration(resetTs - now)}` : '';
   return `${paint.dim(label.padEnd(8))} ${usageBar(ratio, paint)} ${formatPercent(ratio)}${reset}`;
@@ -206,7 +207,7 @@ function gradientColor(index, width) {
   return from.map((value, i) => Math.round(value + (to[i] - value) * p));
 }
 
-function formatProbeSummary(probe, now, paint) {
+function formatProbeSummary(probe, { paint, now }) {
   if (!probe.enabled) return paint.gray('off (passive only)');
   const bits = [`on every ${formatDuration((probe.intervalSeconds || 0) * 1000)}`];
   if (probe.running) bits.push(paint.yellow('running'));
@@ -217,7 +218,7 @@ function formatProbeSummary(probe, now, paint) {
   return bits.join(', ');
 }
 
-function formatAccountProbe(accountName, probe, now, paint) {
+function formatAccountProbe(accountName, { paint, now, probe }) {
   const row = (probe.accounts || []).find(account => account.name === accountName);
   if (!probe.enabled) return paint.gray('off');
   if (!row) return paint.gray('never');

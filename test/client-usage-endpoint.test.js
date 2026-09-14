@@ -47,13 +47,13 @@ test('an enrolled desktop client can read fleet usage but not operator status', 
   ], 0.98);
   am.accounts[0].quota.unified5h = 0.25;
   am.accounts[1].quota.unified7d = 0.5;
-  const server = createProxyServer(am, config, {
+  const server = createProxyServer(am, config, { hooks: {
     getStatusExtra: () => ({
       routes: [{ name: 'private-policy' }],
       probe: { enabled: true, intervalSeconds: 300, accounts: [{ error: 'private probe detail' }] },
       server: { startedAt: '2026-09-09T10:00:00Z', uptimeSeconds: 42, upstream: 'private-upstream' },
     }),
-  });
+  } });
   try {
     const usage = await remoteRequest(server, '/jaynshare/usage', secret);
     assert.equal(usage.status, 200);

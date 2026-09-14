@@ -7,8 +7,7 @@ import { join } from 'node:path';
 import { ensureCerts, createConnectHandler } from './mitm.js';
 import { patchAccountUuid } from './account-uuid-rewrite.js';
 import { sanitizeToolPairs } from './tool-pair-sanitize.js';
-import { parseRequestModel, parseAdvisorModel } from './account-manager.js';
-import { TopLevelFieldFinder, modelGlobMatches } from './model.js';
+import { TopLevelFieldFinder, modelGlobMatches, parseRequestModel, parseAdvisorModel } from './model.js';
 import { BodyWriter } from './request-log.js';
 import { upstreamFetch } from './upstream-fetch.js';
 import { tunnelTls } from './sx.js';
@@ -16,7 +15,7 @@ import { createEgressGuard } from './egress-guard.js';
 import { principalStillAuthorized, resolvePrincipal } from './client-auth.js';
 
 
-export const HOP_BY_HOP_HEADERS = new Set([
+const HOP_BY_HOP_HEADERS = new Set([
   'host', 'connection', 'keep-alive', 'transfer-encoding',
   'te', 'trailer', 'upgrade', 'proxy-authorization', 'proxy-authenticate',
 ]);
@@ -32,6 +31,32 @@ const CONNECTION_SPECIFIC_HEADERS = new Set([
   'connection', 'keep-alive', 'transfer-encoding', 'upgrade',
   'proxy-connection', 'te', 'trailer',
 ]);
+
+const LOCAL_OPERATOR = { role: 'operator', clientId: 'local', clientName: 'Local operator', local: true };
+
+// Reach upstream with the client's own credential, never a rotated account token.
+const CLIENT_CREDENTIAL_PATHS = ['/v1/code/', '/api/oauth/files/', '/api/oauth/file_upload'];
+
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+function sendJson(res, status, body) {
+  res.writeHead(status, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify(body));
+}
+
+function sendNoStoreJson(res, status, body) {
+  res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+  res.end(JSON.stringify(body));
+}
+
+function apiError(type, message) {
+  return { type: 'error', error: { type, message } };
+}
+
+function sendRateLimited(res, retryAfterSeconds, message) {
+  res.writeHead(429, { 'Content-Type': 'application/json', 'retry-after': String(retryAfterSeconds) });
+  res.end(JSON.stringify(apiError('rate_limit_error', message)));
+}
 
 export function safeKeyEqual(a, b) {
   if (typeof a !== 'string' || typeof b !== 'string') return false;
@@ -51,7 +76,7 @@ export function isSelfConnection(remoteAddress, localAddress) {
     && remoteAddress === localAddress;
 }
 
-export function createProxyServer(accountManager, config, hooks = {}, sx = null) {
+export function createProxyServer(accountManager, config, { hooks = {}, sx = null } = {}) {
   const upstream = config.upstream || 'https://api.anthropic.com';
   const logDir = config.logDir || null;
   const holdMs = (config.holdSeconds || 0) * 1000;
@@ -60,141 +85,52 @@ export function createProxyServer(accountManager, config, hooks = {}, sx = null)
     mkdir(logDir, { recursive: true }).catch(() => {});
   }
 
+  const egress = createEgressGuard(config, console.error);
+  const forward = createProxyRequestListener({ accountManager, upstream, logDir, hooks, sx, holdMs, config, egress });
+
   const requestHandler = async (req, res) => {
     try {
       const isLocal = isLoopbackAddr(req.socket.remoteAddress)
         || isSelfConnection(req.socket.remoteAddress, req.socket.localAddress);
       const principal = resolvePrincipal(config, req.headers['x-api-key'], { local: isLocal });
       if (!principal) {
-        res.writeHead(401, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({
-          type: 'error',
-          error: { type: 'authentication_error', message: 'Invalid proxy API key' },
-        }));
+        sendJson(res, 401, apiError('authentication_error', 'Invalid proxy API key'));
         return;
       }
       req.jaynsharePrincipal = principal;
+      const control = { accountManager, hooks, principal };
 
       // Loopback skips the key, so a web page could otherwise POST here cross-origin without preflight.
       if (req.method === 'POST' && (req.url || '').startsWith('/jaynshare/')
           && !isSameOriginControlRequest(req)) {
-        res.writeHead(403, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({
+        sendJson(res, 403, {
           ok: false,
           error: 'cross-origin request refused: the control plane is not reachable from a web page',
-        }));
+        });
         return;
       }
 
-      // The one read-only view open to client credentials.
+      // The two read-only views open to client credentials.
       const requestUrl = new URL(req.url || '/', 'http://jaynshare.local');
       if (req.method === 'GET' && requestUrl.pathname === '/jaynshare/usage') {
-        const suppliedSessionIds = requestUrl.searchParams.getAll('session_id');
-        let session;
-        if (suppliedSessionIds.length) {
-          const sessionId = suppliedSessionIds.length === 1
-            ? validateSessionId(suppliedSessionIds[0]) : null;
-          if (!sessionId) {
-            res.writeHead(400, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
-            res.end(JSON.stringify({ ok: false, error: 'invalid session_id' }));
-            return;
-          }
-          session = accountManager.sessionAssignment(`${principal.clientId}\0${sessionId}`);
-        }
-        const status = accountManager.getStatus();
-        const extra = hooks.getStatusExtra?.() || {};
-        res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
-        res.end(JSON.stringify(publicUsageSnapshot(status, extra, session), null, 2));
+        serveUsage(requestUrl, res, control);
         return;
       }
-
       if (req.method === 'GET' && requestUrl.pathname === '/jaynshare/account-selection') {
-        const selectors = requestUrl.searchParams.getAll('account');
-        const selector = selectors.length === 1 ? selectors[0] : '';
-        const index = /^\d+$/.test(selector.trim()) ? null : resolveAccountPin(accountManager, selector); // no indexes
-        if (index == null) {
-          res.writeHead(404, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
-          res.end(JSON.stringify({ ok: false, error: 'unknown account selector' }));
-          return;
-        }
-        const account = accountManager.accounts[index];
-        const { eligible, reason } = accountManager.preferenceEligibility(index);
-        res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
-        res.end(JSON.stringify({
-          account: account.name,
-          disabled: !!account.disabled,
-          available: eligible,
-          ...(reason ? { reason } : {}),
-        }));
+        serveAccountSelection(requestUrl, res, control);
         return;
       }
 
       if ((req.url || '').startsWith('/jaynshare/') && principal.role !== 'operator') {
-        res.writeHead(403, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ ok: false, error: 'operator credential required' }));
+        sendJson(res, 403, { ok: false, error: 'operator credential required' });
         return;
       }
 
       if (/^https?:\/\//i.test(req.url || '')) { relayHttpForward(req, res); return; } // absolute-form: HTTP_PROXY use
 
-      if (req.method === 'GET' && req.url === '/jaynshare/status') {
-        const status = accountManager.getStatus();
-        const extra = hooks.getStatusExtra?.() || {};
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ ...extra, ...status }, null, 2));
-        return;
-      }
-
-      if (req.method === 'POST' && req.url === '/jaynshare/reload') {
-        if (!hooks.reload) {
-          res.writeHead(501, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: false, error: 'reload not supported' }));
-          return;
-        }
-        try {
-          const added = await hooks.reload();
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: true, added: added || 0 }));
-        } catch (err) {
-          res.writeHead(500, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: false, error: err.message }));
-        }
-        return;
-      }
-
-      // Body: {"account": "<name|email|accountUuid|accountUuid/orgUuid|orgUuid>"}
-      if (req.method === 'POST' && req.url === '/jaynshare/switch') {
-        const names = () => (accountManager.accounts || []).map(a => a.name);
-        let target;
-        try {
-          const raw = await readControlBody(req);
-          target = JSON.parse(raw || '{}')?.account;
-        } catch (err) {
-          const tooLarge = err.message === 'body too large';
-          res.writeHead(tooLarge ? 413 : 400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: false, error: tooLarge ? 'request body too large' : 'invalid request body' }));
-          return;
-        }
-        if (typeof target !== 'string' || !target.trim()) {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: false, error: 'missing "account"', accounts: names() }));
-          return;
-        }
-        const index = resolveAccountPin(accountManager, target);
-        if (index == null) {
-          res.writeHead(404, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: false, error: `no such account "${target}"`, accounts: names() }));
-          return;
-        }
-        accountManager.currentIndex = index;
-        const name = accountManager.accounts[index].name;
-        const { eligible, reason } = accountManager.eligibility(index); // the switch happens; traffic may not follow
-        console.log(`[Jaynshare] Switched to account "${name}" (manual)`
-          + (eligible ? '' : ` — ${reason}, so rotation will not use it`));
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ ok: true, account: name, eligible, ...(reason ? { reason } : {}) }));
-        return;
-      }
+      if (req.method === 'GET' && req.url === '/jaynshare/status') { serveStatus(res, control); return; }
+      if (req.method === 'POST' && req.url === '/jaynshare/reload') { await serveReload(res, control); return; }
+      if (req.method === 'POST' && req.url === '/jaynshare/switch') { await serveSwitch(req, res, control); return; }
 
       return forward(req, res);
     } catch (err) {
@@ -202,8 +138,6 @@ export function createProxyServer(accountManager, config, hooks = {}, sx = null)
     }
   };
 
-  const egress = createEgressGuard(config, console.error);
-  const forward = createProxyRequestListener({ accountManager, upstream, logDir, hooks, sx, holdMs, config, egress });
   const server = http.createServer(requestHandler);
 
   // CONNECT to the upstream host is MITM-relayed; anything else is blind-tunneled.
@@ -215,9 +149,96 @@ export function createProxyServer(accountManager, config, hooks = {}, sx = null)
     return { key: c.leafKeyPem, cert: c.leafCertPem };
   };
   server.on('connect', createConnectHandler({ config, accountManager, ensureLeaf, logDir, hooks, log: console.error, sx, egress }));
-  server.on('upgrade', (req, socket, head) => relayUpgrade(req, socket, head, upstream, sx));
+  server.on('upgrade', createUpgradeRelay({ upstream, sx }));
 
   return server;
+}
+
+// ── control plane ───────────────────────────────────────────
+
+function serveUsage(requestUrl, res, { accountManager, hooks, principal }) {
+  const suppliedSessionIds = requestUrl.searchParams.getAll('session_id');
+  let session;
+  if (suppliedSessionIds.length) {
+    const sessionId = suppliedSessionIds.length === 1
+      ? validateSessionId(suppliedSessionIds[0]) : null;
+    if (!sessionId) {
+      sendNoStoreJson(res, 400, { ok: false, error: 'invalid session_id' });
+      return;
+    }
+    session = accountManager.sessionAssignment(`${principal.clientId}\0${sessionId}`);
+  }
+  const status = accountManager.getStatus();
+  const extra = hooks.getStatusExtra?.() || {};
+  res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+  res.end(JSON.stringify(publicUsageSnapshot(status, extra, session), null, 2));
+}
+
+function serveAccountSelection(requestUrl, res, { accountManager }) {
+  const selectors = requestUrl.searchParams.getAll('account');
+  const selector = selectors.length === 1 ? selectors[0] : '';
+  const index = /^\d+$/.test(selector.trim()) ? null : resolveAccountPin(accountManager, selector); // no indexes
+  if (index == null) {
+    sendNoStoreJson(res, 404, { ok: false, error: 'unknown account selector' });
+    return;
+  }
+  const account = accountManager.accounts[index];
+  const { eligible, reason } = accountManager.preferenceEligibility(index);
+  sendNoStoreJson(res, 200, {
+    account: account.name,
+    disabled: !!account.disabled,
+    available: eligible,
+    ...(reason ? { reason } : {}),
+  });
+}
+
+function serveStatus(res, { accountManager, hooks }) {
+  const status = accountManager.getStatus();
+  const extra = hooks.getStatusExtra?.() || {};
+  res.writeHead(200, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ ...extra, ...status }, null, 2));
+}
+
+async function serveReload(res, { hooks }) {
+  if (!hooks.reload) {
+    sendJson(res, 501, { ok: false, error: 'reload not supported' });
+    return;
+  }
+  try {
+    const added = await hooks.reload();
+    sendJson(res, 200, { ok: true, added: added || 0 });
+  } catch (err) {
+    sendJson(res, 500, { ok: false, error: err.message });
+  }
+}
+
+// Body: {"account": "<name|email|accountUuid|accountUuid/orgUuid|orgUuid>"}
+async function serveSwitch(req, res, { accountManager }) {
+  const names = () => (accountManager.accounts || []).map(a => a.name);
+  let target;
+  try {
+    const raw = await readControlBody(req);
+    target = JSON.parse(raw || '{}')?.account;
+  } catch (err) {
+    const tooLarge = err.message === 'body too large';
+    sendJson(res, tooLarge ? 413 : 400, { ok: false, error: tooLarge ? 'request body too large' : 'invalid request body' });
+    return;
+  }
+  if (typeof target !== 'string' || !target.trim()) {
+    sendJson(res, 400, { ok: false, error: 'missing "account"', accounts: names() });
+    return;
+  }
+  const index = resolveAccountPin(accountManager, target);
+  if (index == null) {
+    sendJson(res, 404, { ok: false, error: `no such account "${target}"`, accounts: names() });
+    return;
+  }
+  accountManager.currentIndex = index;
+  const name = accountManager.accounts[index].name;
+  const { eligible, reason } = accountManager.eligibility(index); // the switch happens; traffic may not follow
+  console.log(`[Jaynshare] Switched to account "${name}" (manual)`
+    + (eligible ? '' : ` — ${reason}, so rotation will not use it`));
+  sendJson(res, 200, { ok: true, account: name, eligible, ...(reason ? { reason } : {}) });
 }
 
 /** An allow-list, so a new operator status field is never published to clients by accident. */
@@ -264,7 +285,7 @@ export function publicUsageSnapshot(status = {}, extra = {}, session = undefined
   };
 }
 
-export function validateSessionId(value) {
+function validateSessionId(value) {
   return typeof value === 'string' && value.length > 0 && value.length <= 256
     && /^[A-Za-z0-9._:-]+$/.test(value) ? value : null;
 }
@@ -310,12 +331,13 @@ export function resolveAccountPin(accountManager, token) {
   return null;
 }
 
+// ── credential-free relays ──────────────────────────────────
+
 // Plain-HTTP counterpart of the blind CONNECT tunnel: a transparent forward proxy, no account logic.
-export function relayHttpForward(req, res) {
+function relayHttpForward(req, res) {
   let target;
   try { target = new URL(req.url); } catch {
-    res.writeHead(400, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ type: 'error', error: { type: 'invalid_request_error', message: 'Malformed forward-proxy URL' } }));
+    sendJson(res, 400, apiError('invalid_request_error', 'Malformed forward-proxy URL'));
     return;
   }
   const transport = target.protocol === 'http:' ? http : https;
@@ -337,153 +359,11 @@ export function relayHttpForward(req, res) {
   });
   upstreamReq.on('error', (err) => {
     console.error(`[Jaynshare] HTTP forward to ${target.host} failed:`, err.message);
-    if (!res.headersSent) {
-      res.writeHead(502, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ type: 'error', error: { type: 'proxy_error', message: 'Upstream unreachable' } }));
-    }
+    if (!res.headersSent) sendJson(res, 502, apiError('proxy_error', 'Upstream unreachable'));
   });
   res.on('close', () => upstreamReq.destroy());
   if (['GET', 'HEAD'].includes(req.method)) upstreamReq.end();
   else req.pipe(upstreamReq);
-}
-
-// Reach upstream with the client's own credential, never a rotated account token.
-const CLIENT_CREDENTIAL_PATHS = ['/v1/code/', '/api/oauth/files/', '/api/oauth/file_upload'];
-
-/** The data-plane listener shared by the base server and the MITM's terminating server. */
-export function createProxyRequestListener({ accountManager, upstream, logDir = null, hooks = {}, sx = null, holdMs = 0, config = {}, forcedPin = null, preferredAccount = null, forcedPrincipal = null, egress = null }) {
-  return async (req, res) => {
-    try {
-      const principal = forcedPrincipal || req.jaynsharePrincipal
-        || { role: 'operator', clientId: 'local', clientName: 'Local operator', local: true };
-      const clientId = principal.clientId;
-      if (!principalStillAuthorized(config, principal)) {
-        res.writeHead(401, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ type: 'error', error: { type: 'authentication_error', message: 'Proxy credential was revoked or rotated' } }));
-        return;
-      }
-      const eventLogging = config?.eventLogging || 'hide'; // show | hide | block; read live for the TUI toggle
-      const isEventLog = (req.url || '').startsWith('/api/event_logging');
-      if (isEventLog && eventLogging === 'block') {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end('{}');
-        return;
-      }
-      const hideActivity = isEventLog && eventLogging !== 'show';
-      // Off the pinned exit IP, upstream's 403 costs a re-login; waiting costs latency.
-      if (egress?.enabled()) {
-        const state = await egress.waitUntilPinned({ isAborted: () => res.destroyed });
-        if (res.destroyed) return;
-        if (!state.ok) {
-          res.writeHead(503, { 'Content-Type': 'application/json', 'retry-after': '30' });
-          res.end(JSON.stringify({
-            type: 'error',
-            error: {
-              type: 'proxy_error',
-              message: `Egress is ${state.ip || 'unknown'}, not the pinned ${state.expected.join(', ')} — not sending this request. Check the VPN.`,
-            },
-          }));
-          return;
-        }
-      }
-      if (req.method === 'POST' && req.url === '/v1/oauth/token') { await relayRaw(req, res, upstream, sx); return; } // the client's own refresh
-      if (CLIENT_CREDENTIAL_PATHS.some((p) => (req.url || '').startsWith(p))) { await relayStream(req, res, upstream, sx); return; }
-
-      // `/jaynshare-account/<token>/...` pins one account and never rotates. The prefix is stripped.
-      let pinnedIndex = null;
-      const url = req.url || '';
-      const afterPrefix = url.startsWith(PIN_PREFIX) ? url.slice(PIN_PREFIX.length) : null;
-      const tokenEnd = afterPrefix == null ? -1 : afterPrefix.indexOf('/');
-      if (tokenEnd > 0) {
-        const token = decodeURIComponent(afterPrefix.slice(0, tokenEnd));
-        pinnedIndex = resolveAccountPin(accountManager, token);
-        if (pinnedIndex == null) {
-          const reqId = ++requestCounter;
-          const sessionId = req.headers['x-claude-code-session-id'] || null;
-          if (!hideActivity) hooks.onRequestEnd?.(reqId, { method: req.method, path: req.url, account: `(unknown pin: "${token}")`, status: 404, model: null, sessionId, pinned: false });
-          res.writeHead(404, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ type: 'error', error: { type: 'not_found_error', message: `Unknown account pin "${token}"` } }));
-          return;
-        }
-        req.url = afterPrefix.slice(tokenEnd);
-      }
-
-      // The MITM pin arrives bound to the listener; resolved per request since a reload can renumber accounts.
-      if (pinnedIndex == null && forcedPin != null) {
-        pinnedIndex = resolveAccountPin(accountManager, forcedPin);
-        if (pinnedIndex == null) {
-          const reqId = ++requestCounter;
-          const sessionId = req.headers['x-claude-code-session-id'] || null;
-          if (!hideActivity) hooks.onRequestEnd?.(reqId, { method: req.method, path: req.url, account: `(unknown pin: "${forcedPin}")`, status: 404, model: null, sessionId, pinned: false });
-          res.writeHead(404, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ type: 'error', error: { type: 'not_found_error', message: `Unknown account pin "${forcedPin}" (from JAYNSHARE_ACCOUNT)` } }));
-          return;
-        }
-      }
-
-      let preferredIndex = null;
-      if (pinnedIndex == null && preferredAccount != null) {
-        preferredIndex = resolveAccountPin(accountManager, preferredAccount);
-        if (preferredIndex == null) {
-          const reqId = ++requestCounter;
-          const sessionId = req.headers['x-claude-code-session-id'] || null;
-          if (!hideActivity) hooks.onRequestEnd?.(reqId, { method: req.method, path: req.url, account: '(unknown preference)', status: 404, model: null, sessionId, pinned: false });
-          res.writeHead(404, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ type: 'error', error: { type: 'not_found_error', message: 'Preferred account no longer exists; choose another account.' } }));
-          return;
-        }
-      }
-
-      const reqId = ++requestCounter;
-      const sessionId = req.headers['x-claude-code-session-id'] || null;
-      const sessionKey = sessionId ? `${clientId}\0${sessionId}` : null;
-      if (!hideActivity) hooks.onRequestStart?.(reqId, { method: req.method, path: req.url, sessionId, clientId, clientName: principal.clientName, pinned: pinnedIndex != null });
-
-      // Buffered whole so a 429 can resend it; `model` is peeked as chunks arrive for the TUI.
-      const bodyChunks = [];
-      const modelFinder = new TopLevelFieldFinder('model');
-      for await (const chunk of req) {
-        bodyChunks.push(chunk);
-        if (!modelFinder.done) {
-          const found = modelFinder.push(chunk);
-          if (found && !hideActivity) hooks.onRequestModel?.(reqId, { model: found });
-        }
-      }
-      const body = Buffer.concat(bodyChunks);
-
-      const model = modelFinder.done ? modelFinder.value : parseRequestModel(body);
-      const advisorModel = parseAdvisorModel(body);
-
-      // A fast, non-retryable 400 instead of an upstream rate limit that hangs the pipeline.
-      const blockedBy = model ? (config?.blockedModels || []).find((p) => modelGlobMatches(p, model)) : null;
-      if (blockedBy) {
-        if (!res.headersSent) {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ type: 'error', error: { type: 'invalid_request_error', message: `Model "${model}" is blocked by jaynshare (matched "${blockedBy}").` } }));
-        }
-        hooks.onRequestEnd?.(reqId, { method: req.method, path: req.url, account: '(blocked)', status: 400, model, sessionId });
-        return;
-      }
-
-      const ctx = { account: null, status: null, tried: new Set(), reauthed: new Set(), model, advisorModel, pinnedIndex, preferredIndex, holdBudgetMs: holdMs, sessionId: sessionKey, publicSessionId: sessionId, clientId, clientName: principal.clientName, retryCount: 0, rotated: false };
-      accountManager.beginSession(sessionKey);
-      try {
-        await forwardRequest(req, res, body, accountManager, upstream, 0, hooks, reqId, ctx, logDir, sx);
-      } catch (err) {
-        ctx.status = ctx.status || 502;
-        console.error('[Jaynshare] Unhandled error:', err);
-        if (!res.headersSent) {
-          res.writeHead(502, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ type: 'error', error: { type: 'proxy_error', message: 'Internal proxy error' } }));
-        }
-      } finally {
-        accountManager.endSession(sessionKey);
-        if (!hideActivity) hooks.onRequestEnd?.(reqId, { method: req.method, path: req.url, account: ctx.account, accountId: ctx.accountId, status: ctx.status, model: ctx.model, sessionId, clientId, clientName: principal.clientName, retryCount: ctx.retryCount, rotated: ctx.rotated, errorClass: ctx.errorClass || errorClassForStatus(ctx.status), pinned: ctx.pinnedIndex != null });
-      }
-    } catch (err) {
-      console.error('[Jaynshare] Unhandled error:', err);
-    }
-  };
 }
 
 // One-shot: the tunnel closes over one target, so the agent must not pool.
@@ -499,9 +379,24 @@ function sxAgent(sx, targetHost) {
   return agent;
 }
 
+function sxAgentFor({ sx }, targetHost) {
+  const useProxy = !!(sx?.useByDefault() && sx.isProvisioned());
+  return useProxy ? sxAgent(sx, targetHost) : undefined;
+}
+
+// `fetch` auto-decompressed the body, so the encoding and length headers are stale.
+function clientResponseHeaders(entries) {
+  const responseHeaders = {};
+  for (const [key, value] of entries) {
+    if (CONNECTION_SPECIFIC_HEADERS.has(key) || key === 'content-encoding' || key === 'content-length') continue;
+    responseHeaders[key] = value;
+  }
+  return responseHeaders;
+}
+
 /** Pipes bytes both ways with the client's own headers; a long-poll may withhold headers for minutes. */
-function relayStream(req, res, upstream, sx) {
-  const target = new URL(`${upstream}${req.url}`);
+function relayStream(req, res, target) {
+  const url = new URL(`${target.upstream}${req.url}`);
   const headers = {};
   for (const [key, value] of Object.entries(req.headers)) {
     const lk = key.toLowerCase();
@@ -509,26 +404,17 @@ function relayStream(req, res, upstream, sx) {
     headers[key] = value;
   }
 
-  const useProxy = !!(sx?.useByDefault() && sx.isProvisioned());
-  const agent = useProxy ? sxAgent(sx, target.hostname) : undefined;
-  const transport = target.protocol === 'http:' ? http : https;
+  const agent = sxAgentFor(target, url.hostname);
+  const transport = url.protocol === 'http:' ? http : https;
 
-  const upstreamReq = transport.request(target, { method: req.method, headers, agent }, (upstreamRes) => {
-    const responseHeaders = {};
-    for (const [key, value] of Object.entries(upstreamRes.headers)) {
-      if (CONNECTION_SPECIFIC_HEADERS.has(key) || key === 'content-encoding' || key === 'content-length') continue;
-      responseHeaders[key] = value;
-    }
-    res.writeHead(upstreamRes.statusCode, responseHeaders);
+  const upstreamReq = transport.request(url, { method: req.method, headers, agent }, (upstreamRes) => {
+    res.writeHead(upstreamRes.statusCode, clientResponseHeaders(Object.entries(upstreamRes.headers)));
     upstreamRes.pipe(res);
   });
 
   upstreamReq.on('error', (err) => {
     console.error('[Jaynshare] Remote Control relay error:', err.message);
-    if (!res.headersSent) {
-      res.writeHead(502, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ type: 'error', error: { type: 'proxy_error', message: 'Upstream unreachable' } }));
-    }
+    if (!res.headersSent) sendJson(res, 502, apiError('proxy_error', 'Upstream unreachable'));
   });
   res.on('close', () => upstreamReq.destroy());
 
@@ -536,48 +422,49 @@ function relayStream(req, res, upstream, sx) {
   else req.pipe(upstreamReq);
 }
 
-/** Relays a WebSocket handshake with the client's own headers, then splices the two sockets. */
-export function relayUpgrade(req, socket, head, upstream, sx) {
-  const target = new URL(`${upstream}${req.url}`);
-  const headers = {};
-  for (const [key, value] of Object.entries(req.headers)) {
-    const lk = key.toLowerCase();
-    if (lk.startsWith(':') || lk === 'host') continue; // 'upgrade'/'connection' are the handshake
-    headers[key] = value;
-  }
+/** An 'upgrade' listener: relays the WebSocket handshake with the client's own headers, then splices the two sockets. */
+export function createUpgradeRelay(target) {
+  return (req, socket, head) => {
+    const url = new URL(`${target.upstream}${req.url}`);
+    const headers = {};
+    for (const [key, value] of Object.entries(req.headers)) {
+      const lk = key.toLowerCase();
+      if (lk.startsWith(':') || lk === 'host') continue; // 'upgrade'/'connection' are the handshake
+      headers[key] = value;
+    }
 
-  const useProxy = !!(sx?.useByDefault() && sx.isProvisioned());
-  const agent = useProxy ? sxAgent(sx, target.hostname) : undefined;
-  const transport = target.protocol === 'http:' ? http : https;
+    const agent = sxAgentFor(target, url.hostname);
+    const transport = url.protocol === 'http:' ? http : https;
 
-  const upstreamReq = transport.request(target, { method: req.method, headers, agent });
+    const upstreamReq = transport.request(url, { method: req.method, headers, agent });
 
-  upstreamReq.on('upgrade', (upstreamRes, upstreamSocket, upstreamHead) => {
-    const headerLines = Object.entries(upstreamRes.headers)
-      .map(([k, v]) => `${k}: ${Array.isArray(v) ? v.join(', ') : v}`).join('\r\n');
-    socket.write(`HTTP/1.1 ${upstreamRes.statusCode} ${upstreamRes.statusMessage}\r\n${headerLines}\r\n\r\n`);
-    if (upstreamHead?.length) socket.write(upstreamHead);
-    if (head?.length) upstreamSocket.write(head);
-    socket.pipe(upstreamSocket);
-    upstreamSocket.pipe(socket);
-    // Upgraded sockets are half-open: a FIN ends only the readable side.
-    socket.on('end', () => upstreamSocket.destroy());
-    upstreamSocket.on('end', () => socket.destroy());
-    socket.on('close', () => upstreamSocket.destroy());
-    upstreamSocket.on('close', () => socket.destroy());
-    upstreamSocket.on('error', () => socket.destroy()); // detached from upstreamReq by the 101
-  });
+    upstreamReq.on('upgrade', (upstreamRes, upstreamSocket, upstreamHead) => {
+      const headerLines = Object.entries(upstreamRes.headers)
+        .map(([k, v]) => `${k}: ${Array.isArray(v) ? v.join(', ') : v}`).join('\r\n');
+      socket.write(`HTTP/1.1 ${upstreamRes.statusCode} ${upstreamRes.statusMessage}\r\n${headerLines}\r\n\r\n`);
+      if (upstreamHead?.length) socket.write(upstreamHead);
+      if (head?.length) upstreamSocket.write(head);
+      socket.pipe(upstreamSocket);
+      upstreamSocket.pipe(socket);
+      // Upgraded sockets are half-open: a FIN ends only the readable side.
+      socket.on('end', () => upstreamSocket.destroy());
+      upstreamSocket.on('end', () => socket.destroy());
+      socket.on('close', () => upstreamSocket.destroy());
+      upstreamSocket.on('close', () => socket.destroy());
+      upstreamSocket.on('error', () => socket.destroy()); // detached from upstreamReq by the 101
+    });
 
-  upstreamReq.on('error', (err) => {
-    console.error('[Jaynshare] Remote Control WebSocket relay error:', err.message);
-    socket.destroy();
-  });
-  socket.on('error', () => upstreamReq.destroy());
+    upstreamReq.on('error', (err) => {
+      console.error('[Jaynshare] Remote Control WebSocket relay error:', err.message);
+      socket.destroy();
+    });
+    socket.on('error', () => upstreamReq.destroy());
 
-  upstreamReq.end();
+    upstreamReq.end();
+  };
 }
 
-async function relayRaw(req, res, upstream, sx) {
+async function relayRaw(req, res, { upstream, sx }) {
   const bodyChunks = [];
   for await (const chunk of req) bodyChunks.push(chunk);
   const body = Buffer.concat(bodyChunks);
@@ -591,7 +478,7 @@ async function relayRaw(req, res, upstream, sx) {
         'user-agent': req.headers['user-agent'] || 'node',
       },
       body: body.length > 0 ? body : undefined,
-    }, sx, sx?.useByDefault());
+    }, sx?.useByDefault() ? sx : null);
 
     const responseBody = await upstreamRes.text();
     const responseHeaders = {};
@@ -605,13 +492,173 @@ async function relayRaw(req, res, upstream, sx) {
     res.end(responseBody);
   } catch (err) {
     console.error('[Jaynshare] Raw relay error:', err.message);
-    if (!res.headersSent) {
-      res.writeHead(502, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ type: 'error', error: { type: 'proxy_error', message: 'Upstream unreachable' } }));
-    }
+    if (!res.headersSent) sendJson(res, 502, apiError('proxy_error', 'Upstream unreachable'));
   }
 }
 
+// ── data plane ──────────────────────────────────────────────
+
+/** The data-plane listener shared by the base server and the MITM's terminating server. */
+export function createProxyRequestListener({ accountManager, upstream, logDir = null, hooks = {}, sx = null, holdMs = 0, config = {}, forcedPin = null, preferredAccount = null, forcedPrincipal = null, egress = null }) {
+  const pool = { accountManager, upstream, hooks, logDir, sx, holdMs, config };
+  return async (req, res) => {
+    try {
+      const principal = forcedPrincipal || req.jaynsharePrincipal || LOCAL_OPERATOR;
+      if (!principalStillAuthorized(config, principal)) {
+        sendJson(res, 401, apiError('authentication_error', 'Proxy credential was revoked or rotated'));
+        return;
+      }
+      if (eventLogBlocked(req, config)) { sendJson(res, 200, {}); return; }
+      if (egress?.enabled() && !await egressPinned(egress, res)) return;
+      if (await relayedVerbatim(req, res, { upstream, sx })) return;
+
+      // Event logs the operator chose to hide stay off the TUI but still reach upstream.
+      const io = { req, res, activity: eventLogHidden(req, config) ? {} : hooks };
+      const pins = resolvePins(io, { accountManager, forcedPin, preferredAccount });
+      if (!pins) return;
+
+      await serveExchange(io, { pool, principal, pins });
+    } catch (err) {
+      console.error('[Jaynshare] Unhandled error:', err);
+    }
+  };
+}
+
+function eventLogPolicy(req, config) {
+  if (!(req.url || '').startsWith('/api/event_logging')) return 'show';
+  return config?.eventLogging || 'hide'; // show | hide | block; read live for the TUI toggle
+}
+
+const eventLogBlocked = (req, config) => eventLogPolicy(req, config) === 'block';
+const eventLogHidden = (req, config) => eventLogPolicy(req, config) !== 'show';
+
+/** The client's own OAuth refresh and credential calls carry their own auth: no account is spent. */
+async function relayedVerbatim(req, res, { upstream, sx }) {
+  if (req.method === 'POST' && req.url === '/v1/oauth/token') {
+    await relayRaw(req, res, { upstream, sx });
+    return true;
+  }
+  if (CLIENT_CREDENTIAL_PATHS.some((p) => (req.url || '').startsWith(p))) {
+    relayStream(req, res, { upstream, sx });
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Resolves the account a pin or preference names, answering the client itself when
+ * it names none. Returns null once that answer is sent.
+ */
+function resolvePins(io, { accountManager, forcedPin, preferredAccount }) {
+  const { req } = io;
+
+  // `/jaynshare-account/<token>/...` pins one account and never rotates. The prefix is stripped.
+  let pinnedIndex = null;
+  const urlPin = urlPinToken(req.url || '');
+  if (urlPin) {
+    pinnedIndex = resolveAccountPin(accountManager, urlPin.token);
+    if (pinnedIndex == null) {
+      rejectUnknownAccount(io, `(unknown pin: "${urlPin.token}")`, `Unknown account pin "${urlPin.token}"`);
+      return null;
+    }
+    req.url = urlPin.rest;
+  } else if (forcedPin != null) {
+    // The MITM pin arrives bound to the listener; resolved per request since a reload can renumber accounts.
+    pinnedIndex = resolveAccountPin(accountManager, forcedPin);
+    if (pinnedIndex == null) {
+      rejectUnknownAccount(io, `(unknown pin: "${forcedPin}")`, `Unknown account pin "${forcedPin}" (from JAYNSHARE_ACCOUNT)`);
+      return null;
+    }
+  }
+
+  let preferredIndex = null;
+  if (pinnedIndex == null && preferredAccount != null) {
+    preferredIndex = resolveAccountPin(accountManager, preferredAccount);
+    if (preferredIndex == null) {
+      rejectUnknownAccount(io, '(unknown preference)', 'Preferred account no longer exists; choose another account.');
+      return null;
+    }
+  }
+
+  return { pinnedIndex, preferredIndex };
+}
+
+/** Reads the request, then relays it through the pool and reports what happened. */
+async function serveExchange({ req, res, activity }, { pool, principal, pins }) {
+  const { accountManager, upstream, hooks, logDir, sx, holdMs, config } = pool;
+  const reqId = ++requestCounter;
+  const sessionId = req.headers['x-claude-code-session-id'] || null;
+  const sessionKey = sessionId ? `${principal.clientId}\0${sessionId}` : null;
+  const client = { clientId: principal.clientId, clientName: principal.clientName };
+  activity.onRequestStart?.(reqId, { method: req.method, path: req.url, sessionId, ...client, pinned: pins.pinnedIndex != null });
+
+  const { body, model } = await readBody(req, found => activity.onRequestModel?.(reqId, { model: found }));
+  const advisorModel = parseAdvisorModel(body);
+
+  const blockedBy = model ? (config?.blockedModels || []).find((p) => modelGlobMatches(p, model)) : null;
+  if (blockedBy) {
+    // A fast, non-retryable 400 instead of an upstream rate limit that hangs the pipeline.
+    if (!res.headersSent) sendJson(res, 400, apiError('invalid_request_error', `Model "${model}" is blocked by jaynshare (matched "${blockedBy}").`));
+    hooks.onRequestEnd?.(reqId, { method: req.method, path: req.url, account: '(blocked)', status: 400, model, sessionId });
+    return;
+  }
+
+  const ctx = { account: null, status: null, tried: new Set(), reauthed: new Set(), model, advisorModel, ...pins, holdBudgetMs: holdMs, sessionId: sessionKey, publicSessionId: sessionId, ...client, retryCount: 0, rotated: false };
+  const exchange = { req, res, body, ctx, accountManager, upstream, hooks, reqId, logDir, sx };
+  accountManager.beginSession(sessionKey);
+  try {
+    await forwardRequest(exchange, 0);
+  } catch (err) {
+    ctx.status = ctx.status || 502;
+    console.error('[Jaynshare] Unhandled error:', err);
+    if (!res.headersSent) sendJson(res, 502, apiError('proxy_error', 'Internal proxy error'));
+  } finally {
+    accountManager.endSession(sessionKey);
+    activity.onRequestEnd?.(reqId, { method: req.method, path: req.url, account: ctx.account, accountId: ctx.accountId, status: ctx.status, model: ctx.model, sessionId, ...client, retryCount: ctx.retryCount, rotated: ctx.rotated, errorClass: ctx.errorClass || errorClassForStatus(ctx.status), pinned: ctx.pinnedIndex != null });
+  }
+}
+
+// Off the pinned exit IP, upstream's 403 costs a re-login; waiting costs latency.
+async function egressPinned(egress, res) {
+  const state = await egress.waitUntilPinned({ isAborted: () => res.destroyed });
+  if (res.destroyed) return false;
+  if (state.ok) return true;
+  res.writeHead(503, { 'Content-Type': 'application/json', 'retry-after': '30' });
+  res.end(JSON.stringify(apiError('proxy_error',
+    `Egress is ${state.ip || 'unknown'}, not the pinned ${state.expected.join(', ')} — not sending this request. Check the VPN.`)));
+  return false;
+}
+
+function urlPinToken(url) {
+  if (!url.startsWith(PIN_PREFIX)) return null;
+  const afterPrefix = url.slice(PIN_PREFIX.length);
+  const tokenEnd = afterPrefix.indexOf('/');
+  if (tokenEnd <= 0) return null;
+  return { token: decodeURIComponent(afterPrefix.slice(0, tokenEnd)), rest: afterPrefix.slice(tokenEnd) };
+}
+
+// A pin or preference naming no account never reaches upstream.
+function rejectUnknownAccount({ req, res, activity }, label, message) {
+  const reqId = ++requestCounter;
+  const sessionId = req.headers['x-claude-code-session-id'] || null;
+  activity.onRequestEnd?.(reqId, { method: req.method, path: req.url, account: label, status: 404, model: null, sessionId, pinned: false });
+  sendJson(res, 404, apiError('not_found_error', message));
+}
+
+// Buffered whole so a 429 can resend it; `model` is peeked as chunks arrive for the TUI.
+async function readBody(req, onModel) {
+  const bodyChunks = [];
+  const modelFinder = new TopLevelFieldFinder('model');
+  for await (const chunk of req) {
+    bodyChunks.push(chunk);
+    if (!modelFinder.done) {
+      const found = modelFinder.push(chunk);
+      if (found) onModel(found);
+    }
+  }
+  const body = Buffer.concat(bodyChunks);
+  return { body, model: modelFinder.done ? modelFinder.value : parseRequestModel(body) };
+}
 
 function logTimestamp() {
   const d = new Date();
@@ -652,81 +699,21 @@ function errorClassForStatus(status) {
   return 'request';
 }
 
-export async function forwardRequest(req, res, body, accountManager, upstream, retryCount, hooks, reqId, ctx, logDir, sx, useSx) {
-  const maxRetries = accountManager.accounts.length;
+// ── forwarding ──────────────────────────────────────────────
+
+/**
+ * One attempt at relaying the exchange through the pool; recurses to fail over,
+ * hold, or retry. `useSx` is whether this attempt dials via sx.org.
+ */
+async function forwardRequest(exchange, retryCount, useSx) {
+  const { req, accountManager, hooks, reqId, ctx, sx } = exchange;
   ctx.reauthed ??= new Set();
   ctx.retryCount = Math.max(ctx.retryCount || 0, retryCount || 0);
-  const route = useSx === undefined ? !!(sx?.useByDefault()) : useSx; // whether this attempt dials via sx.org
+  const route = useSx === undefined ? !!(sx?.useByDefault()) : useSx;
 
-  // A pinned request never fails over: once tried, `account` is null.
-  const account = ctx.pinnedIndex != null
-    ? (ctx.tried.has(ctx.pinnedIndex) ? null : accountManager.accounts[ctx.pinnedIndex])
-    : accountManager.getActiveAccount(ctx.tried, ctx.model, ctx.advisorModel, ctx.sessionId, ctx.preferredIndex);
+  const account = pickAccount(exchange);
   if (!account) {
-    // Every candidate refused (403): a 502, since neither waiting nor the client's login is at fault.
-    const rejected = ctx.credentialRejected;
-    const allRefused = rejected?.size > 0 && (ctx.pinnedIndex != null
-      ? rejected.has(accountManager.accounts[ctx.pinnedIndex]?.name)
-      : rejected.size === accountManager.accounts.length);
-    if (allRefused) {
-      const names = [...rejected].map(n => `"${n}"`).join(', ');
-      ctx.status = 502;
-      ctx.account = `(${[...rejected].join(', ')} refused)`;
-      if (!res.headersSent) {
-        res.writeHead(502, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({
-          type: 'error',
-          error: { type: 'proxy_error', message: `Upstream refused the credential for account ${names} (403). Check the account, then re-add it with: jaynshare login` },
-        }));
-      }
-      return;
-    }
-    if (ctx.pinnedIndex != null) {
-      ctx.status = 429;
-      ctx.account = '(pinned account unavailable)';
-      if (!res.headersSent) {
-        res.writeHead(429, { 'Content-Type': 'application/json', 'retry-after': '5' });
-        res.end(JSON.stringify({
-          type: 'error',
-          error: { type: 'rate_limit_error', message: 'Pinned account is unavailable (rate-limited, errored, or already tried). Retry shortly.' },
-        }));
-      }
-      return;
-    }
-    ctx.status = 429;
-    ctx.account = '(none available)';
-    const status = accountManager.getStatus();
-    const retryAfter = computeRetryAfter(status.accounts);
-
-    // Hold the connection and poll until an account recovers or the budget runs out.
-    if (ctx.holdBudgetMs > 0) {
-      const waitMs = Math.min(retryAfter * 1000, ctx.holdBudgetMs, 60_000);
-      ctx.holdBudgetMs -= waitMs;
-      console.log(`[Jaynshare] All accounts exhausted — holding connection, retry in ${Math.ceil(waitMs / 1000)}s (${Math.ceil(ctx.holdBudgetMs / 1000)}s budget left)`);
-      await new Promise(resolve => setTimeout(resolve, waitMs));
-      if (res.destroyed) return;
-      return forwardRequest(req, res, body, accountManager, upstream, retryCount, hooks, reqId, ctx, logDir, sx, route);
-    }
-
-    const exhaustedRetries = ctx.exhaustedRetries || 0;
-    if (exhaustedRetries < 1 && retryAfter <= INLINE_RETRY_AFTER_MAX_SECONDS) {
-      ctx.exhaustedRetries = exhaustedRetries + 1;
-      console.log(`[Jaynshare] All accounts exhausted — waiting ${retryAfter}s before retry`);
-      await new Promise(resolve => setTimeout(resolve, retryAfter * 1000));
-      if (res.destroyed) return;
-      return forwardRequest(req, res, body, accountManager, upstream, retryCount, hooks, reqId, ctx, logDir, sx, route);
-    }
-    res.writeHead(429, {
-      'Content-Type': 'application/json',
-      'retry-after': String(retryAfter),
-    });
-    res.end(JSON.stringify({
-      type: 'error',
-      error: {
-        type: 'rate_limit_error',
-        message: `All ${accountManager.accounts.length} accounts exhausted. Retry in ${retryAfter}s.`,
-      },
-    }));
+    await respondNoAccount(exchange, retryCount, route);
     return;
   }
 
@@ -737,14 +724,99 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
   hooks.onRequestRouted?.(reqId, { account: account.name });
 
   await accountManager.ensureTokenFresh(account.index);
-  if (account.status === 'error' && retryCount < maxRetries) {
+  if (account.status === 'error' && retryCount < accountManager.accounts.length) {
     ctx.tried.add(account.index);
-    return forwardRequest(req, res, body, accountManager, upstream, retryCount + 1, hooks, reqId, ctx, logDir, sx, route);
+    return forwardRequest(exchange, retryCount + 1, route);
   }
 
-  const isOAuth = account.type === 'oauth';
+  const attempt = { account, retryCount, route };
+  attempt.headers = upstreamHeaders(req.headers, account);
+  attempt.url = `${account.upstream || exchange.upstream}${req.url}`;
+  attempt.body = outboundBody(exchange.body, req, account);
+  if (attempt.body !== exchange.body) attempt.headers['content-length'] = String(attempt.body.length);
+  attempt.log = lazyRequestLog(exchange, attempt);
+
+  try {
+    const upstreamRes = await sendUpstream(exchange, attempt);
+    if (!upstreamRes) return;
+
+    attempt.rateLimitHeaders = rateLimitHeadersOf(upstreamRes);
+    accountManager.updateQuota(account.index, attempt.rateLimitHeaders);
+    if (upstreamRes.status !== 429) accountManager.clearRateLimited(account.index);
+
+    if (upstreamRes.status === 429) { await handle429(exchange, attempt, upstreamRes); return; }
+    if (upstreamRes.status === 403 && !exchange.res.headersSent) { await handle403(exchange, attempt, upstreamRes); return; }
+    if (upstreamRes.status === 401 && canForceRefresh(exchange, attempt)) { await handle401(exchange, attempt, upstreamRes); return; }
+    await relayResponse(exchange, attempt, upstreamRes);
+  } catch (err) {
+    await handleUpstreamError(exchange, attempt, err);
+  }
+}
+
+// A pinned request never fails over: once tried, there is no account.
+function pickAccount({ accountManager, ctx }) {
+  if (ctx.pinnedIndex != null) {
+    return ctx.tried.has(ctx.pinnedIndex) ? null : accountManager.accounts[ctx.pinnedIndex];
+  }
+  return accountManager.getActiveAccount({
+    exclude: ctx.tried, model: ctx.model, advisorModel: ctx.advisorModel,
+    sessionId: ctx.sessionId, preferredIndex: ctx.preferredIndex,
+  });
+}
+
+async function respondNoAccount(exchange, retryCount, route) {
+  const { res, accountManager, ctx } = exchange;
+  // Every candidate refused (403): a 502, since neither waiting nor the client's login is at fault.
+  const rejected = ctx.credentialRejected;
+  const allRefused = rejected?.size > 0 && (ctx.pinnedIndex != null
+    ? rejected.has(accountManager.accounts[ctx.pinnedIndex]?.name)
+    : rejected.size === accountManager.accounts.length);
+  if (allRefused) {
+    const names = [...rejected].map(n => `"${n}"`).join(', ');
+    ctx.status = 502;
+    ctx.account = `(${[...rejected].join(', ')} refused)`;
+    if (!res.headersSent) {
+      sendJson(res, 502, apiError('proxy_error', `Upstream refused the credential for account ${names} (403). Check the account, then re-add it with: jaynshare login`));
+    }
+    return;
+  }
+  if (ctx.pinnedIndex != null) {
+    ctx.status = 429;
+    ctx.account = '(pinned account unavailable)';
+    if (!res.headersSent) {
+      sendRateLimited(res, 5, 'Pinned account is unavailable (rate-limited, errored, or already tried). Retry shortly.');
+    }
+    return;
+  }
+  ctx.status = 429;
+  ctx.account = '(none available)';
+  const status = accountManager.getStatus();
+  const retryAfter = computeRetryAfter(status.accounts);
+
+  // Hold the connection and poll until an account recovers or the budget runs out.
+  if (ctx.holdBudgetMs > 0) {
+    const waitMs = Math.min(retryAfter * 1000, ctx.holdBudgetMs, 60_000);
+    ctx.holdBudgetMs -= waitMs;
+    console.log(`[Jaynshare] All accounts exhausted — holding connection, retry in ${Math.ceil(waitMs / 1000)}s (${Math.ceil(ctx.holdBudgetMs / 1000)}s budget left)`);
+    await sleep(waitMs);
+    if (res.destroyed) return;
+    return forwardRequest(exchange, retryCount, route);
+  }
+
+  const exhaustedRetries = ctx.exhaustedRetries || 0;
+  if (exhaustedRetries < 1 && retryAfter <= INLINE_RETRY_AFTER_MAX_SECONDS) {
+    ctx.exhaustedRetries = exhaustedRetries + 1;
+    console.log(`[Jaynshare] All accounts exhausted — waiting ${retryAfter}s before retry`);
+    await sleep(retryAfter * 1000);
+    if (res.destroyed) return;
+    return forwardRequest(exchange, retryCount, route);
+  }
+  sendRateLimited(res, retryAfter, `All ${accountManager.accounts.length} accounts exhausted. Retry in ${retryAfter}s.`);
+}
+
+function upstreamHeaders(reqHeaders, account) {
   const headers = {};
-  for (const [key, value] of Object.entries(req.headers)) {
+  for (const [key, value] of Object.entries(reqHeaders)) {
     const lk = key.toLowerCase();
     if (lk.startsWith(':')) continue; // h2 pseudo-headers
     if (HOP_BY_HOP_HEADERS.has(lk)) continue;
@@ -752,208 +824,225 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
     if (lk === 'accept-encoding') continue; // fetch auto-decompresses
     headers[key] = value;
   }
-
-  if (isOAuth) {
+  if (account.type === 'oauth') {
     headers['authorization'] = `Bearer ${account.credential}`;
   } else {
     headers['x-api-key'] = account.credential;
   }
+  return headers;
+}
 
-  const upstreamUrl = `${account.upstream || upstream}${req.url}`;
-  const method = req.method;
-
+function outboundBody(body, req, account) {
   let sendBody = sanitizeToolPairs(body, req.url, req.headers['content-type']);
   if (account.accountUuid) sendBody = patchAccountUuid(sendBody, account.accountUuid);
   if (account.modelMap) sendBody = rewriteModel(sendBody, account.modelMap);
-  if (sendBody !== body) headers['content-length'] = String(sendBody.length);
+  return sendBody;
+}
 
-  // Opened lazily on the first terminal outcome; a 429-then-retry attempt writes no file.
+// Opened lazily on the first terminal outcome; a 429-then-retry attempt writes no file.
+function lazyRequestLog({ req, body, reqId, logDir }, attempt) {
   let log = null;
-  let reqLogged = false;
-  const getLog = () => (logDir ? (log ||= openRequestLog(logDir, reqId)) : null);
-  const logRequestHead = () => {
-    const l = getLog();
-    if (!l || reqLogged) return;
-    reqLogged = true;
-    const safeHeaders = { ...headers };
-    if (safeHeaders['x-api-key']) safeHeaders['x-api-key'] = safeHeaders['x-api-key'].slice(0, 15) + '...';
-    if (safeHeaders['authorization']) safeHeaders['authorization'] = safeHeaders['authorization'].slice(0, 20) + '...';
-    l.write(`=== REQUEST (account: ${account.name}, retry: ${retryCount}) ===\n${method} ${upstreamUrl}\n${formatHeaders(safeHeaders)}`);
-    if (body.length > 0) l.body('REQUEST BODY', body, req.headers['content-type']);
+  let headWritten = false;
+  const get = () => (logDir ? (log ||= openRequestLog(logDir, reqId)) : null);
+  return {
+    get,
+    head() {
+      const l = get();
+      if (!l || headWritten) return;
+      headWritten = true;
+      const safeHeaders = { ...attempt.headers };
+      if (safeHeaders['x-api-key']) safeHeaders['x-api-key'] = safeHeaders['x-api-key'].slice(0, 15) + '...';
+      if (safeHeaders['authorization']) safeHeaders['authorization'] = safeHeaders['authorization'].slice(0, 20) + '...';
+      l.write(`=== REQUEST (account: ${attempt.account.name}, retry: ${attempt.retryCount}) ===\n${req.method} ${attempt.url}\n${formatHeaders(safeHeaders)}`);
+      if (body.length > 0) l.body('REQUEST BODY', body, req.headers['content-type']);
+    },
   };
+}
 
+// The concurrency slot is held only until the response headers arrive; null when the client left while waiting.
+async function sendUpstream({ req, res, accountManager, sx }, { account, headers, url, body, route }) {
+  if (!await accountManager.admit(account.index, () => res.destroyed)) return null;
   try {
-    // The slot is held only until the response headers arrive.
-    if (!await accountManager.admit(account.index, () => res.destroyed)) return;
-    let upstreamRes;
-    try {
-      upstreamRes = await upstreamFetch(upstreamUrl, {
-        method,
-        headers,
-        body: ['GET', 'HEAD'].includes(method) ? undefined : sendBody,
-        redirect: 'manual',
-      }, sx, route);
-    } finally {
-      accountManager.release(account.index);
-    }
+    return await upstreamFetch(url, {
+      method: req.method,
+      headers,
+      body: ['GET', 'HEAD'].includes(req.method) ? undefined : body,
+      redirect: 'manual',
+    }, route ? sx : null);
+  } finally {
+    accountManager.release(account.index);
+  }
+}
 
-    const rateLimitHeaders = {};
-    for (const [key, value] of upstreamRes.headers.entries()) {
-      if (key.startsWith('anthropic-ratelimit-')) {
-        rateLimitHeaders[key] = value;
-      }
-    }
-    accountManager.updateQuota(account.index, rateLimitHeaders);
-    if (upstreamRes.status !== 429) accountManager.clearRateLimited(account.index);
+function rateLimitHeadersOf(upstreamRes) {
+  const rateLimitHeaders = {};
+  for (const [key, value] of upstreamRes.headers.entries()) {
+    if (key.startsWith('anthropic-ratelimit-')) rateLimitHeaders[key] = value;
+  }
+  return rateLimitHeaders;
+}
 
-    // A quota rejection rotates; a rate-limit throttle pauses and retries the same account.
-    if (upstreamRes.status === 429) {
-      let retryAfter = parseInt(upstreamRes.headers.get('retry-after'), 10);
-      if (Number.isNaN(retryAfter)) retryAfter = 60;
-      await upstreamRes.body?.cancel();
+// A quota rejection rotates; a rate-limit throttle pauses and retries the same account.
+async function handle429(exchange, attempt, upstreamRes) {
+  let retryAfter = parseInt(upstreamRes.headers.get('retry-after'), 10);
+  if (Number.isNaN(retryAfter)) retryAfter = 60;
+  await upstreamRes.body?.cancel();
 
-      const rl = rateLimitHeaders;
-      const generalRejected = rl['anthropic-ratelimit-unified-5h-status'] === 'rejected'
-        || rl['anthropic-ratelimit-unified-7d-status'] === 'rejected';
-      const fableRejected = rl['anthropic-ratelimit-unified-7d_oi-status'] === 'rejected' && !generalRejected;
-      if ((generalRejected || fableRejected) && retryCount < maxRetries) {
-        // A Fable-only rejection leaves the account usable for other models: no global hold.
-        if (fableRejected) {
-          console.log(`[Jaynshare] Fable weekly exhausted on "${account.name}" — switching account for this Fable request`);
-        } else {
-          const hold = Math.min(Math.max(retryAfter, 1), 3600);
-          console.log(`[Jaynshare] Quota rejection (429) on "${account.name}" — throttling ${hold}s and switching account`);
-          accountManager.markRateLimited(account.index, hold);
-        }
-        ctx.tried.add(account.index);
-        if (res.destroyed) return;
-        return forwardRequest(req, res, body, accountManager, upstream, retryCount + 1, hooks, reqId, ctx, logDir, sx, route);
-      }
+  const rejected = rejectedBucket(attempt.rateLimitHeaders);
+  const canSwitch = attempt.retryCount < exchange.accountManager.accounts.length;
+  if (rejected && canSwitch) return switchAfterQuotaRejection(exchange, attempt, { bucket: rejected, retryAfter });
 
-      retryAfter = Math.min(Math.max(retryAfter, 1), 300); // a negative value would arm a pause in the past
+  return absorbRateLimit(exchange, attempt, Math.min(Math.max(retryAfter, 1), 300)); // a negative value would arm a pause in the past
+}
 
-      const nextUseSx = !!(sx?.useOn429()); // 429s are IP-based; a fresh egress IP is not throttled
-      const switchingToSx = nextUseSx && !route;
-      sx?.noteRateLimited(retryAfter);
+/** The unified bucket upstream rejected on, if any. */
+function rejectedBucket(rl) {
+  if (rl['anthropic-ratelimit-unified-5h-status'] === 'rejected'
+      || rl['anthropic-ratelimit-unified-7d-status'] === 'rejected') return 'general';
+  if (rl['anthropic-ratelimit-unified-7d_oi-status'] === 'rejected') return 'fable';
+  return null;
+}
 
-      // Rotating would move the burst onto the next account and discard this one's cache.
-      accountManager.pauseAccount(account.index, Math.min(retryAfter, RATE_LIMIT_ABSORB_MAX_SECONDS));
+/** Quota is spent on this account, so waiting would not help: move to the next one. */
+function switchAfterQuotaRejection(exchange, attempt, { bucket, retryAfter }) {
+  const { res, accountManager, ctx } = exchange;
+  const { account, retryCount, route } = attempt;
 
-      if (switchingToSx && retryCount < maxRetries) {
-        console.log(`[Jaynshare] 429 on "${account.name}" — retrying via sx.org (fresh egress IP)`);
-        if (res.destroyed) return;
-        return forwardRequest(req, res, body, accountManager, upstream, retryCount + 1, hooks, reqId, ctx, logDir, sx, nextUseSx);
-      }
+  if (bucket === 'fable') {
+    // A Fable-only rejection leaves the account usable for other models: no global hold.
+    console.log(`[Jaynshare] Fable weekly exhausted on "${account.name}" — switching account for this Fable request`);
+  } else {
+    const hold = Math.min(Math.max(retryAfter, 1), 3600);
+    console.log(`[Jaynshare] Quota rejection (429) on "${account.name}" — throttling ${hold}s and switching account`);
+    accountManager.markRateLimited(account.index, hold);
+  }
 
-      if (retryAfter <= RATE_LIMIT_ABSORB_MAX_SECONDS && retryCount < maxRetries) {
-        console.log(`[Jaynshare] Rate-limit 429 on "${account.name}" — waiting ${retryAfter}s, retrying same account (no switch)`);
-        await new Promise(resolve => setTimeout(resolve, retryAfter * 1000));
-        if (res.destroyed) return;
-        return forwardRequest(req, res, body, accountManager, upstream, retryCount + 1, hooks, reqId, ctx, logDir, sx, nextUseSx);
-      }
+  ctx.tried.add(account.index);
+  if (res.destroyed) return;
+  return forwardRequest(exchange, retryCount + 1, route);
+}
 
-      console.log(`[Jaynshare] Rate-limit 429 on "${account.name}" — retry-after ${retryAfter}s over inline cap; returning 429 to client (no switch)`);
-      ctx.status = 429;
-      if (!res.headersSent && !res.destroyed) {
-        res.writeHead(429, { 'Content-Type': 'application/json', 'retry-after': String(retryAfter) });
-        res.end(JSON.stringify({ type: 'error', error: { type: 'rate_limit_error', message: `Rate limited; retry in ${retryAfter}s.` } }));
-      }
-      return;
-    }
+/** A burst, not exhaustion: a fresh egress IP or a short wait beats rotating off a warm cache. */
+async function absorbRateLimit(exchange, attempt, retryAfter) {
+  const { res, accountManager, ctx, sx } = exchange;
+  const { account, retryCount, route } = attempt;
+  const maxRetries = accountManager.accounts.length;
 
-    // A 403 refuses the injected account outright; the client must never see it (it would drop its login).
-    if (upstreamRes.status === 403 && !res.headersSent) {
-      await upstreamRes.body?.cancel();
-      (ctx.credentialRejected ??= new Set()).add(account.name);
-      ctx.tried.add(account.index);
-      console.error(`[Jaynshare] 403 on "${account.name}" — upstream refused the account credential`);
-      return forwardRequest(req, res, body, accountManager, upstream, retryCount + 1, hooks, reqId, ctx, logDir, sx, route);
-    }
+  const nextUseSx = !!(sx?.useOn429()); // 429s are IP-based; a fresh egress IP is not throttled
+  const switchingToSx = nextUseSx && !route;
+  sx?.noteRateLimited(retryAfter);
 
-    // A 401 before clock expiry means the token was revoked; one forced refresh per account per request.
-    if (upstreamRes.status === 401 && account.type === 'oauth' && account.refreshToken
-        && retryCount < maxRetries && !ctx.reauthed.has(account.index)) {
-      ctx.reauthed.add(account.index);
-      await upstreamRes.body?.cancel();
-      console.log(`[Jaynshare] 401 on "${account.name}" — token rejected; forcing refresh and retrying`);
-      await accountManager.ensureTokenFresh(account.index, true);
-      if (res.destroyed) return;
-      return forwardRequest(req, res, body, accountManager, upstream, retryCount + 1, hooks, reqId, ctx, logDir, sx, route);
-    }
+  // Rotating would move the burst onto the next account and discard this one's cache.
+  accountManager.pauseAccount(account.index, Math.min(retryAfter, RATE_LIMIT_ABSORB_MAX_SECONDS));
 
-    logRequestHead();
-    getLog()?.write(`\n\n=== RESPONSE ${upstreamRes.status} ===\n${formatHeaders(upstreamRes.headers)}`);
+  if (switchingToSx && retryCount < maxRetries) {
+    console.log(`[Jaynshare] 429 on "${account.name}" — retrying via sx.org (fresh egress IP)`);
+    if (res.destroyed) return;
+    return forwardRequest(exchange, retryCount + 1, nextUseSx);
+  }
 
-    ctx.status = upstreamRes.status;
+  if (retryAfter <= RATE_LIMIT_ABSORB_MAX_SECONDS && retryCount < maxRetries) {
+    console.log(`[Jaynshare] Rate-limit 429 on "${account.name}" — waiting ${retryAfter}s, retrying same account (no switch)`);
+    await sleep(retryAfter * 1000);
+    if (res.destroyed) return;
+    return forwardRequest(exchange, retryCount + 1, nextUseSx);
+  }
 
-    const responseHeaders = {};
-    for (const [key, value] of upstreamRes.headers.entries()) {
-      if (CONNECTION_SPECIFIC_HEADERS.has(key)) continue;
-      if (key === 'content-encoding' || key === 'content-length') continue; // fetch auto-decompressed
-      responseHeaders[key] = value;
-    }
+  console.log(`[Jaynshare] Rate-limit 429 on "${account.name}" — retry-after ${retryAfter}s over inline cap; returning 429 to client (no switch)`);
+  ctx.status = 429;
+  if (!res.headersSent && !res.destroyed) sendRateLimited(res, retryAfter, `Rate limited; retry in ${retryAfter}s.`);
+}
 
-    res.writeHead(upstreamRes.status, responseHeaders);
+// A 403 refuses the injected account outright; the client must never see it (it would drop its login).
+async function handle403(exchange, { account, retryCount, route }, upstreamRes) {
+  await upstreamRes.body?.cancel();
+  (exchange.ctx.credentialRejected ??= new Set()).add(account.name);
+  exchange.ctx.tried.add(account.index);
+  console.error(`[Jaynshare] 403 on "${account.name}" — upstream refused the account credential`);
+  return forwardRequest(exchange, retryCount + 1, route);
+}
 
-    if (!upstreamRes.body) {
-      const l = getLog();
-      if (l) { l.write('\n\n=== RESPONSE BODY ===\n(empty)'); l.end(); }
-      res.end();
-      return;
-    }
+// A 401 before clock expiry means the token was revoked; one forced refresh per account per request.
+function canForceRefresh({ accountManager, ctx }, { account, retryCount }) {
+  return account.type === 'oauth' && !!account.refreshToken
+    && retryCount < accountManager.accounts.length && !ctx.reauthed.has(account.index);
+}
 
-    const contentType = upstreamRes.headers.get('content-type') || '';
-    const isStreaming = contentType.includes('text/event-stream');
+async function handle401(exchange, { account, retryCount, route }, upstreamRes) {
+  exchange.ctx.reauthed.add(account.index);
+  await upstreamRes.body?.cancel();
+  console.log(`[Jaynshare] 401 on "${account.name}" — token rejected; forcing refresh and retrying`);
+  await exchange.accountManager.refreshTokenAfterRejection(account.index);
+  if (exchange.res.destroyed) return;
+  return forwardRequest(exchange, retryCount + 1, route);
+}
 
-    if (isStreaming) {
-      const l = getLog();
-      const bw = l ? l.bodyWriter('RESPONSE BODY (streamed)', contentType) : null;
-      await streamResponse(upstreamRes.body, res, account.index, accountManager, bw);
-      l?.end();
-    } else {
-      const buf = Buffer.from(await upstreamRes.arrayBuffer());
-      extractUsageFromBody(buf, account.index, accountManager);
-      const l = getLog();
-      if (l) { l.body('RESPONSE BODY', buf, contentType); l.end(); }
-      res.end(buf);
-    }
-  } catch (err) {
-    console.error(`[Jaynshare] Upstream error (account "${account.name}"):`, err.message);
+async function relayResponse({ res, accountManager, ctx }, { account, log }, upstreamRes) {
+  log.head();
+  log.get()?.write(`\n\n=== RESPONSE ${upstreamRes.status} ===\n${formatHeaders(upstreamRes.headers)}`);
 
-    logRequestHead();
-    const l = getLog();
-    if (l) { l.write(`\n\n=== ERROR ===\n${err.stack || err.message}`); l.end(); }
+  ctx.status = upstreamRes.status;
+  res.writeHead(upstreamRes.status, clientResponseHeaders(upstreamRes.headers.entries()));
 
-    const isTransient = err instanceof Error &&
-      (err.code === 'JAYNSHARE_HEADERS_TIMEOUT' || err.code === 'JAYNSHARE_BODY_TIMEOUT' ||
-        err.name === 'TimeoutError' || err.name === 'AbortError' ||
-        err.message.includes('fetch failed') ||
-        err.code === 'ECONNRESET' || err.code === 'ECONNREFUSED' ||
-        err.code === 'ETIMEDOUT' || err.code === 'UND_ERR_CONNECT_TIMEOUT' ||
-        err.code === 'UND_ERR_HEADERS_TIMEOUT' || err.code === 'UND_ERR_BODY_TIMEOUT');
+  if (!upstreamRes.body) {
+    const l = log.get();
+    if (l) { l.write('\n\n=== RESPONSE BODY ===\n(empty)'); l.end(); }
+    res.end();
+    return;
+  }
 
-    // The fetch pool is process-wide, so failing over would not help; a fast failure evicts the dead socket.
-    if (isTransient) {
-      res.destroy();
-      return;
-    }
+  const contentType = upstreamRes.headers.get('content-type') || '';
+  const isStreaming = contentType.includes('text/event-stream');
 
-    // A throw is never proof of a bad credential (that is a 401 response), so the account is only skipped this request.
-    if (retryCount < maxRetries && !res.headersSent) {
-      ctx.tried.add(account.index);
-      return forwardRequest(req, res, body, accountManager, upstream, retryCount + 1, hooks, reqId, ctx, logDir, sx, route);
-    }
-    ctx.status = 502;
+  if (isStreaming) {
+    const l = log.get();
+    const bodyWriter = l ? l.bodyWriter('RESPONSE BODY (streamed)', contentType) : null;
+    await streamResponse(upstreamRes.body, res, { accountManager, accountIndex: account.index, bodyWriter });
+    l?.end();
+  } else {
+    const buf = Buffer.from(await upstreamRes.arrayBuffer());
+    extractUsageFromBody(buf, account.index, accountManager);
+    const l = log.get();
+    if (l) { l.body('RESPONSE BODY', buf, contentType); l.end(); }
+    res.end(buf);
+  }
+}
 
-    if (!res.headersSent) {
-      res.writeHead(502, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({
-        type: 'error',
-        error: { type: 'proxy_error', message: `Upstream error: ${err.message}` },
-      }));
-    } else if (!res.writableEnded) {
-      res.destroy(); // a broken response makes the client retry; a clean end would not
-    }
+function isTransientUpstreamError(err) {
+  return err instanceof Error &&
+    (err.code === 'JAYNSHARE_HEADERS_TIMEOUT' || err.code === 'JAYNSHARE_BODY_TIMEOUT' ||
+      err.name === 'TimeoutError' || err.name === 'AbortError' ||
+      err.message.includes('fetch failed') ||
+      err.code === 'ECONNRESET' || err.code === 'ECONNREFUSED' ||
+      err.code === 'ETIMEDOUT' || err.code === 'UND_ERR_CONNECT_TIMEOUT' ||
+      err.code === 'UND_ERR_HEADERS_TIMEOUT' || err.code === 'UND_ERR_BODY_TIMEOUT');
+}
+
+async function handleUpstreamError(exchange, { account, retryCount, route, log }, err) {
+  const { res, accountManager, ctx } = exchange;
+  console.error(`[Jaynshare] Upstream error (account "${account.name}"):`, err.message);
+
+  log.head();
+  const l = log.get();
+  if (l) { l.write(`\n\n=== ERROR ===\n${err.stack || err.message}`); l.end(); }
+
+  // The fetch pool is process-wide, so failing over would not help; a fast failure evicts the dead socket.
+  if (isTransientUpstreamError(err)) {
+    res.destroy();
+    return;
+  }
+
+  // A throw is never proof of a bad credential (that is a 401 response), so the account is only skipped this request.
+  if (retryCount < accountManager.accounts.length && !res.headersSent) {
+    ctx.tried.add(account.index);
+    return forwardRequest(exchange, retryCount + 1, route);
+  }
+  ctx.status = 502;
+
+  if (!res.headersSent) {
+    sendJson(res, 502, apiError('proxy_error', `Upstream error: ${err.message}`));
+  } else if (!res.writableEnded) {
+    res.destroy(); // a broken response makes the client retry; a clean end would not
   }
 }
 
@@ -981,7 +1070,7 @@ export function readWithIdleTimeout(reader, ms) {
   return Promise.race([read, timeout]).finally(() => clearTimeout(timer));
 }
 
-async function streamResponse(webStream, res, accountIndex, accountManager, bodyWriter) {
+async function streamResponse(webStream, res, { accountManager, accountIndex, bodyWriter }) {
   const reader = webStream.getReader();
   const idleMs = resolveBodyIdleTimeout();
   const decoder = new TextDecoder();

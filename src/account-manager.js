@@ -71,6 +71,57 @@ function makeAccount(acct, index) {
 }
 
 // A declared model may carry a [Nm] context-length suffix.
+/** The unified buckets the headers carry, as a patch for an account's quota. */
+function unifiedLimits(headers) {
+  const patch = {};
+  const utilization = {
+    unified5h: parseFloat(headers['anthropic-ratelimit-unified-5h-utilization']),
+    unified7d: parseFloat(headers['anthropic-ratelimit-unified-7d-utilization']),
+    // `7d_oi` (7-day, overage included) is the Fable weekly bucket; utilization may exceed 1.
+    unified7dFable: parseFloat(headers['anthropic-ratelimit-unified-7d_oi-utilization']),
+  };
+  for (const [field, value] of Object.entries(utilization)) {
+    if (!isNaN(value)) patch[field] = value;
+  }
+
+  const resets = {
+    unified5hReset: headers['anthropic-ratelimit-unified-5h-reset'],
+    unified7dReset: headers['anthropic-ratelimit-unified-7d-reset'],
+    unified7dFableReset: headers['anthropic-ratelimit-unified-7d_oi-reset'],
+  };
+  for (const [field, seconds] of Object.entries(resets)) {
+    if (seconds) patch[field] = parseInt(seconds, 10) * 1000;
+  }
+
+  const status = headers['anthropic-ratelimit-unified-status'];
+  if (status) patch.unifiedStatus = status;
+  return patch;
+}
+
+/** The per-key token and request counters that predate the unified buckets. */
+function legacyLimits(headers) {
+  const patch = {};
+  const counters = {
+    tokensLimit: parseInt(headers['anthropic-ratelimit-tokens-limit'], 10),
+    tokensRemaining: parseInt(headers['anthropic-ratelimit-tokens-remaining'], 10),
+    requestsLimit: parseInt(headers['anthropic-ratelimit-requests-limit'], 10),
+    requestsRemaining: parseInt(headers['anthropic-ratelimit-requests-remaining'], 10),
+  };
+  for (const [field, value] of Object.entries(counters)) {
+    if (!isNaN(value)) patch[field] = value;
+  }
+
+  const resetsAt = headers['anthropic-ratelimit-tokens-reset'] || headers['anthropic-ratelimit-requests-reset'];
+  if (resetsAt) patch.resetsAt = resetsAt;
+  return patch;
+}
+
+function usagePercent(quota) {
+  if (quota.unified7d != null) return (quota.unified7d * 100).toFixed(1);
+  if (quota.tokensLimit) return ((1 - quota.tokensRemaining / quota.tokensLimit) * 100).toFixed(1);
+  return '?';
+}
+
 function modelMatches(declared, model) {
   return declared === model || declared.replace(/\[\d+m\]$/, '') === model;
 }
@@ -150,52 +201,72 @@ export class AccountManager {
     if (this.ramp.enabled) account.rampStartedAt = account.pausedUntil; // release the backlog through a ramp
   }
 
-  // Null when every account is exhausted. The advisor runs on the same account, so
-  // `advisorModel` must be eligible too; failing both, `model` alone decides.
-  getActiveAccount(exclude = null, model = null, advisorModel = null, sessionId = null, preferredIndex = null) {
+  /**
+   * The account to serve one request, or null when every account is exhausted.
+   * @param {{exclude?: Set<number>, model?: string, advisorModel?: string,
+   *          sessionId?: string, preferredIndex?: number}} query
+   */
+  getActiveAccount(query = {}) {
     this.refreshExpiredQuotas();
-    // Preference beats current/priority order but not availability or route rules.
-    if (preferredIndex != null) {
-      const preferred = this.accounts[preferredIndex];
-      if (preferred && !exclude?.has(preferredIndex)
-          && this._isAvailable(preferred, model, advisorModel)) return preferred;
+    const preferred = this._preferredAccount(query);
+    if (preferred) return preferred;
+
+    if (this.distributeSessions && query.sessionId
+        && !this._pinnedAccountForModel(query.model, query.advisorModel)) {
+      const spread = this._selectForSession(query);
+      if (spread) return spread;
     }
-    if (this.distributeSessions && sessionId && !this._pinnedAccountForModel(model, advisorModel)) {
-      const acc = this._selectForSession(sessionId, exclude, model, advisorModel);
-      if (acc) return acc;
-    }
-    if (advisorModel) {
-      const account = this._select(exclude, model, advisorModel, false);
+
+    // The advisor runs on the same account, so its model must be eligible too;
+    // failing that, the request model alone decides.
+    if (query.advisorModel) {
+      const account = this._select(query);
       if (account) return account;
-      if (Date.now() >= (this._advisorDegradeLogAt || 0)) {
-        this._advisorDegradeLogAt = Date.now() + 60_000;
-        console.log(`[Jaynshare] No account eligible for advisor model "${advisorModel}" — routing by request model only`);
-      }
+      this._logAdvisorDegraded(query.advisorModel);
     }
-    return this._select(exclude, model, null, true);
+    return this._select({ ...query, advisorModel: null });
   }
 
-  /** Route pin → current account → best available → (allowProbe) exhausted-fleet probe. */
-  _select(exclude, model, advisorModel, allowProbe) {
+  /** A per-session preference beats current/priority order, but not availability or route rules. */
+  _preferredAccount({ exclude, model, advisorModel, preferredIndex }) {
+    if (preferredIndex == null) return null;
+    const preferred = this.accounts[preferredIndex];
+    return preferred && !exclude?.has(preferredIndex) && this._isAvailable(preferred, model, advisorModel)
+      ? preferred : null;
+  }
+
+  _logAdvisorDegraded(advisorModel) {
+    if (Date.now() < (this._advisorDegradeLogAt || 0)) return;
+    this._advisorDegradeLogAt = Date.now() + 60_000;
+    console.log(`[Jaynshare] No account eligible for advisor model "${advisorModel}" — routing by request model only`);
+  }
+
+  /**
+   * Route pin → current account → best available → exhausted-fleet probe. A pass
+   * carrying an advisor model is a trial the caller can fall back from, so it
+   * neither probes nor spends the current account's pending requalification.
+   */
+  _select({ exclude, model, advisorModel }) {
+    const trial = !!advisorModel;
     const pinned = this._pinnedAccountForModel(model, advisorModel);
     if (pinned && this._isAvailable(pinned, model, advisorModel) && !exclude?.has(pinned.index)) return pinned;
     const current = this.accounts[this.currentIndex];
     if (current && current.requalify) {
-      if (allowProbe) current.requalify = false; // the advisor pass must not consume it
+      if (!trial) current.requalify = false;
       const next = this._selectNext(exclude, model, advisorModel);
       if (next) { current.requalify = false; return next; }
     }
     if (this._isAvailable(current, model, advisorModel) && !exclude?.has(current.index)) {
-      const betterExists = this._preemptedBy(current, model, advisorModel, exclude);
+      const betterExists = this._preemptedBy(current, { model, advisorModel, exclude });
       return betterExists ? this._selectNext(exclude, model, advisorModel) : current;
     }
     const next = this._selectNext(exclude, model, advisorModel);
     if (next) return next;
-    return allowProbe ? this._selectProbe(exclude, model) : null;
+    return trial ? null : this._selectProbe(exclude, model);
   }
 
   /** The session's pinned account unless a higher-priority one is available, else the least loaded. */
-  _selectForSession(sessionId, exclude, model, advisorModel) {
+  _selectForSession({ sessionId, exclude, model, advisorModel }) {
     const pinIdx = this.sessionTracker.pinnedAccount(sessionId);
     if (pinIdx != null) {
       const pinned = this.accounts[pinIdx];
@@ -276,8 +347,8 @@ export class AccountManager {
   }
 
   /** getActiveAccount, blocking on a refresh when the token has already expired. */
-  async getActiveAccountFresh(exclude = null, model = null, advisorModel = null, sessionId = null) {
-    const account = this.getActiveAccount(exclude, model, advisorModel, sessionId);
+  async getActiveAccountFresh(query = {}) {
+    const account = this.getActiveAccount(query);
     if (account && account.type === 'oauth' && account.refreshToken
         && isTokenExpired(account.expiresAt)) {
       await this.ensureTokenFresh(account.index);
@@ -407,7 +478,7 @@ export class AccountManager {
   }
 
   /** The available account that outranks `account`, or null; same tier never preempts. */
-  _preemptedBy(account, model = null, advisorModel = null, exclude = null) {
+  _preemptedBy(account, { model = null, advisorModel = null, exclude = null } = {}) {
     return this.accounts.find(a => this._isAvailable(a, model, advisorModel)
       && !exclude?.has(a.index)
       && (a.priority || 0) < (account.priority || 0)) || null;
@@ -756,57 +827,23 @@ export class AccountManager {
     const account = this.accounts[accountIndex];
     if (!account) return;
 
-    const u5h = parseFloat(headers['anthropic-ratelimit-unified-5h-utilization']);
-    const u7d = parseFloat(headers['anthropic-ratelimit-unified-7d-utilization']);
-    if (!isNaN(u5h)) account.quota.unified5h = u5h;
-    if (!isNaN(u7d)) account.quota.unified7d = u7d;
-
-    const r5h = headers['anthropic-ratelimit-unified-5h-reset'];
-    const r7d = headers['anthropic-ratelimit-unified-7d-reset'];
-    if (r5h) account.quota.unified5hReset = parseInt(r5h, 10) * 1000;
-    if (r7d) account.quota.unified7dReset = parseInt(r7d, 10) * 1000;
-
-    // `7d_oi` (7-day, overage included) is the Fable weekly bucket; utilization may exceed 1.
-    const u7dOi = parseFloat(headers['anthropic-ratelimit-unified-7d_oi-utilization']);
-    if (!isNaN(u7dOi)) account.quota.unified7dFable = u7dOi;
-    const r7dOi = headers['anthropic-ratelimit-unified-7d_oi-reset'];
-    if (r7dOi) account.quota.unified7dFableReset = parseInt(r7dOi, 10) * 1000;
-
-    if (account.probing && account.quota.unified7dReset != null) {
-      account.probing = false;
-      account.requalify = true;
-      console.log(`[Jaynshare] Learned weekly quota for "${account.name}", re-evaluating selection`);
-    }
-
-    const uStatus = headers['anthropic-ratelimit-unified-status'];
-    if (uStatus) account.quota.unifiedStatus = uStatus;
-
-    const tokensLimit = parseInt(headers['anthropic-ratelimit-tokens-limit'], 10);
-    const tokensRemaining = parseInt(headers['anthropic-ratelimit-tokens-remaining'], 10);
-    const tokensReset = headers['anthropic-ratelimit-tokens-reset'];
-    const requestsLimit = parseInt(headers['anthropic-ratelimit-requests-limit'], 10);
-    const requestsRemaining = parseInt(headers['anthropic-ratelimit-requests-remaining'], 10);
-    const requestsReset = headers['anthropic-ratelimit-requests-reset'];
-
-    if (!isNaN(tokensLimit)) account.quota.tokensLimit = tokensLimit;
-    if (!isNaN(tokensRemaining)) account.quota.tokensRemaining = tokensRemaining;
-    if (!isNaN(requestsLimit)) account.quota.requestsLimit = requestsLimit;
-    if (!isNaN(requestsRemaining)) account.quota.requestsRemaining = requestsRemaining;
-
-    if (tokensReset) account.quota.resetsAt = tokensReset;
-    else if (requestsReset) account.quota.resetsAt = requestsReset;
+    Object.assign(account.quota, unifiedLimits(headers), legacyLimits(headers));
+    this._resolveProbe(account);
 
     account.usage.totalRequests++;
     account.usage.lastUsed = new Date().toISOString();
 
     if (this._isNearQuota(account)) {
-      const pct = account.quota.unified7d != null
-        ? (account.quota.unified7d * 100).toFixed(1)
-        : account.quota.tokensLimit
-          ? ((1 - account.quota.tokensRemaining / account.quota.tokensLimit) * 100).toFixed(1)
-          : '?';
-      console.log(`[Jaynshare] Account "${account.name}" at ${pct}% usage — will switch on next request`);
+      console.log(`[Jaynshare] Account "${account.name}" at ${usagePercent(account.quota)}% usage — will switch on next request`);
     }
+  }
+
+  /** A probing account learns its weekly window from the first answer that carries one. */
+  _resolveProbe(account) {
+    if (!account.probing || account.quota.unified7dReset == null) return;
+    account.probing = false;
+    account.requalify = true;
+    console.log(`[Jaynshare] Learned weekly quota for "${account.name}", re-evaluating selection`);
   }
 
   updateUsage(accountIndex, inputTokens, outputTokens) {
@@ -876,19 +913,32 @@ export class AccountManager {
     console.log(`[Jaynshare] Account "${account.name}" revalidated — rate limit no longer applies, back in rotation`);
   }
 
-  /** `force` refreshes regardless of expiry (after a 401). Concurrent calls coalesce. */
-  async ensureTokenFresh(accountIndex, force = false) {
+  /** Refreshes only a token that is about to expire. Concurrent calls coalesce. */
+  async ensureTokenFresh(accountIndex) {
     const account = this.accounts[accountIndex];
-    if (!account || account.type !== 'oauth' || !account.refreshToken) return;
+    if (!this._refreshable(account)) return;
+    if (!isTokenExpiringSoon(account.expiresAt)) return;
+    return this._refreshToken(accountIndex, account);
+  }
 
-    if (!force && !isTokenExpiringSoon(account.expiresAt)) return;
+  /** Refreshes regardless of expiry, after upstream rejected the token with a 401. */
+  async refreshTokenAfterRejection(accountIndex) {
+    const account = this.accounts[accountIndex];
+    if (!this._refreshable(account)) return;
 
     // A burst of 401s from requests sent before the refresh landed must not rotate the token once each.
-    if (force && account._lastRefreshAt !== null
+    if (account._lastRefreshAt !== null
         && Date.now() - account._lastRefreshAt < this._forcedRefreshFloorMs) {
       return;
     }
+    return this._refreshToken(accountIndex, account);
+  }
 
+  _refreshable(account) {
+    return !!(account && account.type === 'oauth' && account.refreshToken);
+  }
+
+  _refreshToken(accountIndex, account) {
     if (account._refreshPromise) return account._refreshPromise;
 
     account._refreshPromise = (async () => {

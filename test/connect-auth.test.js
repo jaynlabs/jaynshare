@@ -1,40 +1,41 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { connectAuthorized } from '../src/mitm.js';
+import { connectPrincipal } from '../src/mitm.js';
 import { safeKeyEqual, isLoopbackAddr, isSelfConnection } from '../src/server.js';
 
 // Without the CONNECT gate, a remote client gets a token injected or an open relay.
 
 const sock = (remoteAddress) => ({ remoteAddress });
 const req = (auth) => ({ headers: auth ? { 'proxy-authorization': auth } : {} });
+const keyed = { proxy: { apiKey: 'secret' } };
 
-test('no proxy key configured → CONNECT is open (matches the HTTP path)', () => {
-  assert.equal(connectAuthorized(req(), sock('203.0.113.9'), null), true);
+test('no proxy credential configured → CONNECT is open (matches the HTTP path)', () => {
+  assert.ok(connectPrincipal(req(), sock('203.0.113.9'), { proxy: {} }));
 });
 
 test('loopback clients are exempt even when a key is set', () => {
   for (const a of ['127.0.0.1', '::1', '::ffff:127.0.0.1']) {
-    assert.equal(connectAuthorized(req(), sock(a), 'secret'), true, a);
+    assert.equal(connectPrincipal(req(), sock(a), keyed)?.local, true, a);
   }
 });
 
 test('a remote client with no Proxy-Authorization is denied', () => {
-  assert.equal(connectAuthorized(req(), sock('203.0.113.9'), 'secret'), false);
+  assert.equal(connectPrincipal(req(), sock('203.0.113.9'), keyed), null);
 });
 
 test('a remote client with the correct Bearer key is allowed', () => {
-  assert.equal(connectAuthorized(req('Bearer secret'), sock('203.0.113.9'), 'secret'), true);
+  assert.ok(connectPrincipal(req('Bearer secret'), sock('203.0.113.9'), keyed));
 });
 
 test('a remote client with a wrong key is denied', () => {
-  assert.equal(connectAuthorized(req('Bearer nope'), sock('203.0.113.9'), 'secret'), false);
+  assert.equal(connectPrincipal(req('Bearer nope'), sock('203.0.113.9'), keyed), null);
 });
 
 test('Basic auth carrying the key as username or password is accepted', () => {
   const asUser = 'Basic ' + Buffer.from('secret:').toString('base64');  // curl http://secret@host
   const asPass = 'Basic ' + Buffer.from('x:secret').toString('base64'); // curl http://x:secret@host
-  assert.equal(connectAuthorized(req(asUser), sock('10.0.0.5'), 'secret'), true);
-  assert.equal(connectAuthorized(req(asPass), sock('10.0.0.5'), 'secret'), true);
+  assert.ok(connectPrincipal(req(asUser), sock('10.0.0.5'), keyed));
+  assert.ok(connectPrincipal(req(asPass), sock('10.0.0.5'), keyed));
 });
 
 test('safeKeyEqual is value-correct and length/type-safe', () => {

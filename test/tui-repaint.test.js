@@ -70,15 +70,15 @@ test('an identical frame is not written to the terminal twice', () => {
   const orig = process.stdout.write;
   process.stdout.write = (chunk) => { writes.push(String(chunk)); return true; };
   try {
-    tui._paint('SAME', false);
-    tui._paint('SAME', false);
-    tui._paint('SAME', false);
+    tui._paintIfChanged('SAME');
+    tui._paintIfChanged('SAME');
+    tui._paintIfChanged('SAME');
     assert.equal(writes.length, 1, 'repeated identical frames collapse to one write');
 
-    tui._paint('DIFFERENT', false);
+    tui._paintIfChanged('DIFFERENT');
     assert.equal(writes.length, 2, 'a changed frame is written');
 
-    tui._paint('DIFFERENT', true); // a resize
+    tui._paint('DIFFERENT'); // a resize
     assert.equal(writes.length, 3, 'a forced repaint is written even when unchanged');
   } finally {
     process.stdout.write = orig;
@@ -93,14 +93,14 @@ test('an unchanged frame is still repainted eventually', () => {
   const orig = process.stdout.write;
   process.stdout.write = (chunk) => { writes.push(String(chunk)); return true; };
   try {
-    tui._paint('SAME', false);
+    tui._paintIfChanged('SAME');
     assert.equal(writes.length, 1);
-    tui._paint('SAME', false);
+    tui._paintIfChanged('SAME');
     assert.equal(writes.length, 1);
 
     // Pretend the last paint was long enough ago to be considered stale.
     tui._lastPaintAt = Date.now() - 120_000;
-    tui._paint('SAME', false);
+    tui._paintIfChanged('SAME');
     assert.equal(writes.length, 2, 'a stale screen is refreshed even when the frame matches');
   } finally {
     process.stdout.write = orig;

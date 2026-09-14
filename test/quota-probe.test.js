@@ -124,12 +124,12 @@ test('a Fable-exhausted account is skipped for Fable but used for other models',
   am.currentIndex = 0;
 
   // A Fable request must NOT land on the exhausted account…
-  const forFable = am.getActiveAccount(null, 'claude-fable-5');
+  const forFable = am.getActiveAccount({ model: 'claude-fable-5' });
   assert.equal(forFable.name, 'b');
 
   // …but a non-Fable request still uses it (its Fable cap is irrelevant).
   am.currentIndex = 0;
-  const forOpus = am.getActiveAccount(null, 'claude-opus-4-8');
+  const forOpus = am.getActiveAccount({ model: 'claude-opus-4-8' });
   assert.equal(forOpus.name, 'a');
 
   // No model context → behaves as before (account a is available).
@@ -145,9 +145,9 @@ test('all accounts Fable-exhausted → no account for a Fable request', () => {
     'anthropic-ratelimit-unified-7d_oi-reset': reset,
   });
   // Probe is throttled off by default here, so a Fable request finds nothing…
-  assert.equal(am.getActiveAccount(null, 'claude-fable-5'), null);
+  assert.equal(am.getActiveAccount({ model: 'claude-fable-5' }), null);
   // …while an Opus request is unaffected.
-  assert.ok(am.getActiveAccount(null, 'claude-opus-4-8'));
+  assert.ok(am.getActiveAccount({ model: 'claude-opus-4-8' }));
 });
 
 // ── Prober ────────────────────────────────────────────────────

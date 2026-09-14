@@ -65,7 +65,7 @@ export class Prober {
       await this.am.ensureTokenFresh(account.index);
       let usage = await this._withTimeout(this.probeFn(account.credential));
       if (usage?.status === 401) {
-        await this.am.ensureTokenFresh(account.index, true);
+        await this.am.refreshTokenAfterRejection(account.index);
         usage = await this._withTimeout(this.probeFn(account.credential));
       }
 

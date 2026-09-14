@@ -28,7 +28,7 @@ test('after the floor, a throttled account becomes a revalidation probe target',
   assert.equal(probe.status, 'throttled', 'probe target is still formally throttled');
 
   // Probing stays rate-limited to one per probe interval.
-  assert.equal(am.getActiveAccount(exclude(probe)), null, 'second probe inside the interval must refuse');
+  assert.equal(am.getActiveAccount({ exclude: exclude(probe) }), null, 'second probe inside the interval must refuse');
 });
 
 test('a non-429 response clears the hold and returns the account to rotation', () => {

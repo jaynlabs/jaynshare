@@ -1,6 +1,6 @@
 // `jaynshare service`: a per-user LaunchAgent on macOS, a systemd --user unit on Linux.
 
-import { writeFile, mkdir, rm, readFile } from 'node:fs/promises';
+import { writeFile, mkdir, rm } from 'node:fs/promises';
 import { existsSync, realpathSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { homedir } from 'node:os';
@@ -129,32 +129,38 @@ export async function installService({
   xdgConfig = process.env.XDG_CONFIG_HOME,
 } = {}) {
   if (!kind) return { ok: false, error: `No service integration for ${platform}` };
+  const where = { home, platform, xdgConfig };
+  const unit = { ...exec, path: servicePath(exec), configPath };
+  return kind === 'launchd'
+    ? installLaunchAgent(unit, where, { run, log })
+    : installSystemdUnit(unit, where, { run, log });
+}
+
+async function installLaunchAgent(unit, { home, platform }, { run, log }) {
   const logFile = logPath(home, platform);
-  const path = servicePath(exec);
+  const plist = launchAgentPath(home);
+  await mkdir(dirname(plist), { recursive: true });
+  await mkdir(dirname(logFile), { recursive: true });
+  await writeFile(plist, renderLaunchAgent({ ...unit, log: logFile }), { mode: 0o644 });
+  run('launchctl', ['bootout', `${guiDomain()}/${LABEL}`]); // bootstrap fails if the label is already loaded
+  const boot = run('launchctl', ['bootstrap', guiDomain(), plist]);
+  if (boot.code !== 0) return { ok: false, error: boot.stderr.trim() || `launchctl bootstrap exited ${boot.code}`, file: plist };
+  log(`[Jaynshare] Service installed: ${plist}`);
+  log(`[Jaynshare] Logs: ${logFile}`);
+  return { ok: true, file: plist, logFile };
+}
 
-  if (kind === 'launchd') {
-    const plist = launchAgentPath(home);
-    await mkdir(dirname(plist), { recursive: true });
-    await mkdir(dirname(logFile), { recursive: true });
-    await writeFile(plist, renderLaunchAgent({ ...exec, log: logFile, path, configPath }), { mode: 0o644 });
-    run('launchctl', ['bootout', `${guiDomain()}/${LABEL}`]); // bootstrap fails if the label is already loaded
-    const boot = run('launchctl', ['bootstrap', guiDomain(), plist]);
-    if (boot.code !== 0) return { ok: false, error: boot.stderr.trim() || `launchctl bootstrap exited ${boot.code}`, file: plist };
-    log(`[Jaynshare] Service installed: ${plist}`);
-    log(`[Jaynshare] Logs: ${logFile}`);
-    return { ok: true, file: plist, logFile };
-  }
-
-  const unit = systemdUnitPath(home, xdgConfig);
-  await mkdir(dirname(unit), { recursive: true });
-  await writeFile(unit, renderSystemdUnit({ ...exec, path, configPath }), { mode: 0o644 });
+async function installSystemdUnit(unit, { home, xdgConfig }, { run, log }) {
+  const file = systemdUnitPath(home, xdgConfig);
+  await mkdir(dirname(file), { recursive: true });
+  await writeFile(file, renderSystemdUnit(unit), { mode: 0o644 });
   run('systemctl', ['--user', 'daemon-reload']);
   const enable = run('systemctl', ['--user', 'enable', '--now', UNIT_NAME]);
-  if (enable.code !== 0) return { ok: false, error: enable.stderr.trim() || `systemctl exited ${enable.code}`, file: unit };
-  log(`[Jaynshare] Service installed: ${unit}`);
+  if (enable.code !== 0) return { ok: false, error: enable.stderr.trim() || `systemctl exited ${enable.code}`, file };
+  log(`[Jaynshare] Service installed: ${file}`);
   log('[Jaynshare] Logs: journalctl --user --unit jaynshare.service --follow');
   log('[Jaynshare] To keep it running with no session open: loginctl enable-linger $USER');
-  return { ok: true, file: unit, logFile: null };
+  return { ok: true, file, logFile: null };
 }
 
 export async function uninstallService({
@@ -184,10 +190,9 @@ export async function serviceStatus({
   if (!kind) return { installed: false, running: false, detail: 'unsupported platform' };
   if (kind === 'launchd') {
     const plist = launchAgentPath(home);
-    const installed = existsSync(plist);
     const r = run('launchctl', ['print', `${guiDomain()}/${LABEL}`]);
     const pid = /\bpid = (\d+)/.exec(r.stdout)?.[1] || null;
-    return { installed, running: r.code === 0 && !!pid, pid, file: plist, detail: r.code === 0 ? 'loaded' : 'not loaded' };
+    return { installed: existsSync(plist), running: r.code === 0 && !!pid, pid, file: plist, detail: r.code === 0 ? 'loaded' : 'not loaded' };
   }
   const unit = systemdUnitPath(home, xdgConfig);
   const r = run('systemctl', ['--user', 'is-active', UNIT_NAME]);
@@ -200,12 +205,4 @@ export function renderService({ kind = serviceKind(), home = homedir(), platform
   return kind === 'launchd'
     ? renderLaunchAgent({ ...exec, log: logPath(home, platform), path, configPath })
     : renderSystemdUnit({ ...exec, path, configPath });
-}
-
-export async function readInstalled({
-  kind = serviceKind(), home = homedir(), xdgConfig = process.env.XDG_CONFIG_HOME,
-} = {}) {
-  if (!kind) return null;
-  const file = kind === 'launchd' ? launchAgentPath(home) : systemdUnitPath(home, xdgConfig);
-  return readFile(file, 'utf8').catch(() => null);
 }

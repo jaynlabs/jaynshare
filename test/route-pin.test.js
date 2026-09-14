@@ -13,12 +13,12 @@ test('a route pin biases getActiveAccount toward the pinned account for matching
     routes: [{ name: 'bulk', match: ['*opus*'] }],
   });
   // Without a pin, selection lands on the default (index 0).
-  assert.equal(am.getActiveAccount(null, 'claude-opus-4').name, 'a');
+  assert.equal(am.getActiveAccount({ model: 'claude-opus-4' }).name, 'a');
 
   assert.deepEqual(am.setRoutePin('bulk', 1), { ok: true });
-  assert.equal(am.getActiveAccount(null, 'claude-opus-4').name, 'b'); // pin wins
+  assert.equal(am.getActiveAccount({ model: 'claude-opus-4' }).name, 'b'); // pin wins
   // A model the route does NOT match is unaffected by the pin.
-  assert.equal(am.getActiveAccount(null, 'claude-sonnet-4-6').name, 'a');
+  assert.equal(am.getActiveAccount({ model: 'claude-sonnet-4-6' }).name, 'a');
 });
 
 test('a pinned account that is ineligible falls back to best-available', () => {
@@ -30,7 +30,7 @@ test('a pinned account that is ineligible falls back to best-available', () => {
   am.accounts[1].quota.unified5h = 0.999;
   am.accounts[1].quota.unified5hReset = Date.now() + 3600_000;
 
-  assert.equal(am.getActiveAccount(null, 'claude-opus-4').name, 'a'); // fell back
+  assert.equal(am.getActiveAccount({ model: 'claude-opus-4' }).name, 'a'); // fell back
 });
 
 test('setRoutePin rejects an account the route does not allow', () => {
@@ -49,7 +49,7 @@ test('an auto fable route is pinnable by its family name', () => {
   assert.ok(am.getRoutes().some(r => r.name === 'fable' && r.autocreated), 'auto fable route detected');
 
   assert.deepEqual(am.setRoutePin('fable', 1), { ok: true });
-  assert.equal(am.getActiveAccount(null, 'claude-fable-5').name, 'b');
+  assert.equal(am.getActiveAccount({ model: 'claude-fable-5' }).name, 'b');
   assert.equal(am.getRoutes().find(r => r.name === 'fable').pinned, 'b');
 });
 
@@ -59,7 +59,7 @@ test('clearRoutePin removes the bias', () => {
   });
   am.setRoutePin('bulk', 1);
   am.clearRoutePin('bulk');
-  assert.equal(am.getActiveAccount(null, 'claude-opus-4').name, 'a');
+  assert.equal(am.getActiveAccount({ model: 'claude-opus-4' }).name, 'a');
 });
 
 test('removing an account keeps route pins pointing at the right account', () => {

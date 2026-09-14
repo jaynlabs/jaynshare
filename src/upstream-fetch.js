@@ -30,38 +30,38 @@ function headersTimeoutError(ms) {
   return err;
 }
 
-export function upstreamFetch(url, opts = {}, sx = null, useProxy = false) {
-  const { headersTimeoutMs, ...fetchOpts } = opts;
-  const timeoutMs = resolveHeadersTimeout(headersTimeoutMs);
-  if (sx && useProxy && sx.isProvisioned()) return proxiedFetch(url, fetchOpts, sx, timeoutMs);
+/** `via`: an SxManager to dial through, or null for the direct/corporate-proxy path. */
+export function upstreamFetch(url, opts = {}, via = null) {
+  const fetchOpts = { ...opts, headersTimeoutMs: resolveHeadersTimeout(opts.headersTimeoutMs) };
+  if (via?.isProvisioned()) return proxiedFetch(url, fetchOpts, via);
   const useGlobal = USE_GLOBAL_FETCH && !proxyForHost(new URL(url).hostname);
-  return useGlobal ? directFetch(url, fetchOpts, timeoutMs) : pooledFetch(url, fetchOpts, timeoutMs);
+  return useGlobal ? directFetch(url, fetchOpts) : pooledFetch(url, fetchOpts);
 }
 
 // For jaynshare's own calls (OAuth, profile, usage); honours the upstream proxy.
 export function proxyFetch(url, opts = {}) {
   const { headersTimeoutMs, ...rest } = opts;
   if (!proxyForHost(new URL(url).hostname)) return fetch(url, rest);
-  return pooledFetch(url, rest, resolveHeadersTimeout(headersTimeoutMs));
+  return pooledFetch(url, { ...rest, headersTimeoutMs: resolveHeadersTimeout(headersTimeoutMs) });
 }
 
-function pooledFetch(url, opts, timeoutMs) {
+function pooledFetch(url, opts) {
   const u = new URL(url);
   const isHttp = u.protocol === 'http:';
   const port = Number(u.port) || (isHttp ? 80 : 443);
   const proxy = proxyForHost(u.hostname);
   if (proxy) {
     const agent = proxyAgent(proxy, { targetHost: u.hostname, targetPort: port, tls: !isHttp, tlsOptions: opts.tlsOptions || {} });
-    return nodeRequest(u, opts, timeoutMs, { transport: isHttp ? http : https, agent });
+    return nodeRequest(u, opts, { transport: isHttp ? http : https, agent });
   }
-  return nodeRequest(u, opts, timeoutMs, { transport: isHttp ? http : https, agent: isHttp ? httpAgent : httpsAgent });
+  return nodeRequest(u, opts, { transport: isHttp ? http : https, agent: isHttp ? httpAgent : httpsAgent });
 }
 
 // JAYNSHARE_UPSTREAM_GLOBAL_FETCH=1: Node's global fetch with a headers-only
 // deadline (AbortSignal.timeout would also kill the body).
-function directFetch(url, opts, timeoutMs) {
+function directFetch(url, { headersTimeoutMs, ...opts }) {
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(headersTimeoutError(timeoutMs)), timeoutMs);
+  const timer = setTimeout(() => ctrl.abort(headersTimeoutError(headersTimeoutMs)), headersTimeoutMs);
   timer.unref?.();
   return fetch(url, { ...opts, signal: ctrl.signal }).then(
     (res) => { clearTimeout(timer); return res; },
@@ -69,7 +69,7 @@ function directFetch(url, opts, timeoutMs) {
   );
 }
 
-function proxiedFetch(url, opts, sx, timeoutMs) {
+function proxiedFetch(url, opts, sx) {
   const u = new URL(url);
   const proxy = sx.getProxy();
   const agent = new https.Agent({ keepAlive: false }); // one target per socket; pooling would leak
@@ -79,11 +79,12 @@ function proxiedFetch(url, opts, sx, timeoutMs) {
       .catch((err) => cb(err));
     return undefined;
   };
-  return nodeRequest(u, opts, timeoutMs, { transport: https, agent });
+  return nodeRequest(u, opts, { transport: https, agent });
 }
 
 // `req` is created before the timer so a synchronous throw leaves no armed timer.
-function nodeRequest(u, opts, timeoutMs, { transport, agent }) {
+function nodeRequest(u, opts, { transport, agent }) {
+  const timeoutMs = opts.headersTimeoutMs;
   return new Promise((resolve, reject) => {
     const req = transport.request(
       u,

@@ -46,7 +46,7 @@ test('an owned-model request never falls back to a non-owner account', () => {
   am.markRateLimited(1, 3600);        // the sole owner is throttled (future hold)
   nearQuotaFutureReset(am, 0);        // the Claude account is busy too
 
-  const acct = am.getActiveAccount(null, 'deepseek-chat');
+  const acct = am.getActiveAccount({ model: 'deepseek-chat' });
   assert.notEqual(acct?.name, 'claude'); // the deepseek model must not hit Claude
 });
 
@@ -55,6 +55,6 @@ test('ownership guard is inert when no account claims the model', () => {
   nearQuotaFutureReset(am, 0);
   nearQuotaFutureReset(am, 1);
   // Every account near quota → a probe is allowed; some account is returned.
-  const acct = am.getActiveAccount(null, 'claude-sonnet-4-6');
+  const acct = am.getActiveAccount({ model: 'claude-sonnet-4-6' });
   assert.ok(acct, 'a probe target should still be selectable');
 });
