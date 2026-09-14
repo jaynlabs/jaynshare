@@ -44,18 +44,20 @@ export class Warmer extends IntervalJob {
   }
 
   async warmAll() {
-    return this.run(async () => {
-      const abort = this._abort = new AbortController();
-      try {
-        const targets = this.accountManager.accounts.filter(account => this._isWarmTarget(account));
-        for (const account of targets) { // sequential: one subprocess at a time
-          if (abort.signal.aborted) break;
-          await this.warmAccount(account, abort.signal);
-        }
-      } finally {
-        if (this._abort === abort) this._abort = null;
+    return this.run(() => this.sweep());
+  }
+
+  async sweep() {
+    const abort = this._abort = new AbortController();
+    try {
+      const targets = this.accountManager.accounts.filter(account => this._isWarmTarget(account));
+      for (const account of targets) { // sequential: one subprocess at a time
+        if (abort.signal.aborted) break;
+        await this.warmAccount(account, abort.signal);
       }
-    });
+    } finally {
+      if (this._abort === abort) this._abort = null;
+    }
   }
 
   async warmAccount(account, signal) {

@@ -15,10 +15,12 @@ export class Prober extends IntervalJob {
   }
 
   async probeAll() {
-    return this.run(async () => {
-      const accounts = this.accountManager.accounts.filter(account => account.type === 'oauth' && account.credential);
-      await Promise.all(accounts.map(account => this.probeAccount(account)));
-    });
+    return this.run(() => this.sweep());
+  }
+
+  async sweep() {
+    const accounts = this.accountManager.accounts.filter(account => account.type === 'oauth' && account.credential);
+    await Promise.all(accounts.map(account => this.probeAccount(account)));
   }
 
   async probeAccount(account) {

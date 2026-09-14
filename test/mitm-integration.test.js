@@ -46,6 +46,20 @@ function connectThroughProxy(proxyPort, target, caCertPem, alpn) {
 
 const ACCOUNT_UUID = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
 
+// Request logs stream to disk asynchronously; poll for the content instead of sleeping.
+async function waitForLog(dir, pattern, what) {
+  const deadline = Date.now() + 5000;
+  for (;;) {
+    const file = readdirSync(dir).find(f => f.endsWith('.log'));
+    if (file) {
+      const content = readFileSync(join(dir, file), 'utf8');
+      if (pattern.test(content)) return content;
+    }
+    if (Date.now() > deadline) assert.fail(`timed out waiting for ${what}`);
+    await new Promise(r => setTimeout(r, 5));
+  }
+}
+
 // `handler(req, body) -> { status, headers, body }`
 function makeUpstream(handler) {
   return http.createServer((req, res) => {
@@ -272,11 +286,8 @@ test('MITM logs proxied requests when a log dir is set', T, async () => {
     await once(req, 'close');
     client.close();
 
-    // Give the async log stream a tick to flush.
-    await new Promise((r) => setTimeout(r, 50));
-    const files = readdirSync(logDir).filter((f) => f.endsWith('.log'));
-    assert.ok(files.length >= 1, 'a request log file was written');
-    const contents = readFileSync(join(logDir, files[0]), 'utf8');
+    // Wait for the async log stream to flush its final marker.
+    const contents = await waitForLog(logDir, /RESPONSE 200/, 'the request log to be written');
     assert.match(contents, /RESPONSE 200/);
   } finally {
     tlsSock.destroy(); closeHard(proxy); closeHard(upstream);

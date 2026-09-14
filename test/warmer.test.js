@@ -23,6 +23,15 @@ function makeWarmer(am, spawnFn, opts = {}) {
   return new Warmer(am, { intervalMs: 0, port: 3456, apiKey: 'tc-key', spawnFn, log: () => {}, ...opts });
 }
 
+async function waitFor(predicate, what, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise(r => setTimeout(r, 2));
+  }
+  assert.fail(`timed out waiting for ${what}`);
+}
+
 // ── eligibility ──────────────────────────────────────────────────────────────
 
 test('warms only healthy, idle Anthropic OAuth accounts with no live 5h window', async () => {
@@ -124,10 +133,20 @@ test('getStatus reports enabled/interval and reschedule(0) turns it off', () => 
 
 test('overlapping warm cycles are skipped while one is running', async () => {
   const am = new AccountManager([oauth('a')], 0.98);
-  const warmer = makeWarmer(am, fakeSpawner());
-  warmer._running = true;              // pretend a cycle is in flight
-  await warmer.warmAll();              // must be a no-op
-  assert.equal(warmer.lastRunStartedAt, null);
+  const calls = [];
+  let release;
+  // A spawner that hangs until released: keeps the first sweep genuinely in flight.
+  const spawnFn = (spec) => { calls.push(spec); return new Promise((resolve) => { release = resolve; }); };
+  const warmer = makeWarmer(am, spawnFn);
+
+  const first = warmer.warmAll();
+  await waitFor(() => calls.length === 1, 'the first warm child to start');
+
+  await warmer.warmAll();              // a second call mid-flight must be a no-op
+  release(0);                          // the first warm finishes
+  await first;
+
+  assert.equal(calls.length, 1, 'the overlapping call started nothing');
 });
 
 test('stop() aborts an in-flight sweep (kills the warm child, skips the rest)', async () => {
@@ -142,7 +161,7 @@ test('stop() aborts an in-flight sweep (kills the warm child, skips the rest)', 
   const warmer = makeWarmer(am, spawnFn);
 
   const sweep = warmer.warmAll();          // don't await — it's mid-flight
-  await new Promise(r => setTimeout(r, 10));
+  await waitFor(() => started === 1, 'the first warm child to start');
   warmer.stop();                           // must abort the hanging child
   await sweep;
 
@@ -150,14 +169,31 @@ test('stop() aborts an in-flight sweep (kills the warm child, skips the rest)', 
   assert.equal(started, 1, 'the second account was not started after stop()');
 });
 
+test('a started warmer sweeps on its schedule (the interval fires the sweep)', async () => {
+  const am = new AccountManager([oauth('a')], 0.98);
+  const spawn = fakeSpawner();
+  const warmer = makeWarmer(am, spawn, { intervalMs: 60 });
+  warmer.start();
+  try {
+    await waitFor(() => spawn.calls.length >= 2, 'the interval to fire twice');
+  } finally {
+    warmer.stop();
+  }
+  const after = spawn.calls.length;
+  await new Promise(r => setTimeout(r, 150)); // more than one full interval
+  assert.equal(spawn.calls.length, after, 'stop() ends the sweeps');
+});
+
 test('reschedule to a new interval does NOT trigger an extra (quota-spending) sweep', async () => {
   const am = new AccountManager([oauth('a')], 0.98);
   const spawn = fakeSpawner();
   const warmer = makeWarmer(am, spawn, { intervalMs: 600_000 });
   warmer.start();                          // off→on: one immediate sweep
-  await new Promise(r => setTimeout(r, 5));
+  await waitFor(() => spawn.calls.length === 1, 'the immediate sweep to warm the account');
   const afterStart = spawn.calls.length;
   warmer.reschedule(300_000);              // interval CHANGE, already on
-  await new Promise(r => setTimeout(r, 5));
+  // An extra sweep would fire synchronously inside reschedule; a short observation
+  // window only needs to let that land, not any timer.
+  await new Promise(r => setTimeout(r, 25));
   assert.equal(spawn.calls.length, afterStart, 'no extra sweep on an interval change');
 });

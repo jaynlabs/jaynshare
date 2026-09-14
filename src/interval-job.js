@@ -29,14 +29,19 @@ export class IntervalJob {
 
     if (intervalMs > 0) {
       this.nextRunAt = Date.now() + intervalMs;
-      if (!wasOn) this.run().catch(() => {});
-      this.timer = setInterval(() => this.run().catch(() => {}), intervalMs);
+      if (!wasOn) this._tick();
+      this.timer = setInterval(() => this._tick(), intervalMs);
       this.timer.unref?.();
       this.log(`[Jaynshare] ${this.label} enabled (every ${Math.round(intervalMs / 1000)}s)`);
     } else if (wasOn) {
       this.nextRunAt = null;
       this.log(`[Jaynshare] ${this.label} disabled`);
     }
+  }
+
+  /** The scheduled entry point: subclasses implement `sweep()` (the actual work). */
+  _tick() {
+    this.run(() => this.sweep()).catch(() => {});
   }
 
   stop() {
