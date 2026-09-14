@@ -16,9 +16,7 @@ node_major=$(node -e 'process.stdout.write(process.versions.node.split(".")[0])'
 case "$node_major" in ''|*[!0-9]*) die 'could not read the Node.js version' ;; esac
 [ "$node_major" -ge 20 ] || die 'Node.js 20 or newer is required'
 
-# `uname` reports the Git Bash compatibility layer, not how the native Node that
-# reads these files interprets paths, so the platform decision comes from Node.
-# JAYNSHARE_PLATFORM exists for the test harness only.
+# Node, not uname: it is what interprets the paths. JAYNSHARE_PLATFORM is for the tests.
 platform=${JAYNSHARE_PLATFORM:-$(node -p 'process.platform' | tr -d '\r')}
 
 case "$(uname -s 2>/dev/null || printf 'unknown')" in
@@ -36,10 +34,7 @@ if [ "$platform" = win32 ]; then
     || die 'claude was not found in Git Bash; install Claude Code, reopen Git Bash, then rerun this'
   [ -r "$script_dir/windows-acl.sh" ] || die "missing $script_dir/windows-acl.sh"
   . "$script_dir/windows-acl.sh"
-  # Git Bash can export a HOME that is not the Windows profile os.homedir()
-  # reports, and it exports MSYS spellings in XDG_CONFIG_HOME that native Windows
-  # Node cannot open. The client resolves enrollment from os.homedir(), so the
-  # installer writes exactly where the client will look.
+  # Where the client will look: Git Bash's HOME and XDG_CONFIG_HOME are not what native Node sees.
   home_dir=$(cygpath -u -- "$(node -p 'require("os").homedir()' | tr -d '\r')" | tr -d '\r')
   [ -n "$home_dir" ] && [ -d "$home_dir" ] || die 'could not resolve your Windows profile directory'
   config_dir="$home_dir/.config/jaynshare"
@@ -84,9 +79,7 @@ validate_enrollment() {
 
 # ------------------------------------------------------- staging + rollback --
 
-# Everything is built under the user's own home directory first. A failure at
-# any point after this leaves either the previous working client or no enrolled
-# client, never a half-written secret.
+# A failure past this point leaves the previous client or none, never a half-written secret.
 work_dir=$(mktemp -d "$home_dir/.jaynshare-install.XXXXXX") || die 'could not create a private staging directory'
 chmod 700 "$work_dir" 2>/dev/null || true
 stage="$work_dir/stage"
@@ -128,7 +121,6 @@ cleanup() {
   [ "$cleaned" = false ] || return 0
   cleaned=true
   if [ "$committed" = true ] && [ "$completed" = false ]; then rollback; fi
-  # The staged secret is plaintext, so it goes on every exit path.
   rm -rf -- "$work_dir" 2>/dev/null || true
 }
 
@@ -145,7 +137,7 @@ if [ "$mode" = upgrade ]; then
   cp "$config_dir/client.env" "$stage/client.env"
   cp "$config_dir/client.secret" "$stage/client.secret"
   cp "$config_dir/jaynshare-ca.pem" "$stage/jaynshare-ca.pem"
-  # Parse rather than source: client.env is reused verbatim, never evaluated.
+  # Never sourced.
   field() { sed -n "s/^$1='\\([^']*\\)'\$/\\1/p" "$stage/client.env" | tr -d '\r' | sed -n '1p'; }
   client_id=$(field JAYNSHARE_CLIENT_ID)
   proxy_host=$(field JAYNSHARE_HOST)
@@ -161,7 +153,6 @@ else
   IFS= read -r client_secret || client_secret=
   stty echo 2>/dev/null || true
   printf '\n' >&2
-  # A secret pasted from a Windows clipboard commonly arrives with a trailing CR.
   client_secret=$(printf '%s' "$client_secret" | tr -d '\r\n')
   case "$client_secret" in
     '') die 'the client secret must not be empty' ;;
@@ -214,7 +205,6 @@ if [ "$platform" = win32 ]; then
     acl_out=$(jaynshare_lock_file "$sid" "$config_dir/$name") \
       || die "icacls could not protect $name: $acl_out"
   done
-  # Never read the secret back for diagnostics; only its access list is inspected.
   verify_out=$(jaynshare_verify_locked "$config_dir/client.secret") \
     || die "the client secret is not restricted to your account: $verify_out"
   unset sid acl_out verify_out

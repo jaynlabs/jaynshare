@@ -1,26 +1,14 @@
 #!/usr/bin/env bash
 #
 # End-to-end check of the desktop client install, launcher, and picker.
-#
-# On Windows this runs under Git for Windows Bash against native Windows Node,
-# which is the environment the client actually ships into, and additionally
-# asserts the NTFS access rules. On macOS and Linux the same script runs with
-# JAYNSHARE_PLATFORM=win32 and stub cygpath/icacls/whoami.exe executables, so the
-# Windows code paths stay exercised on every push rather than only on Windows.
-#
-# `set -e` is deliberately not used: every assertion is reported and the run ends
-# with a count, rather than stopping at the first failure.
-#
-# No real client secret, server, or Anthropic account is involved.
+# Real NTFS on Windows; elsewhere JAYNSHARE_PLATFORM=win32 with stubbed cygpath/icacls/whoami.exe.
 
-set -u
+set -u # not -e: every assertion is reported
 
 repo_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 real_platform=$(node -p 'process.platform' | tr -d '\r')
 
-# Native Windows Node cannot open the MSYS spellings Git Bash uses, so every path
-# handed to node — or exported for os.homedir() — is converted first. Off Windows
-# this is the identity, and the stub cygpath is never consulted for it.
+# Native Node cannot open MSYS spellings.
 native() {
   if [ "$real_platform" = win32 ]; then cygpath -w -- "$1" | tr -d '\r'; else printf '%s' "$1"; fi
 }
@@ -33,8 +21,6 @@ server_pid=
 cleanup() {
   if [ -n "$server_pid" ]; then
     kill "$server_pid" 2>/dev/null
-    # Reaping here keeps the shell from printing its own job notice after the
-    # final result line.
     wait "$server_pid" 2>/dev/null
   fi
   rm -rf -- "$fixture_root"
@@ -64,30 +50,19 @@ home="$fixture_root/home"
 stub_bin="$fixture_root/stubs"
 mkdir -p "$home" "$stub_bin" || abort 'could not create the fixture'
 
-# The installer learns the profile from os.homedir(), which answers with a native
-# path it converts back with cygpath. Making the same round trip here leaves both
-# halves spelling the profile identically, so paths recorded by one can be
-# compared as text against the other.
+# Same round trip as the installer, so both spell the profile identically.
 if [ "$real_platform" = win32 ]; then
   canonical_home=$(cygpath -u -- "$(cygpath -w -- "$home" | tr -d '\r')" | tr -d '\r')
   if [ -n "$canonical_home" ] && [ -d "$canonical_home" ]; then home="$canonical_home"; fi
 
-  # A real Windows profile hands its children an inheritable Administrators
-  # entry. TMPDIR on a CI runner does not always carry one, and without it the
-  # staged secret and an already-locked config directory advertise the same
-  # entries, so nothing is converted when the installer renames the secret into
-  # place. Granting it here makes the fixture model the profile the client is
-  # actually installed into, which is where that conversion bites.
+  # A real profile hands its children an inheritable Administrators entry; a CI TMPDIR may not.
   MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' \
     icacls.exe "$(cygpath -w -- "$home" | tr -d '\r')" \
     /grant "*S-1-5-32-544:(OI)(CI)F" > /dev/null 2>&1 \
     || abort 'could not give the fixture profile an inheritable Administrators entry'
 fi
 
-# This stands in for Claude Code: it records its arguments and an explicit
-# allow-list of environment variables, never the whole environment, so the
-# launcher can be asserted against without any artifact carrying a credential it
-# was not meant to see.
+# Stand-in for Claude Code: records argv and an allow-list of variables, never the whole environment.
 claude_log="$fixture_root/claude-invocation.txt"
 cat > "$stub_bin/claude" <<'STUB'
 #!/bin/sh
@@ -108,12 +83,7 @@ icacls_log="$fixture_root/icacls.log"
 stub_path="$stub_bin"
 
 if [ "$real_platform" != win32 ]; then
-  # cygpath, icacls and the Windows whoami exist only on Windows. The stubs keep
-  # the interface the client depends on: cygpath records what was converted and
-  # returns a path this host can still open, and icacls reports a two-principal
-  # access list. The Windows tools live in a stand-in System32, and PATH is
-  # ordered the way Git Bash orders it, with its own coreutils first, so a
-  # Windows tool reached for by name is shadowed here exactly as it is there.
+  # PATH is ordered as Git Bash orders it: its coreutils shadow System32.
   stub_system32="$fixture_root/windows/System32"
   mkdir -p "$stub_system32" || abort 'could not create the fixture'
   stub_path="$stub_bin:$stub_system32"
@@ -127,9 +97,7 @@ done
 printf '%s\n' "$1" >> "$JAYNSHARE_CHECK_CYGPATH_LOG"
 printf '%s\n' "$1"
 STUB
-  # Git Bash rewrites /switch arguments into paths unless conversion is turned
-  # off, and icacls.exe and whoami.exe then reject them. These stubs fail the
-  # same way, so losing that guard fails here too and not only on Windows.
+  # Reject rewritten /switch arguments the way the real tools do.
   cat > "$stub_system32/icacls.exe" <<'STUB'
 #!/bin/sh
 [ "${MSYS_NO_PATHCONV:-}" = 1 ] || { printf 'ERROR: Invalid argument/option - %s\n' "$1" >&2; exit 1; }
@@ -148,8 +116,7 @@ STUB
 [ "${MSYS_NO_PATHCONV:-}" = 1 ] || { printf 'ERROR: Invalid argument/option - %s\n' "$1" >&2; exit 1; }
 printf '"machine\\tester","S-1-5-21-1111111111-2222222222-3333333333-1001"\n'
 STUB
-  # The whoami.exe PATH finds first in Git Bash is GNU coreutils, which has
-  # never heard of /user and cannot report a SID.
+  # GNU coreutils whoami, which shadows the Windows one.
   cat > "$stub_bin/whoami.exe" <<'STUB'
 #!/bin/sh
 [ "$#" -eq 0 ] || { printf "whoami: extra operand '%s'\n" "$1" >&2; exit 1; }
@@ -161,20 +128,15 @@ fi
 
 export PATH="$stub_path:$PATH"
 export HOME="$home"
-# Native Windows Node resolves os.homedir() from USERPROFILE, which is where the
-# installed client reads its enrollment from.
 export USERPROFILE="$(native "$home")"
 export JAYNSHARE_CHECK_CLAUDE_LOG="$claude_log"
 export JAYNSHARE_CHECK_CYGPATH_LOG="$cygpath_log"
 export JAYNSHARE_CHECK_ICACLS_LOG="$icacls_log"
-# The client ignores XDG_CONFIG_HOME on Windows; unset it so a developer's own
-# setting cannot move the fixture out from under these assertions.
 unset XDG_CONFIG_HOME
 export JAYNSHARE_PLATFORM=win32
 
 config_dir="$home/.config/jaynshare"
 bin_dir="$home/.local/bin"
-# The client is always started through native Node, never the MSYS spelling.
 client_native=$(native "$bin_dir/jaynshare")
 
 ca_file="$fixture_root/jaynshare-ca.pem"
@@ -269,7 +231,6 @@ esac
 check $? 'the status line runs the client through node by absolute path'
 
 if [ "$real_platform" = win32 ]; then
-  # Inside single quotes the backslash is literal, so this is C:\ exactly.
   case "$status_command" in 'node "'[A-Za-z]':\'*) true ;; *) false ;; esac
   check $? "the status line path is a native Windows path ($status_command)"
 else
@@ -299,8 +260,6 @@ check $? 'jaynshare status --json succeeds'
 node -e 'JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"))' "$(native "$fixture_root/status.json")" 2>/dev/null
 check $? 'status --json emits valid JSON'
 
-# START-HERE.txt tells testers to run the installed command itself, so the
-# extensionless shebang has to work from the shell, not only through node.
 "$bin_dir/jaynshare" status > /dev/null 2>&1
 check $? 'the installed client runs directly through its shebang'
 
@@ -398,8 +357,7 @@ server_pid=$!
 wait_for_file "$port_file2" || abort 'the second fake server never reported a port'
 port2=$(cat "$port_file2")
 
-# The enrollment pins the first port, so repoint it the way a restarted server
-# would be reached. This is also the state the rollback assertions restore to.
+# Repoint the pinned port the way a restarted server would be reached.
 node -e '
   const fs = require("fs");
   const [file, port] = process.argv.slice(1);
@@ -423,10 +381,7 @@ check $? 'upgrade keeps the existing secret'
 contains 'desktop client' "$(cat "$fixture_root/upgrade.out")"
 check $? 'upgrade reports the desktop client, not a Mac-only one'
 
-# The secret is renamed into a directory the previous install already locked.
-# Windows turns an inherited entry the new parent does not advertise into an
-# explicit one, which /inheritance:r cannot remove, so a second install used to
-# leave Administrators on the secret. Only real NTFS reproduces the conversion.
+# Only real NTFS converts inherited entries into explicit ones on the rename.
 if [ "$real_platform" = win32 ]; then
   acl=$(icacls.exe "$(cygpath -w -- "$config_dir/client.secret" | tr -d '\r')" 2>&1)
   entries=$(printf '%s\n' "$acl" | awk '/:\(/ { n++ } END { print n + 0 }')
@@ -446,8 +401,7 @@ check $? 'a malformed secret fails the install'
 [ "$(cat "$config_dir/client.secret")" = "$before_secret" ]
 check $? 'a rejected secret never replaces the working enrollment'
 
-# Port 9 (discard) is closed on these runners, so the authenticated check at the
-# end of the install cannot pass and the whole install has to be undone.
+# Port 9 is closed, so the authenticated check fails and the install must undo itself.
 printf '%s\n' "$synthetic_secret" \
   | bash "$repo_dir/deploy/client/install.sh" other-client 127.0.0.1 "$ca_file" 9 \
     > "$fixture_root/rollback.out" 2>&1

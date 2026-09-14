@@ -22,10 +22,6 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-# Resolve Claude once, up front, so both modes fail the same way and no argument
-# ever passes through a reconstructed command string. Arguments after `--` reach
-# Claude exactly as the shell parsed them, which is also what running `claude`
-# directly would do on this platform.
 claude_bin=$(command -v claude 2>/dev/null) || claude_bin=
 [ -n "$claude_bin" ] || {
   printf '%s\n' 'claude was not found on PATH; install Claude Code and open a new shell' >&2
@@ -44,13 +40,11 @@ fi
 
 command -v node >/dev/null 2>&1 || { printf '%s\n' 'Node.js 20+ is required' >&2; exit 1; }
 
-# `uname` describes the Git Bash compatibility layer, not how the native Node
-# that actually opens these files interprets paths. Ask Node instead.
+# Node, not uname: it is what interprets the paths.
 platform=${JAYNSHARE_PLATFORM:-$(node -p 'process.platform' | tr -d '\r')}
 
 if [ "$platform" = win32 ]; then
-  # Enrollment lives where the installer put it: under the Windows profile that
-  # os.homedir() reports, which Git Bash's own HOME does not always match.
+  # Git Bash's HOME does not always match the profile os.homedir() reports.
   home_dir=$(cygpath -u -- "$(node -p 'require("os").homedir()' | tr -d '\r')" | tr -d '\r')
   [ -n "$home_dir" ] || {
     printf '%s\n' 'could not resolve your Windows profile; run this from Git Bash' >&2
@@ -64,7 +58,6 @@ config_file="$config_dir/client.env"
 secret_file="$config_dir/client.secret"
 ca_file="$config_dir/jaynshare-ca.pem"
 
-# Native Windows executables cannot open the MSYS spellings Git Bash uses.
 native_path() {
   case "$platform" in
     win32) cygpath -w -- "$1" | tr -d '\r' ;;
@@ -101,8 +94,7 @@ case "$mode" in
   pick) proxy_user=$(node "$client_helper" pick-account) ;;
 esac
 
-# The secret travels in the environment rather than argv: process command lines
-# are readable by other processes on both supported platforms.
+# Never in argv: command lines are readable by other processes.
 proxy_url=$(JAYNSHARE_CLIENT_SECRET="$secret" node -e '
   const url = new URL(`http://${process.argv[2]}:${process.argv[3]}`);
   url.username = process.argv[1];

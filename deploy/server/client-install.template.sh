@@ -18,10 +18,7 @@ command -v claude >/dev/null 2>&1 || {
 }
 
 printf '%s\n' 'Installing Jaynshare for __CLIENT_ID__ via __PROXY_HOST__...'
-# install.sh verifies the enrolled credential against the server before it
-# reports success, and rolls back completely if that check fails.
-# Extracting the bundle with Explorer on Windows can drop the executable bit, so
-# the installer is invoked through the shell rather than executed directly.
+# Through the shell: extracting with Explorer on Windows can drop the executable bit.
 sh "$script_dir/client/install.sh" '__CLIENT_ID__' '__PROXY_HOST__' "$script_dir/jaynshare-ca.pem" '__PROXY_PORT__'
 
 printf '\n%s\n' 'Enrollment succeeded. Your pooled account status:'

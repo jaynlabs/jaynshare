@@ -53,8 +53,6 @@ bundle_dir="$work_dir/jaynshare-$client_id"
 cleanup() { rm -rf -- "$work_dir"; }
 trap cleanup EXIT HUP INT TERM
 
-# One platform-neutral archive: the same POSIX installer serves macOS Terminal
-# and Windows Git Bash, and START-HERE.txt carries a section for each.
 mkdir -p "$bundle_dir/client"
 cp "$repo_dir/deploy/client/install.sh" "$bundle_dir/client/install.sh"
 cp "$repo_dir/deploy/client/configure-claude.mjs" "$bundle_dir/client/configure-claude.mjs"
@@ -80,7 +78,7 @@ sed \
 tar -C "$work_dir" -czf "$archive_path" "jaynshare-$client_id"
 chmod 600 "$archive_path"
 
-# Register last: a packaging failure must not leave an unusable client record.
+# Last, so a packaging failure leaves no client record.
 if ! JAYNSHARE_CONFIG="$config_path" node "$repo_dir/src/index.js" client add "$client_id" --name "$display_name" > "$secret_path"; then
   rm -f -- "$archive_path" "$secret_path"
   die 'could not register client (does that ID already exist?)'
