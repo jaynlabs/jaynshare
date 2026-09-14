@@ -51,6 +51,18 @@ native_path() {
   esac
 }
 
+clear_macos_quarantine() {
+  [ "$platform" = darwin ] || return 0
+  command -v xattr >/dev/null 2>&1 || return 0
+
+  for installed_file in "$@"; do
+    if xattr -p com.apple.quarantine "$installed_file" >/dev/null 2>&1; then
+      xattr -d com.apple.quarantine "$installed_file" 2>/dev/null \
+        || die "could not clear macOS quarantine from $installed_file"
+    fi
+  done
+}
+
 # ---------------------------------------------------------------- arguments --
 
 mode=install
@@ -191,6 +203,7 @@ committed=true
 mv "$stage/jaynshare-claude" "$bin_dir/jaynshare-claude"
 mv "$stage/jaynshare" "$bin_dir/jaynshare"
 chmod 755 "$bin_dir/jaynshare-claude" "$bin_dir/jaynshare"
+clear_macos_quarantine "$bin_dir/jaynshare-claude" "$bin_dir/jaynshare"
 
 mv "$stage/client.env" "$config_dir/client.env"
 mv "$stage/client.secret" "$config_dir/client.secret"

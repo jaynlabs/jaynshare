@@ -189,8 +189,16 @@ test('desktop client upgrade reuses enrollment and installs status without askin
   const tempHome = await mkdtemp(join(tmpdir(), 'jaynshare-client-upgrade-'));
   let fake = null;
   try {
+    const fakeBin = join(tempHome, 'bin');
+    const xattrLog = join(tempHome, 'xattr.log');
     const configDir = join(tempHome, '.config/jaynshare');
     await mkdir(configDir, { recursive: true });
+    await mkdir(fakeBin);
+    // Stands in for the real xattr so the assertion below can see exactly which
+    // files the installer de-quarantined, on any platform the suite runs on.
+    const fakeXattr = join(fakeBin, 'xattr');
+    await writeFile(fakeXattr, '#!/bin/sh\ncase "$1" in -p) exit 0 ;; -d) printf \'%s\\n\' "$3" >> "$XATTR_LOG" ;; esac\n');
+    await chmod(fakeXattr, 0o755);
     fake = await startFakeUsageServer({ secret: 'existing-secret' });
     await writeFile(join(configDir, 'client.env'),
       `JAYNSHARE_CLIENT_ID='alice'\nJAYNSHARE_HOST='127.0.0.1'\nJAYNSHARE_PORT='${fake.port}'\n`);
@@ -200,11 +208,23 @@ test('desktop client upgrade reuses enrollment and installs status without askin
     const installer = fileURLToPath(new URL('../deploy/client/install.sh', import.meta.url));
 
     const result = await runScript('/bin/sh', [installer, '--upgrade'], {
-      env: { ...process.env, HOME: tempHome, XDG_CONFIG_HOME: join(tempHome, '.config') },
+      env: {
+        ...process.env,
+        HOME: tempHome,
+        XDG_CONFIG_HOME: join(tempHome, '.config'),
+        JAYNSHARE_PLATFORM: 'darwin',
+        PATH: `${fakeBin}:${process.env.PATH}`,
+        XATTR_LOG: xattrLog,
+      },
     });
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /Updated the Jaynshare desktop client/);
     assert.match(await readFile(join(tempHome, '.local/bin/jaynshare'), 'utf8'), /JAYNSHARE/);
+    const clearedQuarantine = (await readFile(xattrLog, 'utf8')).trim().split('\n').sort();
+    assert.deepEqual(clearedQuarantine, [
+      join(tempHome, '.local/bin/jaynshare'),
+      join(tempHome, '.local/bin/jaynshare-claude'),
+    ]);
     const settings = JSON.parse(await readFile(join(tempHome, '.claude/settings.json'), 'utf8'));
     assert.equal(settings.statusLine.refreshInterval, 15);
   } finally {
