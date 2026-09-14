@@ -1,22 +1,6 @@
-// Opt-in "keep-warm" scheduler.
-//
-// DISABLED BY DEFAULT. When enabled (config.warmupSeconds > 0), periodically
-// starts the rolling 5-hour session window on idle accounts, so that when the
-// active account runs out the next one is not stone cold.
-//
-// This is the SECOND sanctioned active-upstream feature (the quota probe is the
-// first). It differs in an important way and is why it is strictly opt-in: the
-// 5h timer only starts on *real usage*, so — unlike the zero-spend
-// /api/oauth/usage probe — warming genuinely consumes a little quota (a few
-// tokens, a slice of the 5h window, a touch of the weekly bucket) per account
-// per window. To keep that cost minimal we warm an account only when its 5h
-// window is not already running, and we use the cheapest model.
-//
-// Mechanism: for each eligible idle account we spawn a one-shot,
-// minimal `claude` (`--bare -p`) pointed at THIS proxy with the account pinned
-// via the `/jaynshare-account/<index>` path prefix. Using the real client means the
-// warm-up request is byte-identical to normal Claude Code traffic, routed to
-// exactly the account we want to warm.
+// Opt-in (config.warmupSeconds) keep-warm: spawns a minimal `claude` pinned to
+// each idle account so its 5-hour window is already running when rotation
+// reaches it. Spends a little quota, hence opt-in.
 
 import { spawn } from 'node:child_process';
 import { encodePinComponent } from './claude-env.js';
@@ -43,7 +27,7 @@ export class Warmer {
     this.log = log;
     this.timer = null;
     this._running = false;
-    this._abort = null; // AbortController for the in-flight sweep (see warmAll/stop)
+    this._abort = null; // AbortController of the in-flight sweep
     this.lastRunStartedAt = null;
     this.lastRunFinishedAt = null;
     this.nextRunAt = intervalMs > 0 ? Date.now() + intervalMs : null;
@@ -54,7 +38,6 @@ export class Warmer {
     if (this.intervalMs > 0) this.reschedule(this.intervalMs);
   }
 
-  /** Change interval at runtime (0 = off). Warms once immediately when turned on. */
   reschedule(intervalMs) {
     const wasOn = this.intervalMs > 0 && this.timer;
     this.intervalMs = intervalMs;
@@ -62,9 +45,7 @@ export class Warmer {
 
     if (intervalMs > 0) {
       this.nextRunAt = Date.now() + intervalMs;
-      // Immediate sweep only on an off→on transition. Re-running it on every
-      // interval *change* would spend quota each time the interval is edited.
-      if (!wasOn) this.warmAll().catch(() => {});
+      if (!wasOn) this.warmAll().catch(() => {}); // off→on only; an interval edit must not spend quota
       this.timer = setInterval(() => this.warmAll().catch(() => {}), intervalMs);
       this.timer.unref?.();
       this.log(`[Jaynshare] Keep-warm enabled (every ${Math.round(intervalMs / 1000)}s)`);
@@ -77,32 +58,18 @@ export class Warmer {
   stop() {
     if (this.timer) { clearInterval(this.timer); this.timer = null; }
     this.nextRunAt = null;
-    // Cancel an in-flight sweep and kill any child it spawned, so shutdown /
-    // `warmup off` doesn't block on a running warm-up or orphan a `claude`.
     this._abort?.abort();
   }
 
-  /**
-   * True when `account` is a healthy, idle Anthropic OAuth account whose 5h
-   * window is NOT already running. We skip:
-   *  - non-OAuth and third-party-backend accounts (`upstream` set) — the 5h
-   *    concept is Anthropic-specific;
-   *  - disabled / errored / exhausted / throttled accounts — warming them is
-   *    pointless or would just 429;
-   *  - accounts with a live 5h window — already warm, so warming again only burns
-   *    quota for nothing.
-   */
   _isWarmTarget(account) {
     if (account.type !== 'oauth' || !account.credential) return false;
-    if (account.upstream) return false;
+    if (account.upstream) return false; // the 5h window is Anthropic-specific
     if (account.disabled) return false;
     if (account.status === 'error' || account.status === 'exhausted' || account.status === 'throttled') return false;
     const reset = account.quota?.unified5hReset;
-    return !(reset && Date.now() < reset); // a future reset ⇒ session already running
+    return !(reset && Date.now() < reset); // a future reset means the window is already running
   }
 
-  /** Warm every eligible account once. Overlapping cycles are skipped. Sequential
-   *  on purpose: one subprocess at a time keeps load and the quota burst gentle. */
   async warmAll() {
     if (this._running) return;
     this._running = true;
@@ -111,8 +78,8 @@ export class Warmer {
     this.nextRunAt = this.intervalMs > 0 ? this.lastRunStartedAt + this.intervalMs : null;
     try {
       const targets = this.am.accounts.filter(account => this._isWarmTarget(account));
-      for (const account of targets) {
-        if (abort.signal.aborted) break; // stopped mid-sweep (shutdown / warmup off)
+      for (const account of targets) { // sequential: one subprocess at a time
+        if (abort.signal.aborted) break;
         await this.warmAccount(account, abort.signal);
       }
     } finally {
@@ -144,19 +111,11 @@ export class Warmer {
     }
   }
 
-  /** The `claude` invocation for one account. Pure/deterministic so tests can
-   *  assert the args and env without spawning anything. */
   _spawnSpec(account, signal) {
-    // Pin by accountUuid — a stable identity. The rotation index is NOT usable:
-    // it is array position, so removing an account would repoint this at a
-    // different one. Fall back to the display name when the uuid isn't known
-    // yet (e.g. an API-key account, or before the first profile fetch).
-    const pin = encodePinComponent(account.accountUuid || account.name);
+    const pin = encodePinComponent(account.accountUuid || account.name); // never the index: it shifts on removal
     const baseUrl = `http://127.0.0.1:${this.port}/jaynshare-account/${pin}`;
     return {
       command: 'claude',
-      // `--bare -p`: minimal, non-interactive, auth strictly via ANTHROPIC_API_KEY
-      // (which this proxy strips and replaces with the pinned account's token).
       args: ['-p', '--bare', '--model', this.model, '--output-format', 'text', this.prompt],
       env: {
         ...process.env,
@@ -164,7 +123,7 @@ export class Warmer {
         ANTHROPIC_API_KEY: this.apiKey || 'jaynshare-warm',
       },
       timeoutMs: this.timeoutMs,
-      signal, // aborts (and kills the child) when the warmer is stopped
+      signal,
     };
   }
 
@@ -199,10 +158,6 @@ export class Warmer {
   }
 }
 
-// Spawn a one-shot `claude`, resolving with its exit code (non-zero ⇒ recorded as
-// an error) or rejecting if the binary can't launch (e.g. not on PATH) or the
-// warm-up overruns its timeout. stdio is ignored: we only care that a request
-// went through to start the timer.
 function defaultSpawn({ command, args, env, timeoutMs, signal }) {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) { reject(new Error('warm-up aborted')); return; }
@@ -224,8 +179,6 @@ function defaultSpawn({ command, args, env, timeoutMs, signal }) {
     child.once('error', (err) => { cleanup(); reject(err); });
     child.once('exit', (code, sigName) => {
       cleanup();
-      // A signal-killed child (OOM, external kill, our own abort) did NOT
-      // complete a warm-up — report it as an error, not a success (code null).
       if (sigName) { reject(new Error(`claude terminated by ${sigName}`)); return; }
       resolve(code ?? 0);
     });

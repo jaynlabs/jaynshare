@@ -10,21 +10,11 @@ export function getConfigPath() {
   return join(configDir, 'jaynshare.json');
 }
 
-/**
- * Path to the runtime state file (a sibling of the config). This holds volatile
- * data learned at runtime — e.g. quota utilization observed passively from
- * traffic — kept out of the hand-editable config so config stays clean and
- * isn't rewritten on every state save.
- */
 export function getStatePath() {
   const cfg = getConfigPath();
   return cfg.endsWith('.json') ? cfg.replace(/\.json$/, '.state.json') : cfg + '.state';
 }
 
-/**
- * Path to the crash log (a sibling of the config), where a fatal error is
- * recorded before the process exits.
- */
 export function getCrashLogPath() {
   const cfg = getConfigPath();
   return cfg.endsWith('.json') ? cfg.replace(/\.json$/, '-crash.log') : cfg + '-crash.log';
@@ -40,12 +30,13 @@ export async function loadState() {
 }
 
 export async function saveState(state) {
-  const path = getStatePath();
+  await writePrivateJson(getStatePath(), state);
+}
+
+async function writePrivateJson(path, data) {
   await mkdir(dirname(path), { recursive: true });
-  await writeFile(path, JSON.stringify(state, null, 2) + '\n', { mode: 0o600 });
-  // `mode` only applies when the file is CREATED; enforce 0600 on every save so
-  // a pre-existing state file (holding quota + tokens) can't linger world-readable.
-  await chmod(path, 0o600).catch(() => {});
+  await writeFile(path, JSON.stringify(data, null, 2) + '\n', { mode: 0o600 });
+  await chmod(path, 0o600).catch(() => {}); // `mode` applies only on create
 }
 
 export function createDefaultConfig() {
@@ -77,19 +68,6 @@ export async function loadConfig() {
   }
 }
 
-/**
- * Publish the config's egress proxy to the process-wide setting.
- *
- * Done here, in the one place every command loads its config, rather than at
- * each of the sixteen call sites: `login`, `import`, `accounts`, `probe` and the
- * server all reach the network, and a proxy that applied to only some of them
- * would be worse than none — the account list would refresh while logging in
- * failed, or vice versa.
- *
- * A bad value is fatal on purpose. Falling back to a direct connection on a host
- * that has no route to the internet would turn one clear error into a pile of
- * ETIMEDOUTs pointing nowhere near the typo that caused them.
- */
 function applyUpstreamProxy(config) {
   try {
     setUpstreamProxy(resolveUpstreamProxy(config));
@@ -110,30 +88,12 @@ export async function loadOrCreateConfig() {
 }
 
 export async function saveConfig(config) {
-  const path = getConfigPath();
-  await mkdir(dirname(path), { recursive: true });
-  await writeFile(path, JSON.stringify(config, null, 2) + '\n', { mode: 0o600 });
-  // Enforce 0600 even if the file already existed (the proxy apiKey + account
-  // tokens live here); `mode` above is honored only on creation.
-  await chmod(path, 0o600).catch(() => {});
+  await writePrivateJson(getConfigPath(), config);
 }
 
-// Serialize config updates. atomicConfigUpdate is a read-modify-write, so two
-// concurrent callers can both read the same config and then save in turn, and
-// the later save silently drops the earlier caller's change. This bites hardest
-// on startup, when several OAuth accounts refresh their tokens at once: only the
-// last writer's rotated refresh token persists, and the other accounts keep a
-// token that was just rotated away, so they fail on the next restart with
-// invalid_grant and need a re-login. Chaining the updates keeps every write.
+// Read-modify-write updates are chained so concurrent callers never clobber each other.
 let configUpdateChain = Promise.resolve();
 
-/**
- * Atomically update the config: re-reads from disk, calls updater(config),
- * then saves. Returns the updated config. This prevents overwriting changes
- * made by other processes (e.g. `jaynshare import` while the server runs), and
- * serializes concurrent callers so simultaneous updates queue instead of
- * clobbering one another.
- */
 export function atomicConfigUpdate(updater) {
   const run = async () => {
     const config = await loadConfig() || createDefaultConfig();

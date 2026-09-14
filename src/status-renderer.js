@@ -14,10 +14,6 @@ export function renderStatus(status, { color = process.stdout.isTTY, now = Date.
   lines.push(paint.bold(paint.yellow('◆ JAYNSHARE status')));
   lines.push(`${paint.dim('Active'.padEnd(12))} ${paint.cyan(status.currentAccount || 'none')}`);
   lines.push(`${paint.dim('Switch at'.padEnd(12))} ${formatPercent(status.switchThreshold)}`);
-  // Only when something is blocked: an always-visible "Blocked" row would be
-  // noise for the common case, but its ABSENCE is what made a blocked model
-  // read as available — the per-account Models row reports quota headroom and
-  // knows nothing about the blocklist.
   if (blocked.length) {
     lines.push(`${paint.dim('Blocked'.padEnd(12))} ${paint.red(blocked.join(', '))}`);
   }
@@ -66,25 +62,18 @@ function colors(enabled) {
   };
 }
 
-// Paint a route's name/globs in its configured color, defaulting to cyan.
 const ROUTE_COLORS = ['red', 'green', 'yellow', 'blue', 'magenta', 'cyan'];
 function paintRoute(paint, color, value) {
   const fn = ROUTE_COLORS.includes(String(color || '').toLowerCase()) ? paint[color.toLowerCase()] : paint.cyan;
   return fn(value);
 }
 
-// The routing table: one line per route (configured first, then auto-detected),
-// listing the model globs it matches and the accounts it can use, each colored
-// by live eligibility. Auto-created routes (a family metered separately with no
-// configured route) are tagged (auto); a bucket override shows in [brackets].
 function routingLines(routes, blocked, paint) {
   if (!Array.isArray(routes) || routes.length === 0) return [];
   const lines = [paint.bold('Routing')];
   for (const route of routes) {
     const globs = route.match || [];
     const match = globs.join(', ');
-    // A route every one of whose globs is blocked can carry no traffic at all —
-    // say so, rather than listing eligible accounts it will never reach.
     const routeBlocked = globs.length > 0
       && globs.every(g => blocked.some(p => modelGlobOverlaps(p, g)));
     const accounts = routeBlocked
@@ -93,8 +82,7 @@ function routingLines(routes, blocked, paint) {
         .map(a => (a.eligible ? paint.green(a.name) : paint.red(a.name))).join(' ') || paint.gray('(none)');
     const tag = route.autocreated ? paint.dim(' (auto)') : route.bucket ? paint.dim(` [${route.bucket}]`) : '';
     const pin = route.pinned ? paint.dim(` [pinned: ${route.pinned}]`) : '';
-    // padEnd on the raw text, color after, so ANSI codes don't throw off alignment.
-    const label = paintRoute(paint, route.color, match.padEnd(16));
+    const label = paintRoute(paint, route.color, match.padEnd(16)); // pad before painting
     lines.push(`  ${label} ${paint.dim('→')} ${accounts}${tag}${pin}`);
   }
   lines.push('');
@@ -111,7 +99,6 @@ function renderAccountHeader(account, currentAccount, paint, now) {
   return `${marker} ${name} ${paint.dim(`(${account.type}, prio ${account.priority || 0})`)} ${status}${org}${sess}`;
 }
 
-// "2 active / 3 known · distributing" — the running-sessions readout.
 function formatSessions(sessions, paint) {
   const active = sessions.active || 0;
   const known = sessions.known || 0;
@@ -141,13 +128,7 @@ function formatAccountStatus(account, now, paint) {
   return parts.join(' / ');
 }
 
-// Per-account, per-family eligibility — the "some accounts are disabled for
-// specific models" view. Only rendered for accounts that meter a family
-// separately (a Sonnet or Fable weekly bucket), since that is the only case
-// where a request's model changes where it can route. A family reads ✗ when the
-// shared 5h bucket is spent (blocks everything) or when its own weekly bucket is
-// over the switch threshold; the reset is shown when the family bucket is the
-// blocker so it's clear when that model becomes available on this account again.
+// Per-family eligibility, for accounts whose Sonnet or Fable weekly bucket is metered separately.
 function modelRoutingLine(account, threshold, blocked, now, paint) {
   const q = account.quota || {};
   if (q.unified7dSonnet == null && q.unified7dFable == null) return null;
@@ -155,10 +136,7 @@ function modelRoutingLine(account, threshold, blocked, now, paint) {
   const fiveOver = q.unified5h != null && !Number.isNaN(t) && q.unified5h >= t;
 
   const cell = (label, weekly, reset) => {
-    // The blocklist outranks quota: a blocked family cannot be served however
-    // much headroom the account has, so it must not read ✓. Reporting quota
-    // alone is what made a fully-blocked model look available.
-    if (findFamilyBlock(blocked, label)) {
+    if (findFamilyBlock(blocked, label)) { // the blocklist outranks quota headroom
       return `${label} ${paint.red('⊘')}${paint.dim(' blocked')}`;
     }
     const weeklyOver = weekly != null && !Number.isNaN(t) && weekly >= t;

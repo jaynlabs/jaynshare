@@ -1,13 +1,4 @@
-// Run the proxy as a user service — `jaynshare service install`.
-//
-// npm has no equivalent of `brew services`, and a postinstall hook is the wrong
-// place for this (it is skipped under --ignore-scripts, surprises CI, and
-// installs system state nobody asked for). So the CLI does it explicitly, the
-// same way `jaynshare alias --install` handles the shell alias.
-//
-// macOS gets a LaunchAgent, Linux a systemd --user unit. Both are per-user: no
-// root, no system-wide daemon, and the proxy runs as the user whose accounts and
-// config it serves.
+// `jaynshare service`: a per-user LaunchAgent on macOS, a systemd --user unit on Linux.
 
 import { writeFile, mkdir, rm, readFile } from 'node:fs/promises';
 import { existsSync, realpathSync } from 'node:fs';
@@ -18,7 +9,6 @@ import { join, dirname } from 'node:path';
 export const LABEL = 'com.jaynlabs.jaynshare';
 export const UNIT_NAME = 'jaynshare.service';
 
-/** Which service manager to target, or null where we have nothing to offer. */
 export function serviceKind(platform = process.platform) {
   if (platform === 'darwin') return 'launchd';
   if (platform === 'linux') return 'systemd';
@@ -39,18 +29,8 @@ export function logPath(home = homedir(), platform = process.platform) {
     : join(home, '.local', 'state', 'jaynshare.log');
 }
 
-/**
- * The interpreter and script to bake into the unit.
- *
- * `process.execPath` is NOT usable as-is: on a Homebrew install it points into
- * the versioned Cellar directory (…/Cellar/node/26.5.0_1/bin/node), which the
- * next `brew upgrade node` deletes — the service would then fail to start with
- * no obvious connection to the upgrade. Prefer a `node` on PATH that resolves to
- * the same binary, since that is the stable symlink maintained across upgrades.
- *
- * The script is `argv[1]` unresolved for the same reason: the bin symlink
- * survives a package reinstall, the versioned path inside node_modules may not.
- */
+// Prefers the `node` on PATH over process.execPath, and argv[1] unresolved: the
+// versioned paths behind them (Homebrew Cellar, node_modules) die on upgrade.
 export function resolveExec({
   execPath = process.execPath,
   argv1 = process.argv[1],
@@ -70,13 +50,7 @@ export function resolveExec({
   return { node, entry: argv1 };
 }
 
-/**
- * PATH for the service. launchd starts with an empty environment, so without
- * this the background self-update cannot find npm, and any child process the
- * proxy spawns inherits nothing. Built from the directories that actually
- * matter rather than copying the interactive shell's PATH, which is full of
- * per-session entries that mean nothing to a daemon.
- */
+// launchd starts with an empty environment; the self-update needs npm on PATH.
 export function servicePath({ node, entry }) {
   const dirs = [dirname(node), dirname(entry), '/usr/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin'];
   return [...new Set(dirs.filter(Boolean))].join(':');
@@ -142,13 +116,11 @@ WantedBy=default.target
 `;
 }
 
-/** Run a command, returning { code, stdout, stderr }. Injected in tests. */
 function runCommand(cmd, args) {
   const r = spawnSync(cmd, args, { encoding: 'utf8' });
   return { code: r.status ?? 1, stdout: r.stdout || '', stderr: r.stderr || '' };
 }
 
-/** `gui/<uid>` — the launchd domain a per-user agent lives in. */
 const guiDomain = (uid = process.getuid?.() ?? 0) => `gui/${uid}`;
 
 export async function installService({
@@ -165,10 +137,7 @@ export async function installService({
     await mkdir(dirname(plist), { recursive: true });
     await mkdir(dirname(logFile), { recursive: true });
     await writeFile(plist, renderLaunchAgent({ ...exec, log: logFile, path, configPath }), { mode: 0o644 });
-    // Replace any previous registration first: bootstrap fails outright when the
-    // label is already loaded, and an install that reports success while the old
-    // definition keeps running is worse than a loud failure.
-    run('launchctl', ['bootout', `${guiDomain()}/${LABEL}`]);
+    run('launchctl', ['bootout', `${guiDomain()}/${LABEL}`]); // bootstrap fails if the label is already loaded
     const boot = run('launchctl', ['bootstrap', guiDomain(), plist]);
     if (boot.code !== 0) return { ok: false, error: boot.stderr.trim() || `launchctl bootstrap exited ${boot.code}`, file: plist };
     log(`[Jaynshare] Service installed: ${plist}`);
@@ -184,8 +153,6 @@ export async function installService({
   if (enable.code !== 0) return { ok: false, error: enable.stderr.trim() || `systemctl exited ${enable.code}`, file: unit };
   log(`[Jaynshare] Service installed: ${unit}`);
   log('[Jaynshare] Logs: journalctl --user --unit jaynshare.service --follow');
-  // Without lingering the unit dies with the last login session, which is not
-  // what "install a service" is expected to mean.
   log('[Jaynshare] To keep it running with no session open: loginctl enable-linger $USER');
   return { ok: true, file: unit, logFile: null };
 }
@@ -227,7 +194,6 @@ export async function serviceStatus({
   return { installed: existsSync(unit), running: r.stdout.trim() === 'active', file: unit, detail: r.stdout.trim() || r.stderr.trim() };
 }
 
-/** The unit file contents, for `service print` — inspect before installing. */
 export function renderService({ kind = serviceKind(), home = homedir(), platform = process.platform, exec = resolveExec(), configPath = null } = {}) {
   if (!kind) return null;
   const path = servicePath(exec);
@@ -236,7 +202,6 @@ export function renderService({ kind = serviceKind(), home = homedir(), platform
     : renderSystemdUnit({ ...exec, path, configPath });
 }
 
-/** Read back what is installed, for diffing against what we would write now. */
 export async function readInstalled({
   kind = serviceKind(), home = homedir(), xdgConfig = process.env.XDG_CONFIG_HOME,
 } = {}) {

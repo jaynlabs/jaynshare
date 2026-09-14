@@ -1,13 +1,5 @@
-// `claude` shell alias — print or install/uninstall.
-//
-// The alias simply routes plain `claude` through `jaynshare run`, which probes
-// the proxy and, when it's down, errors out rather than silently bypassing the
-// proxy. All the smarts live in `run`; add `--auto-fallback` to the alias if you
-// want plain `claude` to launch directly when the proxy is down instead.
-//
-// This only affects interactive shells (aliases aren't seen by editors/scripts
-// that exec `claude` themselves). It's intentionally lighter than a PATH shim:
-// no binary shadowing, one line per rc, trivially reversible.
+// The `claude` shell alias that routes through `jaynshare run`: one line in the
+// rc file, interactive shells only.
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync, rmSync, realpathSync } from 'node:fs';
 import { join, dirname } from 'node:path';
@@ -15,12 +7,10 @@ import { homedir } from 'node:os';
 
 const MARKER = '# jaynshare alias';
 
-/** Basename of the user's login shell, e.g. "zsh". Defaults to bash. */
 export function detectShell() {
   return (process.env.SHELL || '').split('/').pop() || 'bash';
 }
 
-/** Whether a bare command resolves on the current $PATH. */
 function commandOnPath(cmd) {
   for (const dir of (process.env.PATH || '').split(':')) {
     if (dir && existsSync(join(dir, cmd))) return true;
@@ -28,28 +18,21 @@ function commandOnPath(cmd) {
   return false;
 }
 
-/**
- * How the alias should invoke jaynshare. Prefer the bare `jaynshare` when it's
- * on $PATH; otherwise embed the absolute path to this CLI (quoted) so the alias
- * still works when jaynshare isn't installed on PATH — e.g. run from a clone.
- */
 export function jaynshareRef() {
   if (commandOnPath('jaynshare')) return 'jaynshare';
-  const entry = process.argv[1];
+  const entry = process.argv[1]; // not installed on PATH (a clone): embed this CLI's path
   if (!entry) return 'jaynshare';
   let abs;
   try { abs = realpathSync(entry); } catch { abs = entry; }
   return `"${abs}"`;
 }
 
-/** The alias definition for a given shell family. */
 export function aliasLine(shell = detectShell(), ref = jaynshareRef()) {
   const body = `${ref} run --`;
   if (shell === 'fish') return `alias claude '${body}'`;
   return `alias claude='${body}'`;
 }
 
-/** The rc file an alias for this shell should live in. */
 export function rcPathForShell(shell = detectShell()) {
   const home = homedir();
   switch (shell) {
@@ -98,9 +81,7 @@ export function uninstallAlias({ shell = detectShell(), rcPath = rcPathForShell(
     return;
   }
   const text = readFileSync(rcPath, 'utf8');
-  // Strip our marked block: the marker comment + the single line after it.
-  // Matching by marker (not by exact alias text) makes this robust even if the
-  // embedded jaynshare path differs from what's computed now.
+  // Match on the marker, not the alias text: the embedded path may have changed.
   const blockRe = new RegExp(`\\n?${escapeRe(MARKER)}\\n[^\\n]*\\n?`, 'g');
   let cleaned = text.replace(blockRe, '\n');
   cleaned = cleaned.replace(/\n{3,}/g, '\n\n');
@@ -110,7 +91,6 @@ export function uninstallAlias({ shell = detectShell(), rcPath = rcPathForShell(
     return;
   }
 
-  // For the dedicated fish drop-file, remove it entirely if now empty.
   if (rcPath.endsWith('jaynshare.fish') && cleaned.trim() === '') {
     rmSync(rcPath);
     console.log(`Removed ${rcPath}`);

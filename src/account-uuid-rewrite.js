@@ -1,42 +1,31 @@
-// Rewrite the request body's account_uuid to match the account whose token we
-// inject. Claude Code puts the logged-in account's UUID inside `metadata.user_id`
-// (a stringified JSON) of /v1/messages; under rotation that would disagree with
-// the injected token.
-//
-// This is a STREAMING, byte-exact JSON state machine — no regex, no whole-body
-// buffering — so it handles arbitrarily large bodies fed in chunks. It tracks
-// JSON structure (container stack, current key, in-string/escape) to find the
-// `metadata.user_id` string value, and only inside that value does it look for
-// the `account_uuid` field and overwrite its 36-char value with the new UUID
-// (same length → no content-length/flow-control changes). A stray `account_uuid`
-// elsewhere in the body (user content, tool results) is never touched.
+// Streaming rewrite of the `account_uuid` inside `metadata.user_id` (a JSON
+// string within the JSON body) to the account whose token is injected. Same
+// length in, same length out; nothing else in the body is touched.
 
-// Byte sequence of `account_uuid":"` as it appears INSIDE the (escaped) user_id
-// string: account_uuid \ " : \ "
+// `account_uuid":"` as it appears escaped inside the user_id string.
 const PREFIX = Buffer.from('account_uuid\\":\\"', 'latin1');
 
 export class AccountUuidPatcher {
   constructor(newUuid) {
     this.newUuid = (typeof newUuid === 'string' && newUuid.length === 36) ? Buffer.from(newUuid, 'latin1') : null;
-    this.frames = [];          // container stack: { container:'obj'|'arr', name, key, awaitingKey }
+    this.frames = [];          // { container: 'obj'|'arr', name, key, awaitingKey }
     this.inStr = false;
     this.esc = false;
     this.readingKey = false;
     this.keyBuf = [];
-    this.target = false;       // inside the metadata.user_id string value
-    this.matchPos = 0;         // PREFIX match progress (within target)
+    this.target = false;       // inside the metadata.user_id string
+    this.matchPos = 0;         // PREFIX bytes matched so far
     this.uuidRemaining = 0;    // value bytes left to overwrite
-    this.done = false;         // patched the one account_uuid already
+    this.done = false;
     this.changed = false;
   }
 
-  /** Feed a chunk; returns a same-length chunk (patched in place). */
   push(chunk) {
     if (!this.newUuid || this.done) return chunk;
     const out = Buffer.from(chunk);
     for (let i = 0; i < out.length; i++) {
       out[i] = this.#byte(out[i]);
-      if (this.done) break; // rest passes through unchanged
+      if (this.done) break;
     }
     return out;
   }
@@ -80,14 +69,12 @@ export class AccountUuidPatcher {
     return b;
   }
 
-  // Inside the metadata.user_id string value: stream-match the account_uuid key
-  // and overwrite its 36-byte value. Detect the (unescaped) closing quote to exit.
   #targetByte(b) {
     if (this.uuidRemaining > 0) {
       const outByte = this.newUuid[this.newUuid.length - this.uuidRemaining];
       this.uuidRemaining--;
       if (outByte !== b) this.changed = true;
-      if (this.uuidRemaining === 0) this.done = true; // only one account_uuid per body
+      if (this.uuidRemaining === 0) this.done = true;
       return outByte;
     }
     if (this.esc) { this.esc = false; this.#match(b); return b; }
@@ -107,7 +94,6 @@ export class AccountUuidPatcher {
   }
 }
 
-/** One-shot convenience (whole-buffer); returns the same instance if unchanged. */
 export function patchAccountUuid(buf, newUuid) {
   const p = new AccountUuidPatcher(newUuid);
   const out = p.push(buf);

@@ -12,20 +12,11 @@ const execFileAsync = promisify(execFile);
 const DEFAULT_CREDENTIALS_PATH = '~/.claude/.credentials.json';
 const KEYCHAIN_SERVICE = 'Claude Code-credentials';
 
-/**
- * Read Claude Code credentials from the macOS Keychain, where Claude Code
- * stores them on darwin (there is no ~/.claude/.credentials.json on macOS).
- */
 async function readKeychainCredentials() {
   const { stdout } = await execFileAsync('security', ['find-generic-password', '-s', KEYCHAIN_SERVICE, '-w']);
   return JSON.parse(stdout.trim());
 }
 
-/**
- * Import OAuth credentials from a Claude Code credentials file.
- * On macOS the default credentials location is the Keychain, not a file, so
- * when the default path is missing the Keychain is tried before giving up.
- */
 export async function importCredentials(filePath, {
   home = homedir(), platform = process.platform, readKeychain = readKeychainCredentials } = {}) {
   const resolvedPath = filePath.replace(/^~/, home);
@@ -42,7 +33,6 @@ export async function importCredentials(filePath, {
     }
   }
 
-  // Claude Code stores credentials nested under "claudeAiOauth"
   const data = raw.claudeAiOauth || raw;
   return {
     accessToken: data.accessToken,
@@ -59,17 +49,9 @@ const OAUTH_USAGE_BETA = 'oauth-2025-04-20';
 const DEFAULT_TOKEN_ENDPOINT = 'https://platform.claude.com/v1/oauth/token';
 const DEFAULT_CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e';
 
-/**
- * Refresh an expired OAuth access token using the refresh token.
- * Retries on 5xx and network errors with exponential backoff.
- */
 export async function refreshAccessToken(refreshToken, endpoint = DEFAULT_TOKEN_ENDPOINT) {
   const maxRetries = 2;
   const baseDelayMs = 500;
-  // Bound each attempt so a dead pooled socket (after a network drop/reconnect)
-  // can't hang the refresh forever. A hung refresh is especially harmful here:
-  // ensureTokenFresh coalesces callers into a single _refreshPromise, so one
-  // stuck refresh wedges every request for that account until a restart.
   const timeoutMs = Number(process.env.JAYNSHARE_REFRESH_TIMEOUT_MS) || 30_000;
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
@@ -101,11 +83,7 @@ export async function refreshAccessToken(refreshToken, endpoint = DEFAULT_TOKEN_
         }
         const text = await res.text();
         const err = new Error(`Token refresh failed (${res.status}): ${text}`);
-        // Surface the HTTP status so callers can distinguish a genuine auth
-        // rejection (the refresh token is dead — re-login needed) from a
-        // transient server error. 5xx is retried above; reaching here with a 5xx
-        // means retries were exhausted, which is still transient, not auth.
-        err.status = res.status;
+        err.status = res.status; // lets callers tell an auth rejection from a transient error
         throw err;
       }
 
@@ -130,41 +108,21 @@ export async function refreshAccessToken(refreshToken, endpoint = DEFAULT_TOKEN_
   }
 }
 
-/**
- * Normalize an expires_at value to milliseconds.
- * OAuth endpoints may return seconds; Claude Code credentials use milliseconds.
- */
 export function normalizeExpiresAt(expiresAt) {
   if (!expiresAt) return expiresAt;
-  // If the value is plausibly in seconds (< 10^12 ≈ year 2001 in ms, year 33658 in s),
-  // convert to milliseconds
-  return expiresAt < 1e12 ? expiresAt * 1000 : expiresAt;
+  return expiresAt < 1e12 ? expiresAt * 1000 : expiresAt; // OAuth returns seconds, Claude Code stores milliseconds
 }
 
-/**
- * Check if an OAuth token is expiring within the given threshold.
- */
 export function isTokenExpiringSoon(expiresAt, thresholdMs = 5 * 60 * 1000) {
   if (!expiresAt) return false;
   return Date.now() + thresholdMs >= normalizeExpiresAt(expiresAt);
 }
 
-/**
- * Check if an OAuth token has ALREADY expired (no safety margin). Used to decide
- * when a token must be refreshed synchronously before it can be injected — a
- * still-valid-but-expiring-soon token is fine to use now and refresh in the
- * background, but an expired one would 401.
- */
 export function isTokenExpired(expiresAt) {
   if (!expiresAt) return false;
   return Date.now() >= normalizeExpiresAt(expiresAt);
 }
 
-/**
- * Fetch account profile for an OAuth token.
- * Returns { email, name, orgName, orgType, ... } on success,
- * or { error: 'reason' } on failure.
- */
 export async function fetchProfile(accessToken) {
   try {
     const res = await proxyFetch(PROFILE_URL, {
@@ -196,11 +154,7 @@ export async function fetchProfile(accessToken) {
   }
 }
 
-// Pull a per-model weekly limit out of the payload's `limits[]` array, which is
-// where the endpoint now reports model-scoped quota (a `weekly_scoped` entry
-// carrying `scope.model.display_name`). Returns a bucket-shaped object
-// { utilization, resets_at } ready for normalizeUsageBucket, or null if absent.
-// The legacy top-level `seven_day_<model>` keys read null on current plans.
+// Model-scoped weekly quota lives in `limits[]`, not in a top-level `seven_day_<model>` key.
 export function findScopedWeeklyLimit(data, modelNamePattern) {
   const limits = Array.isArray(data?.limits) ? data.limits : [];
   const entry = limits.find((l) =>
@@ -210,17 +164,12 @@ export function findScopedWeeklyLimit(data, modelNamePattern) {
   return { utilization: entry.percent, resets_at: entry.resets_at };
 }
 
-// Normalize one usage bucket from the /api/oauth/usage payload into
-// { utilization: 0-1, resetAt: ms-epoch }. The endpoint reports utilization
-// as a percentage in the 0-100 range, so 1 means 1%, not 100%.
 export function normalizeUsageBucket(bucket) {
   if (!bucket || typeof bucket !== 'object') return null;
 
   const rawPct = bucket.used_percentage ?? bucket.utilization ?? bucket.usedPercentage;
   const parsedPct = typeof rawPct === 'number' ? rawPct : parseFloat(rawPct);
-  const utilization = Number.isFinite(parsedPct)
-    ? parsedPct / 100
-    : null;
+  const utilization = Number.isFinite(parsedPct) ? parsedPct / 100 : null; // the endpoint reports 0–100
 
   const rawReset = bucket.resets_at ?? bucket.resetsAt ?? bucket.reset_at ?? bucket.resetAt;
   let resetAt = null;
@@ -239,12 +188,7 @@ export function normalizeUsageBucket(bucket) {
   return { utilization, resetAt };
 }
 
-/**
- * Fetch OAuth subscription usage from the usage endpoint. This reports quota
- * utilization WITHOUT spending message quota, which is what makes it safe to
- * poll. Returns normalized { fiveHour, sevenDay, sevenDaySonnet, sevenDayFable } buckets, or
- * { error, status } on failure.
- */
+// Zero-spend, so safe to poll.
 export async function fetchUsage(accessToken) {
   try {
     const res = await proxyFetch(USAGE_URL, {
@@ -278,26 +222,34 @@ export async function fetchUsage(accessToken) {
   }
 }
 
-// OAuth config (extracted from Claude Code). Client id + token endpoint are
-// shared with the refresh path — see DEFAULT_CLIENT_ID / DEFAULT_TOKEN_ENDPOINT.
 const OAUTH_AUTHORIZE = 'https://claude.ai/oauth/authorize';
 const OAUTH_SCOPES = 'org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload';
 
-/**
- * Perform OAuth login via browser with PKCE flow.
- * Opens the user's browser, waits for the callback, exchanges the code for tokens.
- */
 export async function loginOAuth() {
-  // Generate PKCE
   const codeVerifier = randomBytes(32).toString('base64url');
   const codeChallenge = createHash('sha256').update(codeVerifier).digest('base64url');
   const state = randomBytes(32).toString('base64url');
 
-  // Start local callback server on a random port
   const { port, codePromise, server } = await startCallbackServer(state);
   const redirectUri = `http://localhost:${port}/callback`;
+  const authUrl = buildAuthorizeUrl({ redirectUri, codeChallenge, state });
 
-  // Build authorization URL
+  console.log('Opening browser for authentication...');
+  console.log(`If it doesn't open, visit:\n  ${authUrl}\n`);
+  openBrowser(authUrl);
+
+  let code;
+  try {
+    code = await raceWithStdinCode(codePromise, state);
+  } finally {
+    server.close();
+  }
+
+  console.log('Exchanging authorization code for tokens...');
+  return exchangeCodeForTokens({ code, state, redirectUri, codeVerifier });
+}
+
+function buildAuthorizeUrl({ redirectUri, codeChallenge, state }) {
   const authUrl = new URL(OAUTH_AUTHORIZE);
   authUrl.searchParams.set('code', 'true');
   authUrl.searchParams.set('client_id', DEFAULT_CLIENT_ID);
@@ -307,22 +259,10 @@ export async function loginOAuth() {
   authUrl.searchParams.set('code_challenge', codeChallenge);
   authUrl.searchParams.set('code_challenge_method', 'S256');
   authUrl.searchParams.set('state', state);
+  return authUrl.toString();
+}
 
-  // Open browser
-  console.log('Opening browser for authentication...');
-  console.log(`If it doesn't open, visit:\n  ${authUrl.toString()}\n`);
-  openBrowser(authUrl.toString());
-
-  // Wait for either the callback server or manual paste from stdin
-  let code;
-  try {
-    code = await raceWithStdinCode(codePromise, state);
-  } finally {
-    server.close();
-  }
-
-  // Exchange code for tokens
-  console.log('Exchanging authorization code for tokens...');
+async function exchangeCodeForTokens({ code, state, redirectUri, codeVerifier }) {
   const tokenRes = await proxyFetch(DEFAULT_TOKEN_ENDPOINT, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -349,10 +289,7 @@ export async function loginOAuth() {
   };
 }
 
-/**
- * Race the callback server promise against manual code entry from stdin.
- * The user can paste the full callback URL or just the authorization code.
- */
+// The user can paste the full callback URL or just the code.
 function raceWithStdinCode(callbackPromise, expectedState) {
   if (!process.stdin.isTTY) return callbackPromise;
 
@@ -369,9 +306,8 @@ function raceWithStdinCode(callbackPromise, expectedState) {
 
     rl.question('Paste authorization code here (or wait for browser callback): ', answer => {
       const trimmed = answer.trim();
-      if (!trimmed) return; // empty input, keep waiting for callback
+      if (!trimmed) return; // keep waiting for the callback
 
-      // Try to parse as a URL with ?code= parameter
       try {
         const url = new URL(trimmed);
         const code = url.searchParams.get('code');
@@ -386,7 +322,6 @@ function raceWithStdinCode(callbackPromise, expectedState) {
         }
       } catch {}
 
-      // Treat raw input as the authorization code
       settle(resolve, trimmed);
     });
 
@@ -441,7 +376,6 @@ function startCallbackServer(expectedState) {
     });
     server.on('error', reject);
 
-    // Timeout after 2 minutes (unref so it doesn't keep the process alive)
     const timer = setTimeout(() => {
       rejectCode(new Error('Login timed out after 2 minutes'));
       server.close();

@@ -1,23 +1,12 @@
-// Tracks Claude Code sessions by their `x-claude-code-session-id` header so
-// jaynshare can (a) report how many sessions are running and (b) optionally
-// keep each session pinned to one account while spreading NEW sessions across
-// accounts (the opt-in fix for concurrency funnelling).
-//
-// Two windows:
-//   - KNOWN: a session is remembered until it goes idle for this long, then
-//     forgotten. 1h matches the maximum prompt-cache extension window — past
-//     that there is no cache left to preserve, so the pin has no value.
-//   - ACTIVE: a session counts as "active" (and toward per-account load) if it
-//     made a request this recently. Short, so load-balancing reacts to what is
-//     actually running now rather than to sessions merely lingering in the hour.
-export const SESSION_KNOWN_TTL_MS = 60 * 60 * 1000; // 1h idle → forgotten
-export const SESSION_ACTIVE_TTL_MS = 2 * 60 * 1000; // 2min idle → no longer "active"
+// Tracks Claude Code sessions (`x-claude-code-session-id`) for the status
+// readout and for session → account affinity.
+export const SESSION_KNOWN_TTL_MS = 60 * 60 * 1000; // idle this long → forgotten; matches the prompt-cache window
+export const SESSION_ACTIVE_TTL_MS = 2 * 60 * 1000; // idle this long → no longer counts toward account load
 
-const SWEEP_INTERVAL_MS = 60 * 1000; // bound growth without an external timer
+const SWEEP_INTERVAL_MS = 60 * 1000; // touch() sweeps opportunistically; no external timer
 
 export class SessionTracker {
   constructor({ knownTtlMs, activeTtlMs, now } = {}) {
-    // id -> { accountIndex, firstSeen, lastSeen, count, inFlight }
     this.sessions = new Map();
     this.knownTtlMs = knownTtlMs ?? SESSION_KNOWN_TTL_MS;
     this.activeTtlMs = activeTtlMs ?? SESSION_ACTIVE_TTL_MS;
@@ -25,10 +14,6 @@ export class SessionTracker {
     this._lastSweep = 0;
   }
 
-  // Record that `sessionId` made a request served by `accountIndex`. Refreshes
-  // lastSeen (keeping the session "active"/"known") and, when an account is
-  // given, (re)pins the session to it. Throttled sweep keeps the map bounded
-  // even in a headless server that never renders status.
   touch(sessionId, accountIndex = null, now = this._now()) {
     if (!sessionId) return null;
     const s = this._ensure(sessionId, now);
@@ -39,10 +24,6 @@ export class SessionTracker {
     return s;
   }
 
-  // Mark a request for this session as started. A session with any request in
-  // flight counts as active (and non-expirable) for the whole request, however
-  // long it streams — a 5-minute completion must not drop out of "active" or the
-  // load balancer would under-count that account. Paired with endRequest.
   beginRequest(sessionId, now = this._now()) {
     if (!sessionId) return null;
     const s = this._ensure(sessionId, now);
@@ -51,7 +32,6 @@ export class SessionTracker {
     return s;
   }
 
-  // Mark a request as finished (refreshes recency; releases the in-flight hold).
   endRequest(sessionId, now = this._now()) {
     const s = sessionId && this.sessions.get(sessionId);
     if (!s) return;
@@ -68,19 +48,14 @@ export class SessionTracker {
     return s;
   }
 
-  // Active = a request in flight now, or one seen within the active window.
   _isActive(s, now) {
     return s.inFlight > 0 || now - s.lastSeen <= this.activeTtlMs;
   }
 
-  // Expired = idle past the known window AND nothing in flight (a long-running
-  // request keeps the session alive no matter how old lastSeen is).
   _isExpired(s, now) {
     return s.inFlight === 0 && now - s.lastSeen > this.knownTtlMs;
   }
 
-  // The account a known (non-expired) session is pinned to, or null if the
-  // session is unknown/forgotten. Expired-on-read entries are dropped.
   pinnedAccount(sessionId, now = this._now()) {
     const s = sessionId && this.sessions.get(sessionId);
     if (!s) return null;
@@ -91,8 +66,6 @@ export class SessionTracker {
     return s.accountIndex ?? null;
   }
 
-  // Read one known session without refreshing its lifetime. The returned copy
-  // contains only the fields needed by the authenticated client usage view.
   lookup(sessionId, now = this._now()) {
     const s = sessionId && this.sessions.get(sessionId);
     if (!s) return null;
@@ -103,9 +76,6 @@ export class SessionTracker {
     return { accountIndex: s.accountIndex ?? null, lastSeen: s.lastSeen };
   }
 
-  // Active sessions currently pinned to `accountIndex` — the load metric used to
-  // spread new sessions across accounts. Counts in-flight sessions regardless of
-  // how long their request has been streaming.
   activeCountFor(accountIndex, now = this._now()) {
     let n = 0;
     for (const s of this.sessions.values()) {
@@ -114,7 +84,6 @@ export class SessionTracker {
     return n;
   }
 
-  // Drop sessions idle longer than the known window (but never one still in flight).
   sweep(now = this._now()) {
     this._lastSweep = now;
     for (const [id, s] of this.sessions) {
@@ -122,8 +91,6 @@ export class SessionTracker {
     }
   }
 
-  // { known, active, perAccount: { [index]: activeCount } } — for status/TUI.
-  // Sweeps as it goes so a long-lived headless server stays bounded.
   stats(now = this._now()) {
     this._lastSweep = now;
     let known = 0;

@@ -47,13 +47,10 @@ function matchesHash(secret, expected) {
   return safeEqual(hashClientSecret(secret), expected);
 }
 
-/** Resolve a presented proxy credential to a stable authorization principal. */
 export function resolvePrincipal(config, secret, { local = false } = {}) {
   if (local) return { role: 'operator', clientId: 'local', clientName: 'Local operator', local: true };
   const proxy = config?.proxy || {};
-  // Preserve pre-client-registry configs: historically an omitted apiKey meant
-  // an open proxy. New defaults write `clients: []`, which is explicitly closed.
-  if (!Object.hasOwn(proxy, 'clients') && !proxy.adminKeyHash && !proxy.apiKey) {
+  if (!Object.hasOwn(proxy, 'clients') && !proxy.adminKeyHash && !proxy.apiKey) { // a config predating the client registry is open
     return { role: 'operator', clientId: 'anonymous-legacy', clientName: 'Anonymous legacy client', local: false, legacy: true };
   }
   if (matchesHash(secret, proxy.adminKeyHash)) {
@@ -64,15 +61,12 @@ export function resolvePrincipal(config, secret, { local = false } = {}) {
       return { role: 'client', clientId: client.id, clientName: client.name || client.id, local: false, credentialHash: client.keyHash };
     }
   }
-  // Backward compatibility is deliberately read-only. `jaynshare client migrate`
-  // replaces this plaintext credential with a hashed named client.
-  if (proxy.apiKey && safeEqual(secret, proxy.apiKey)) {
+  if (proxy.apiKey && safeEqual(secret, proxy.apiKey)) { // plaintext key; `client migrate` replaces it
     return { role: 'operator', clientId: 'legacy', clientName: 'Legacy client', local: false, legacy: true, credentialHash: hashClientSecret(secret) };
   }
   return null;
 }
 
-/** Recheck a CONNECT-bound principal against live config after reload/rotation. */
 export function principalStillAuthorized(config, principal) {
   if (!principal) return false;
   if (principal.local) return true;

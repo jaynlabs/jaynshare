@@ -1,10 +1,5 @@
-// Minimal pure-JS X.509 certificate generation (no external deps).
-//
-// node:crypto can create keypairs and sign, but cannot issue certificates, so
-// we hand-encode the (small) ASN.1 DER cert envelope and sign the TBS with the
-// issuer key. Used only to mint a local CA + a leaf for the MITM proxy, which
-// the launched claude process trusts via NODE_EXTRA_CA_CERTS. Nothing here is a
-// general-purpose ASN.1 library — just what these two certs need.
+// Just enough hand-encoded ASN.1 DER to mint the MITM CA and leaf; node:crypto
+// signs but cannot issue certificates.
 
 import { generateKeyPairSync, sign as cryptoSign, randomBytes } from 'node:crypto';
 
@@ -153,7 +148,6 @@ export function createLeaf(hosts, ca) {
   return { certPem, keyPem: key.keyPem };
 }
 
-/** Generate a fresh CA + a leaf covering `hosts` (string or array). Returns PEM strings. */
 export function generateCertChain(hosts) {
   const ca = createCA();
   const leaf = createLeaf(hosts, ca);

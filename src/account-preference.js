@@ -3,7 +3,6 @@ const MAX_IDENTITY_BYTES = 1024;
 
 export const ACCOUNT_PREFERENCE_PREFIX = PREFIX;
 
-/** Encode an account selector for the Basic-auth username on a CONNECT. */
 export function encodeAccountPreference(identity) {
   if (typeof identity !== 'string' || !identity.trim()) {
     throw new TypeError('account preference must be a non-empty string');
@@ -13,11 +12,7 @@ export function encodeAccountPreference(identity) {
   return PREFIX + bytes.toString('base64url');
 }
 
-/**
- * Decode a soft-preference username. A non-reserved username returns null so
- * legacy strict account pins keep their existing meaning. Reserved but invalid
- * values throw: they must never silently degrade to automatic routing.
- */
+// null: not a preference (a plain account pin). Throws: a malformed one must never route automatically.
 export function decodeAccountPreference(value) {
   if (typeof value !== 'string' || !value.startsWith(PREFIX)) return null;
   const encoded = value.slice(PREFIX.length);

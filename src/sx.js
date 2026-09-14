@@ -1,27 +1,13 @@
-// sx.org proxy integration — an IP-based-429 workaround.
-//
-// jaynshare's transient 429s key on the proxy's OUTBOUND IP, not the account,
-// so account failover doesn't help. sx.org is a residential proxy-port provider:
-// with an API key we provision a port and tunnel upstream Anthropic traffic
-// through it, giving a different egress IP. Crucially, TLS terminates END-TO-END
-// at the upstream (we `tls.connect` over the tunnel with the upstream's
-// servername and the default secure cert check) — the sx.org proxy only ever
-// relays ciphertext and cannot see request content.
-//
-// When no API key is configured (or mode is 'off') this module is dormant and the
-// dial paths behave exactly as before — routing is decided per-attempt by
-// useByDefault() / useOn429() / useForConnect(), all false until provisioned.
+// sx.org residential egress: transient 429s key on the outbound IP, so a fresh
+// exit IP clears them. TLS stays end-to-end; the proxy relays ciphertext only.
 
 import net from 'node:net';
 import tls from 'node:tls';
 
 const CONNECT_TIMEOUT_MS = 30000; // residential exits can be slow to establish
 
-// Resolved per call (not at import) so tests can point it at a local mock.
 const sxBase = () => process.env.SX_API_BASE || 'https://api.sx.org';
 
-// ── sx.org REST (apiKey is a query param; these hit api.sx.org directly, never
-// the proxy, and are unrelated to Anthropic traffic) ──
 async function sxGet(path, apiKey, params = {}) {
   const url = new URL(sxBase() + path);
   url.searchParams.set('apiKey', apiKey);
@@ -44,9 +30,7 @@ async function sxPost(path, apiKey, body) {
 export const SX_MODES = ['off', '429', 'always'];
 const normalizeMode = (m) => (SX_MODES.includes(m) ? m : 'always');
 
-// Normalize either API shape into { host, port, username, password, portId }.
-//   ports-list:  { proxy: "host:port", login, password, id }
-//   create-port: { server, port, login, password, id }
+// ports-list: { proxy: "host:port", login, password, id }; create-port: { server, port, login, password, id }
 function parsePort(p) {
   let host, port;
   if (typeof p.proxy === 'string' && p.proxy.includes(':')) {
@@ -58,16 +42,10 @@ function parsePort(p) {
   return { host, port: parseInt(port, 10), username: p.login, password: p.password, portId: p.id };
 }
 
-/**
- * Open a CONNECT tunnel through an HTTP proxy to targetHost:targetPort and
- * resolve with the raw (still-plaintext) socket once the proxy answers 200.
- */
+// Resolves with the raw socket, paused, once the proxy answers 200.
 export function connectThroughProxy({ proxyHost, proxyPort, auth, targetHost, targetPort, timeout = CONNECT_TIMEOUT_MS, label = 'sx.org proxy' }) {
   return new Promise((resolve, reject) => {
-    // autoSelectFamily (happy-eyeballs) — default on Node 20+ but not 18; set it
-    // so a dual-stack proxy host whose IPv6 path is unreachable falls back to IPv4
-    // instead of hanging the connect (sx.org returns an IP, but be robust).
-    const sock = net.connect({ port: proxyPort, host: proxyHost, autoSelectFamily: true });
+    const sock = net.connect({ port: proxyPort, host: proxyHost });
     let buf = '';
     const timer = setTimeout(() => fail(new Error(`${label} CONNECT timed out after ${timeout}ms`)), timeout);
     const cleanup = () => {
@@ -84,8 +62,8 @@ export function connectThroughProxy({ proxyHost, proxyPort, auth, targetHost, ta
       const m = statusLine.match(/^HTTP\/\d\.\d\s+(\d{3})/);
       if (!m || m[1] !== '200') { fail(new Error(`${label} refused CONNECT: ${statusLine}`)); return; }
       cleanup();
-      sock.pause(); // stop flowing so the TLS layer we hand it to sees every byte
-      const rest = Buffer.from(buf.slice(idx + 4), 'latin1'); // bytes already past the header
+      sock.pause(); // the TLS layer must see every byte
+      const rest = Buffer.from(buf.slice(idx + 4), 'latin1');
       if (rest.length) sock.unshift(rest);
       resolve(sock);
     };
@@ -100,12 +78,6 @@ export function connectThroughProxy({ proxyHost, proxyPort, auth, targetHost, ta
   });
 }
 
-/**
- * CONNECT through `proxy`, then complete a TLS handshake to targetHost so TLS is
- * end-to-end (the proxy sees ciphertext only). Resolves with the TLSSocket after
- * secureConnect. Cert verification stays at its secure default; tests inject a CA
- * via tlsOptions.ca.
- */
 export async function tunnelTls({ proxy, targetHost, targetPort = 443, tlsOptions = {} }) {
   const sock = await connectThroughProxy({
     proxyHost: proxy.host,
@@ -123,32 +95,22 @@ export async function tunnelTls({ proxy, targetHost, targetPort = 443, tlsOption
   });
 }
 
-/**
- * Holds the sx.org credential + the provisioned proxy. Shared in-process by the
- * reverse proxy, the MITM handler, and the TUI so a key change applies live.
- */
 export class SxManager {
   constructor({ log = () => {} } = {}) {
     this.log = log;
     this.apiKey = null;
     this.proxy = null;   // { host, port, username, password, portId }
-    this.mode = 'always'; // off | 429 | always — how routing decisions are made
-    this._rlUntil = 0;    // sticky-routing window end (ms) for '429' mode
+    this.mode = 'always'; // off | 429 | always
+    this._rlUntil = 0;    // '429' mode routes via sx until this time
   }
 
   isProvisioned() { return !!(this.apiKey && this.proxy); }
   getProxy() { return this.proxy; }
   getMode() { return this.mode; }
 
-  // ── routing decisions ──
-  // Reverse-proxy first attempt: only 'always' routes pre-emptively.
   useByDefault() { return this.isProvisioned() && this.mode === 'always'; }
-  // Reverse-proxy retry after a 429: 'always' and '429' both route (the 429 is
-  // IP-based, so a fresh egress IP can clear it).
   useOn429() { return this.isProvisioned() && this.mode !== 'off'; }
-  // MITM connect-time (one tunnel carries many requests, so no per-request
-  // failover): 'always' routes; '429' routes only inside the sticky window set
-  // when a 429 was recently observed.
+  // A tunnel serves many requests, so '429' mode routes only inside the sticky window.
   useForConnect() {
     if (!this.isProvisioned() || this.mode === 'off') return false;
     return this.mode === 'always' || this.isRecentlyRateLimited();
@@ -157,7 +119,6 @@ export class SxManager {
   noteRateLimited(seconds = 60) { this._rlUntil = Date.now() + Math.min(Math.max(seconds, 1), 300) * 1000; }
   isRecentlyRateLimited() { return Date.now() < this._rlUntil; }
 
-  /** Set the API key (+ optional mode) and provision unless mode is 'off'. */
   async configure(apiKey, mode = this.mode) {
     this.mode = normalizeMode(mode);
     if (!apiKey) { this.disable(); return { ok: false, error: 'no API key' }; }
@@ -166,7 +127,6 @@ export class SxManager {
     return this._ensureProxy();
   }
 
-  /** Switch mode WITHOUT clearing the key; provision lazily when turning on. */
   async setMode(mode) {
     this.mode = normalizeMode(mode);
     if (this.mode === 'off') { this.proxy = null; return { ok: true, mode: this.mode }; }
@@ -174,7 +134,6 @@ export class SxManager {
     return { ok: true, mode: this.mode, proxy: this.proxy };
   }
 
-  /** Full deconfigure — forget the key entirely. */
   disable() { this.apiKey = null; this.proxy = null; }
 
   async _ensureProxy() {
@@ -189,7 +148,6 @@ export class SxManager {
     }
   }
 
-  /** Account balance/traffic, or null on error. */
   async getBalance() {
     if (!this.apiKey) return null;
     try {
@@ -198,7 +156,6 @@ export class SxManager {
     } catch { return null; }
   }
 
-  /** Reuse an active port if one exists, else create a residential US one. */
   async provision() {
     if (!this.apiKey) throw new Error('sx.org API key not set');
     const list = await sxGet('/v2/proxy/ports', this.apiKey, { per_page: 50 });

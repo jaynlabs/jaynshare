@@ -1,11 +1,5 @@
-// Opt-in background quota probe.
-//
-// DISABLED BY DEFAULT. When enabled (config.quotaProbeSeconds > 0), periodically
-// reads an OAuth account's quota zero-spend /api/oauth/usage endpoint so idle
-// accounts' utilization/reset stay fresh without waiting to rotate onto them.
-// A sanctioned active-upstream feature (the other is the opt-in keep-warm
-// scheduler, warmer.js); the proxy is otherwise passive. Unlike keep-warm, this
-// probe reads a zero-spend endpoint and never consumes message quota.
+// Opt-in (config.quotaProbeSeconds) background probe of the zero-spend usage
+// endpoint, so idle accounts' quota stays fresh.
 
 import { fetchUsage } from './oauth.js';
 
@@ -28,7 +22,6 @@ export class Prober {
     if (this.intervalMs > 0) this.reschedule(this.intervalMs);
   }
 
-  /** Change interval at runtime (0 = off). Probes once immediately when on. */
   reschedule(intervalMs) {
     const wasOn = this.intervalMs > 0 && this.timer;
     this.intervalMs = intervalMs;
@@ -36,9 +29,7 @@ export class Prober {
 
     if (intervalMs > 0) {
       this.nextRunAt = Date.now() + intervalMs;
-      // Immediate probe only on an off→on transition — not on every interval
-      // change (mirrors warmer.js; avoids an extra burst when the interval is edited).
-      if (!wasOn) this.probeAll().catch(() => {});
+      if (!wasOn) this.probeAll().catch(() => {}); // off→on only; an interval edit must not burst
       this.timer = setInterval(() => this.probeAll().catch(() => {}), intervalMs);
       this.timer.unref?.();
       this.log(`[Jaynshare] Quota probe enabled (every ${Math.round(intervalMs / 1000)}s)`);
@@ -53,7 +44,6 @@ export class Prober {
     this.nextRunAt = null;
   }
 
-  /** Probe every OAuth account once. Overlapping cycles are skipped. */
   async probeAll() {
     if (this._running) return;
     this._running = true;
@@ -75,7 +65,6 @@ export class Prober {
       await this.am.ensureTokenFresh(account.index);
       let usage = await this._withTimeout(this.probeFn(account.credential));
       if (usage?.status === 401) {
-        // Token rejected: force refresh and retry once.
         await this.am.ensureTokenFresh(account.index, true);
         usage = await this._withTimeout(this.probeFn(account.credential));
       }
