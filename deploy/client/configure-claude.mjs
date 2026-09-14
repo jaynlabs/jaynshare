@@ -22,18 +22,12 @@ function option(argv, name) {
   return value;
 }
 
-// install.sh passes the platform it detected with `node -p process.platform`
-// plus, on Windows, the native path it produced with `cygpath -w`. Keeping both
-// decisions in one place means the settings file can never disagree with where
-// the client was actually installed.
+// On Windows, install.sh passes the native path it produced with `cygpath -w`.
 function clientCommandFor(platform, clientPath) {
   if (platform !== 'win32') return '~/.local/bin/jaynshare';
   if (!clientPath) throw new Error('--client-path is required when --platform is win32');
   if (/["\r\n]/.test(clientPath)) throw new Error('client path contains unsupported characters');
-  // The extensionless helper is not directly executable on Windows, and Claude
-  // Code may run this through either Git Bash or cmd.exe. `node "<path>"` is
-  // parsed identically by both, and JSON.stringify escapes the backslashes.
-  return `node "${clientPath}"`;
+  return `node "${clientPath}"`; // Git Bash and cmd.exe parse this the same way
 }
 
 const argv = process.argv.slice(2);

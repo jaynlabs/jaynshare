@@ -1,9 +1,4 @@
-// A stand-in for the client-facing half of the Jaynshare server.
-//
-// It answers the two endpoints the desktop client calls and nothing else, so
-// installer and launcher tests can run end to end without a real server, a real
-// client credential, or an Anthropic account. It lives outside test/ because
-// node --test would otherwise try to execute it as a test file.
+// The two endpoints the desktop client calls, for installer and launcher tests.
 
 import { createServer } from 'node:http';
 import { realpathSync } from 'node:fs';
@@ -70,8 +65,6 @@ export function startFakeUsageServer({
   });
 }
 
-// CLI mode for the shell-driven install check: write the chosen port where the
-// script can read it, then stay up until it is killed.
 let invoked = false;
 try {
   invoked = !!process.argv[1]

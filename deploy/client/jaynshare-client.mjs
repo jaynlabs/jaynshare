@@ -13,18 +13,13 @@ const RESET = `${ESC}0m`;
 const DIM = `${ESC}2m`;
 const PREFERENCE_PREFIX = 'JAYNSHARE-PREF-v1-';
 
-// JAYNSHARE_PLATFORM lets the installer and the tests drive the Windows code
-// paths from any machine, exactly as install.sh and jaynshare-claude read it. It
-// only chooses between path and terminal conventions; no credential handling
-// depends on it.
+// JAYNSHARE_PLATFORM lets the tests drive the Windows paths from any machine.
 export function clientPlatform(env = process.env) {
   return env.JAYNSHARE_PLATFORM || process.platform;
 }
 
 function clientDir() {
-  // Git Bash exports MSYS spellings such as /c/Users/name/.config, which native
-  // Windows Node cannot open. Windows therefore always resolves enrollment from
-  // os.homedir(), which is exactly where install.sh writes it on that platform.
+  // Native Windows Node cannot open the MSYS spellings Git Bash exports in XDG_CONFIG_HOME.
   if (clientPlatform() === 'win32') return join(homedir(), '.config', 'jaynshare');
   return join(process.env.XDG_CONFIG_HOME || join(homedir(), '.config'), 'jaynshare');
 }
@@ -96,8 +91,7 @@ export async function fetchUsage(config, { sessionId = null, ...options } = {}) 
   let payload;
   try { payload = await fetchJson(config, `/jaynshare/usage${query}`, options); }
   catch (err) {
-    // Old servers treat the query-bearing URL as an operator endpoint. Keep an
-    // automatic launch/status line usable during a server-first rollout.
+    // An older server treats the query-bearing URL as an operator endpoint.
     if (!sessionId || (err.status !== 403 && err.status !== 404)) throw err;
     payload = await fetchJson(config, '/jaynshare/usage', options);
   }
@@ -136,13 +130,7 @@ export function encodeAccountPreference(identity) {
 const color = (enabled, code, value) => enabled ? `${ESC}${code}m${value}${RESET}` : String(value);
 const yellow = (enabled, value) => enabled ? `${YELLOW}${value}${RESET}` : String(value);
 
-// The picker is the one view drawn with a raw byte write to a descriptor rather
-// than through a stream Node knows is a terminal. On Windows that skips the
-// conversion to UTF-16 the console needs, so the console decodes the bytes with
-// its OEM output codepage instead: an up arrow sent as its three UTF-8 bytes
-// arrives as the three CP437 letters that share them. ASCII is the only text
-// every codepage agrees on, so the terminal that writes bytes asks for it. Each
-// replacement keeps its original width, because the rows are padded to columns.
+// The Windows console decodes raw byte writes with its OEM codepage; each ASCII stand-in keeps its width.
 const GLYPHS = {
   unicode: { marker: '›', keys: '↑/↓', separator: '·', ellipsis: '…' },
   ascii: { marker: '>', keys: 'Up/Dn', separator: '-', ellipsis: '~' },
@@ -289,10 +277,7 @@ function openTtyTerminal() {
   catch (err) { closeSync(readFd); throw err; }
   return {
     input: new ReadStream(readFd),
-    // Synchronous writes make the final cursor/screen restoration reach the
-    // terminal before its descriptor is closed, including signal/error exits.
-    output: { write(value) { writeSync(writeFd, value); } },
-    // A POSIX terminal takes the UTF-8 bytes writeSync emits as they are.
+    output: { write(value) { writeSync(writeFd, value); } }, // reaches the terminal before a signal exit closes it
     ascii: false,
     ownsInput: true,
     close() {
@@ -305,11 +290,7 @@ function openTtyTerminal() {
 function openInheritedTerminal({ input = process.stdin, errorFd = 2 } = {}) {
   return {
     input,
-    // stdout carries the encoded account back to the shell launcher, so the
-    // picker draws on stderr instead.
-    output: { write(value) { writeSync(errorFd, value); } },
-    // The Windows console decodes these bytes with its OEM output codepage, not
-    // as UTF-8, and the launcher must not change a codepage it does not own.
+    output: { write(value) { writeSync(errorFd, value); } }, // stdout carries the chosen account
     ascii: true,
     ownsInput: false,
     close() { /* stdin and stderr belong to the caller */ },
@@ -317,17 +298,11 @@ function openInheritedTerminal({ input = process.stdin, errorFd = 2 } = {}) {
 }
 
 export function openPickerTerminal({ platform = clientPlatform() } = {}) {
-  // Native Windows Node cannot open /dev/tty at all. Git Bash hands the process
-  // an inherited console instead, which is enough for both picker modes.
+  // Native Windows Node cannot open /dev/tty.
   return platform === 'win32' ? openInheritedTerminal() : openTtyTerminal();
 }
 
-// Node only defines setRawMode on descriptors it recognizes as a TTY, which is
-// why this asks the descriptor rather than the platform. Which mode a Windows
-// user gets is a property of their Git for Windows build, not of their choice
-// of terminal: mintty used to hand Node an MSYS pipe with no raw mode, and
-// since it began wrapping a ConPTY it hands over a real console instead. Both
-// modes stay supported, and JAYNSHARE_PICKER forces either one.
+// Asks the descriptor, not the platform: a Git for Windows build may hand Node a pipe or a console.
 export function pickerMode(input, { override = process.env.JAYNSHARE_PICKER } = {}) {
   if (override === 'raw' || override === 'line') return override;
   return typeof input?.setRawMode === 'function' ? 'raw' : 'line';
@@ -402,8 +377,6 @@ async function runRawPicker(status, tty, now) {
 
 async function runLinePicker(status, tty, now) {
   const { input, output } = tty;
-  // Nothing switched to the alternate screen or raw mode here, so restoring the
-  // cursor is the only terminal state this mode owns.
   const session = pickerSession(tty, () => output.write(`${ESC}?25h`));
   let buffer = '';
   try {
@@ -419,8 +392,6 @@ async function runLinePicker(status, tty, now) {
       const finish = (callback, value) => { detach(); callback(value); };
       session.arm(err => finish(reject, err));
       const onError = err => finish(reject, err);
-      // An exhausted stream is never an implicit choice: a headless caller has
-      // to pass --account or --auto instead.
       const onEnd = () => finish(reject,
         new PickerCancelled('account selection needs an explicit choice; use --account ACCOUNT or --auto'));
       const onData = chunk => {
@@ -518,8 +489,6 @@ export function titleHook(input) {
   let payload;
   try { payload = JSON.parse(input); } catch { return null; }
   const prompt = String(payload?.prompt || '').replace(/\p{C}/gu, ' ').replace(/\s+/g, ' ').trim();
-  // Slash commands and shell/memory shortcuts are controls, not useful session
-  // previews. Let the next ordinary prompt establish the title instead.
   if (!prompt || /^[\/#]/.test(prompt) || prompt.startsWith('!')) return null;
   const preview = prompt.length > 58 ? `${prompt.slice(0, 57)}…` : prompt;
   return {
@@ -638,9 +607,7 @@ async function main(argv = process.argv.slice(2)) {
     const lineInput = argv.includes('--line') ? parseStatusLineInput(await readOptionalStdin()) : { sessionId: null };
     const status = await fetchUsage(config, { sessionId: lineInput.sessionId });
     if (argv.includes('--json')) process.stdout.write(JSON.stringify(status, null, 2) + '\n');
-    // Claude captures status-line stdout through a pipe, so isTTY is false even
-    // though the bytes are rendered in the terminal. ANSI is intentional here.
-    else if (argv.includes('--line')) process.stdout.write(renderStatusLine(status, { ansi: true }) + '\n');
+    else if (argv.includes('--line')) process.stdout.write(renderStatusLine(status, { ansi: true }) + '\n'); // Claude renders the pipe in the terminal
     else process.stdout.write(renderStatus(status) + '\n');
   } catch (err) {
     if (argv.includes('--line')) {
@@ -651,11 +618,7 @@ async function main(argv = process.argv.slice(2)) {
   }
 }
 
-// Node resolves the module filename before constructing import.meta.url, while
-// argv[1] can retain a symlinked spelling (for example macOS /tmp versus
-// /private/tmp, or a symlinked home directory). Compare canonical paths so an
-// installed executable cannot silently do nothing in that perfectly valid
-// layout.
+// argv[1] may be a symlinked spelling of import.meta.url.
 let invoked = false;
 try {
   invoked = !!process.argv[1]
