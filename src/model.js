@@ -173,7 +173,7 @@ export function parseRequestModel(body) {
 // the top-level `model` field and nests the advisor's model inside the tools
 // array — `tools: [{ type: "advisor_20260301", name: "advisor", model: "…" }]`.
 // The advisor sub-inference runs on the same account and spends that model's
-// quota bucket, so account selection must see it (issue #98).
+// quota bucket, so account selection must see it.
 //
 // Same byte-machine discipline as TopLevelFieldFinder: it walks the container
 // stack and only reads `type`/`model` strings that are DIRECT fields of an

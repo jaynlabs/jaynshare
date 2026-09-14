@@ -7,7 +7,7 @@
 //     (always / on-429 / off).
 // This one is the plain corporate case: the machine cannot open a socket to
 // api.anthropic.com at all, and every outbound connection has to go through an
-// HTTP CONNECT proxy (issue #155). It is not a routing policy — when set, it is
+// HTTP CONNECT proxy. It is not a routing policy — when set, it is
 // simply how this host reaches the internet.
 //
 // Node's global fetch cannot use a CONNECT proxy without undici, and "zero
@@ -106,9 +106,9 @@ export function bypassesProxy(hostname, noProxy) {
  * Where the proxy setting comes from, in precedence order: the config file
  * first (explicit and persistent), then the conventional environment variables.
  *
- * Honouring the environment matters for the reported case — the operator had
- * already set HTTPS_PROXY and reasonably expected it to be used (#155). It is
- * also what every other CLI on that machine does. `config.upstreamProxy: false`
+ * Honouring the environment matters: an operator who has already set
+ * HTTPS_PROXY reasonably expects it to be used, and it is what every other CLI
+ * on that machine does. `config.upstreamProxy: false`
  * opts out entirely, for a host where the variables are set for other tools but
  * must not apply here.
  */
@@ -175,7 +175,7 @@ export function proxyForHost(hostname) {
  * keepAlive is off: createConnection closes over one target, so a pooled socket
  * could not be reused for a different host anyway, and parking it would leak an
  * open proxy connection per request. The upstream path's reason for pooling
- * (#106 — avoiding a single multiplexed h2 connection) still holds, because each
+ * (avoiding a single multiplexed h2 connection) still holds, because each
  * tunnel is its own TCP connection carrying its own HTTP/1.1 exchange.
  */
 export function proxyAgent(proxy, { targetHost, targetPort, tls: useTls = true, tlsOptions = {} }) {

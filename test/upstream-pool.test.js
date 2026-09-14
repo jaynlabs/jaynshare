@@ -11,7 +11,7 @@ async function listen(handler) {
   return { server, port: server.address().port };
 }
 
-// The #106 fix: the default direct path pools HTTP/1.1 connections, so N
+// The default direct path pools HTTP/1.1 connections, so N
 // concurrent requests use N connections and run in PARALLEL — they do not
 // serialize behind one shared connection the way Node global fetch's single
 // HTTP/2 connection does under concurrent uploads.

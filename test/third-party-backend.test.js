@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { AccountManager } from '../src/account-manager.js';
 import { rewriteModel } from '../src/server.js';
 
-// Covers the third-party-backend feature (#74): per-account `upstream`/`modelMap`/
+// Covers the third-party-backend feature: per-account `upstream`/`modelMap`/
 // `models`, model-ownership routing in AccountManager, and the request-body model
 // rewrite in server.js.
 

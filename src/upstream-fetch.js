@@ -21,11 +21,11 @@ import { proxyForHost, proxyAgent } from './upstream-proxy.js';
 // that one connection serializes on HTTP/2's shared flow-control windows —
 // api.anthropic.com advertises maxConcurrentStreams=100 (not the limit) but only
 // a 64KB initial window, so concurrent uploads queue behind WINDOW_UPDATEs and a
-// trivial request can wait minutes for headers (issue #106). Independent HTTP/1.1
+// trivial request can wait minutes for headers. Independent HTTP/1.1
 // connections have no application-layer flow control: each upload fills its own
 // socket at TCP speed, exactly like N direct Claude Code processes. maxSockets is
 // per-origin and bounds the fan-out. Escape hatch:
-// JAYNSHARE_UPSTREAM_GLOBAL_FETCH=1 reverts to the old global-fetch path.
+// JAYNSHARE_UPSTREAM_GLOBAL_FETCH=1 uses Node's global fetch instead.
 const MAX_SOCKETS = Number(process.env.JAYNSHARE_UPSTREAM_MAX_SOCKETS) || 256;
 const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: MAX_SOCKETS });
 const httpAgent = new http.Agent({ keepAlive: true, maxSockets: MAX_SOCKETS });
@@ -102,7 +102,7 @@ export function upstreamFetch(url, opts = {}, sx = null, useProxy = false) {
  * These are not request-forwarding traffic, but they are the calls that decide
  * whether an account can be added or kept alive at all. Leaving them direct
  * would mean `login` fails and every token refresh dies on a host that can only
- * reach the network through a proxy, which is precisely the reported setup.
+ * reach the network through a proxy — the very host this setting exists for.
  */
 export function proxyFetch(url, opts = {}) {
   const { headersTimeoutMs, ...rest } = opts;
@@ -111,12 +111,11 @@ export function proxyFetch(url, opts = {}) {
 }
 
 // Default direct path: HTTP/1.1 over a pooled keep-alive agent, so N concurrent
-// requests use N connections instead of serializing over one h2 connection (#106).
+// requests use N connections instead of serializing over one h2 connection.
 //
 // "Direct" here means "not via sx". A configured upstream proxy (config
 // `upstreamProxy`, or HTTPS_PROXY — see upstream-proxy.js) still applies: on
-// those hosts there is no such thing as a direct socket to api.anthropic.com,
-// which is the whole of issue #155.
+// those hosts there is no such thing as a direct socket to api.anthropic.com.
 function pooledFetch(url, opts, timeoutMs) {
   const u = new URL(url);
   const isHttp = u.protocol === 'http:';

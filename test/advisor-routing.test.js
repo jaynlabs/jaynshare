@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { parseAdvisorModel, AdvisorModelFinder } from '../src/model.js';
 import { AccountManager } from '../src/account-manager.js';
 
-// Claude Code's advisor tool (issue #98): the request keeps the EXECUTOR in the
+// Claude Code's advisor tool: the request keeps the EXECUTOR in the
 // top-level `model` field and nests the advisor's model inside tools[] —
 // `{ type: "advisor_20260301", name: "advisor", model: "claude-fable-5" }`.
 // Account selection must treat such a request as needing BOTH models.

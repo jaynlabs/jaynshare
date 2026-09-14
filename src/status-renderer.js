@@ -14,7 +14,7 @@ export function renderStatus(status, { color = process.stdout.isTTY, now = Date.
   lines.push(paint.bold(paint.yellow('◆ JAYNSHARE status')));
   lines.push(`${paint.dim('Active'.padEnd(12))} ${paint.cyan(status.currentAccount || 'none')}`);
   lines.push(`${paint.dim('Switch at'.padEnd(12))} ${formatPercent(status.switchThreshold)}`);
-  // Only when something is blocked: a always-visible "Blocked" row would be
+  // Only when something is blocked: an always-visible "Blocked" row would be
   // noise for the common case, but its ABSENCE is what made a blocked model
   // read as available — the per-account Models row reports quota headroom and
   // knows nothing about the blocklist.

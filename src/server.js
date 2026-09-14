@@ -608,7 +608,7 @@ export function createProxyRequestListener({ accountManager, upstream, logDir = 
       const reqId = ++requestCounter;
       // Claude Code tags each session's requests with this header (present on
       // /v1/messages and count_tokens). Read from headers up front so it drives
-      // session-aware routing (issue #109) and colors the TUI activity stream.
+      // session-aware routing and colors the TUI activity stream.
       const sessionId = req.headers['x-claude-code-session-id'] || null;
       const sessionKey = sessionId ? `${clientId}\0${sessionId}` : null;
       if (!hideActivity) hooks.onRequestStart?.(reqId, { method: req.method, path: req.url, sessionId, clientId, clientName: principal.clientName, pinned: pinnedIndex != null });
@@ -631,10 +631,10 @@ export function createProxyRequestListener({ accountManager, upstream, logDir = 
       const model = modelFinder.done ? modelFinder.value : parseRequestModel(body);
       // An advisor request (Claude Code's advisor tool) carries a SECOND model
       // nested in tools[]; the advisor sub-inference runs on the selected
-      // account, so selection must be eligible for it too (issue #98).
+      // account, so selection must be eligible for it too.
       const advisorModel = parseAdvisorModel(body);
 
-      // Model blocklist (issue #116): reject a request for a blocked model right
+      // Model blocklist: reject a request for a blocked model right
       // here instead of forwarding it. A model no account can serve (e.g. Fable
       // once it left base plans) otherwise gets rate-limited upstream and hangs
       // the pipeline; a fast, non-retryable 400 lets the client move on. Read
@@ -1045,7 +1045,7 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
   if (sendBody !== body) headers['content-length'] = String(sendBody.length);
 
   // Streaming request log, opened lazily on the first terminal outcome (a
-  // pure-429-then-retry attempt writes no file, matching prior behavior). The
+  // pure-429-then-retry attempt writes no file). The
   // request head+body are written once, just before the response is logged.
   let log = null;
   let reqLogged = false;
@@ -1063,7 +1063,7 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
 
   try {
     // Storm control: pace requests onto a freshly-switched account so a failover
-    // burst doesn't slam it all at once and cascade (issue #84). The slot is held
+    // burst doesn't slam it all at once and cascade. The slot is held
     // only until the response headers arrive — long enough to stagger the burst,
     // then released so streaming bodies don't tie up concurrency. Fail-open: a
     // client that disconnects while waiting just drops out.
@@ -1096,7 +1096,7 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
 
     // Two kinds of 429 are handled differently below: a quota rejection rotates
     // to another account; a transient rate-limit throttle pauses + retries the
-    // same account (never rotates — see #84).
+    // same account (never rotates).
     if (upstreamRes.status === 429) {
       // Clamp Retry-After to a sane window: missing/invalid falls back to 60s,
       // and out-of-range values are bounded to [1, 300]. A negative value would
@@ -1144,7 +1144,7 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
       // This is a rate-limit 429 (per-minute throttle), NOT quota exhaustion —
       // quota rejection is handled above and is the only thing that rotates.
       // Do NOT switch accounts here: moving the burst to the next account just
-      // throttles it too (thundering herd, #84) and discards this account's KV
+      // throttles it too (thundering herd) and discards this account's KV
       // cache. Instead PAUSE this account so concurrent requests wait in admit()
       // (capped, then released through a fresh ramp) instead of piling on, and
       // retry the SAME account. The pause never marks the account throttled, so

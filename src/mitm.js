@@ -146,8 +146,8 @@ export function createConnectHandler({ config, accountManager, ensureLeaf, logDi
     }));
     // Remote Control's real-time channel is a WebSocket (Upgrade handshake),
     // which never fires 'request' — only 'upgrade', with a raw socket instead
-    // of a response object (h1-only; falls back to blind h2 passthrough is not
-    // needed since WS clients negotiate h1 for the handshake).
+    // of a response object. h1-only: WebSocket clients negotiate h1 for the
+    // handshake, so no h2 fallback is needed.
     srv.on('upgrade', (req, socket, head) => relayUpgrade(req, socket, head, upstream, sx));
     srv.on('sessionError', (e) => log(`[Jaynshare] MITM session error: ${e.message}`));
     srv.on('clientError', (e, sock) => { try { sock.destroy(); } catch { /* already gone */ } });

@@ -1,7 +1,7 @@
 // Tracks Claude Code sessions by their `x-claude-code-session-id` header so
 // jaynshare can (a) report how many sessions are running and (b) optionally
 // keep each session pinned to one account while spreading NEW sessions across
-// accounts (the opt-in fix for concurrency funnelling — issue #109).
+// accounts (the opt-in fix for concurrency funnelling).
 //
 // Two windows:
 //   - KNOWN: a session is remembered until it goes idle for this long, then

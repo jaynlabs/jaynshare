@@ -49,7 +49,7 @@ async function runAgainstThrottlingUpstream(retryAfterHeader) {
 
 // Regression: a persistently rate-limited upstream must terminate (bounded
 // retries), not loop forever tying up the client connection. A rate-limit 429
-// does NOT rotate/throttle the account (#84) — it pauses it (so concurrent
+// does NOT rotate/throttle the account — it pauses it (so concurrent
 // requests wait) and retries the same account, then surfaces a 429.
 test('persistent upstream 429 terminates with a bounded number of retries', async () => {
   const { status, upstreamHits, accountStatus, paused } = await runAgainstThrottlingUpstream('1');
@@ -116,7 +116,7 @@ test('long upstream Retry-After is surfaced without sleeping in client request',
 });
 
 // A rate-limit 429 (no quota-rejected status) must NOT rotate to another
-// account — every retry stays on the same one (#84: rotating just moves the
+// account — every retry stays on the same one (rotating just moves the
 // burst and drops the KV cache).
 test('a rate-limit 429 never rotates to another account', async () => {
   const seen = [];
@@ -233,7 +233,7 @@ test('temporarily exhausted fleet waits and retries instead of surfacing synthet
   }
 });
 
-// Regression for #46: a stale/poisoned cached quota (e.g. 0.98 from before a
+// Regression: a stale/poisoned cached quota (e.g. 0.98 from before a
 // plan upgrade, with a reset still in the future) must NOT pin the proxy in a
 // permanent synthetic 429. The next request should probe upstream, succeed, and
 // refresh the cached quota — rather than refusing locally without any call.

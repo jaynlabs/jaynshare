@@ -12,7 +12,7 @@ const SPINNER = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'.split('');
 // The spinner is drawn only alongside in-flight requests, so animating it while
 // the proxy is idle wakes the process twice a second to redraw a frame nobody
 // can tell apart from the last one. On a laptop that is enough to keep the
-// machine from going to sleep (#134), which is a poor trade for animating
+// machine from going to sleep, which is a poor trade for animating
 // nothing. Tick fast only while there is something to animate; otherwise tick
 // slowly, just often enough that elapsed times and quota countdowns stay honest.
 const SPIN_MS = 500;
@@ -1115,7 +1115,7 @@ export class TUI {
     for (let i = 0; i < space && i < this.log.length; i++) {
       lines.push(`   ${gray(this.log[i].t)}  ${this.log[i].msg}`);
     }
-    } // end non-settings body
+    }
 
     // Pad to fill
     while (lines.length < H - footerH) lines.push('');
@@ -1221,7 +1221,7 @@ export class TUI {
         line += ` ${familyMark('fable')}F7  ${bar(q.unified7dFable, bw, q.unified7dFableReset)}`;
       }
     }
-    // Explicit "disabled for these models" tag (issue #85): a family whose own
+    // Explicit "disabled for these models" tag: a family whose own
     // weekly bucket is over the switch threshold can't serve that model even
     // while the account is otherwise active. A spent shared 5h blocks everything
     // and is already conveyed by the Ses bar + status, so it's not repeated here.
@@ -1454,9 +1454,9 @@ export class TUI {
         if (!match) { this._addLog('At least one glob required — cancelled'); this.mode = 'routes'; return; }
         draft.match = match;
         // Accounts, bucket and color are all fixed-choice, so they're pickers
-        // rather than typed fields — no free text, and no giant account-name hint
-        // that used to spill off the footer (issue #130). Only name and glob stay
-        // typed, since those are arbitrary strings.
+        // rather than typed fields — no free text, and no account-name hint long
+        // enough to spill off the footer. Only name and glob stay typed, since
+        // those are arbitrary strings.
         this._pickAccounts(splitCsv(draft.accounts), accts => {
           draft.accounts = accts.join(', ');
           this._pickBucket(draft.bucket, bucket => {

@@ -116,7 +116,7 @@ export class AccountManager {
     this._refreshFn = refreshFn;
     this.accounts = accounts.map((acct, index) => makeAccount(acct, index));
     this.currentIndex = 0;
-    // Session awareness (issue #109). The tracker is always on (passive — it just
+    // Session awareness. The tracker is always on (passive — it just
     // observes the x-claude-code-session-id header for the status readout).
     // `distributeSessions` gates the behavioural change: keep each session on its
     // account for cache reuse, but spread NEW sessions across equal-priority
@@ -132,10 +132,10 @@ export class AccountManager {
     this.setRoutes(routes);
     // Storm control: when rotation switches to a fresh account, a burst of
     // in-flight requests (e.g. dozens of agents failing over together) would all
-    // hit it at once and instantly throttle it — cascading down the fleet
-    // (issue #84). admit() caps concurrent requests to a just-switched account
-    // and ramps the cap up over a short window, so the first few reveal whether
-    // it's also near-exhausted before the whole herd commits.
+    // hit it at once and instantly throttle it — cascading down the fleet.
+    // admit() caps concurrent requests to a just-switched account and ramps the
+    // cap up over a short window, so the first few reveal whether it's also
+    // near-exhausted before the whole herd commits.
     this.ramp = {
       enabled: true,
       startConc: 1,       // concurrent requests allowed at the instant of a switch
@@ -316,7 +316,7 @@ export class AccountManager {
     return allowProbe ? this._selectProbe(exclude, model) : null;
   }
 
-  /** Session-affinity selection (opt-in, issue #109). Honor a known session's
+  /** Session-affinity selection (opt-in). Honor a known session's
    * pin when that account is still eligible and not preempted by a
    * higher-priority one; otherwise route the session to the least-loaded
    * eligible account. Returns null if nothing is eligible, so the caller falls
@@ -576,7 +576,6 @@ export class AccountManager {
     // Manually disabled accounts are skipped entirely until re-enabled.
     if (account.disabled) return false;
 
-    // Check rate limit expiry
     if (account.status === 'throttled' && account.rateLimitedUntil) {
       if (Date.now() < account.rateLimitedUntil) return false;
       account.status = 'active';
@@ -1213,9 +1212,6 @@ export class AccountManager {
     }
   }
 
-  /**
-   * Mark an account as rate-limited for a given duration.
-   */
   markRateLimited(accountIndex, retryAfterSeconds) {
     const account = this.accounts[accountIndex];
     if (!account) return;
@@ -1328,18 +1324,12 @@ export class AccountManager {
     });
   }
 
-  /**
-   * Add a new account at runtime.
-   */
   addAccount(acctData) {
     const index = this.accounts.length;
     this.accounts.push(makeAccount(acctData, index));
     return index;
   }
 
-  /**
-   * Remove an account by index.
-   */
   removeAccount(index) {
     if (index < 0 || index >= this.accounts.length) return;
     this.accounts.splice(index, 1);

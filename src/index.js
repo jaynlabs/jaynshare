@@ -284,12 +284,12 @@ async function resolveServerAccounts(config) {
     process.exit(1);
   }
 
-  // `accounts[].models` (#74) is superseded by the `routes` table (#86). Routes
-  // do the same job with glob matching, several accounts per rule and a bucket
-  // override — and, unlike `models`, they don't silently change eligibility
-  // fleet-wide the moment one account declares a list (see _accountOwnsModel).
-  // Behaviour is unchanged; this only tells pre-#86 configs what to migrate to
-  // before the field goes away. Reported against config.accounts so the notice
+  // `accounts[].models` is superseded by the `routes` table. Routes do the same
+  // job with glob matching, several accounts per rule and a bucket override —
+  // and, unlike `models`, they don't silently change eligibility fleet-wide the
+  // moment one account declares a list (see _accountOwnsModel). Behaviour is
+  // unchanged; this only tells older configs what to migrate to before the
+  // field goes away. Reported against config.accounts so the notice
   // names what is actually written on disk, whatever resolution does with it.
   for (const acct of config.accounts) {
     if (!acct.models?.length) continue;
@@ -717,8 +717,8 @@ async function runCommand() {
   const tcAcct = (process.env.JAYNSHARE_ACCOUNT || '').trim();
   delete env.JAYNSHARE_ACCOUNT;
   // Legacy: a caller-supplied ANTHROPIC_BASE_URL of http://<this proxy>/jaynshare-account/…
-  // also pins (shipped in 1.1.10). JAYNSHARE_ACCOUNT is the supported way now — it works in
-  // MITM mode too, and keeps the pin out of the API path.
+  // also pins. JAYNSHARE_ACCOUNT is the supported way — it works in MITM mode
+  // too, and keeps the pin out of the API path.
   const pinnedBase = isLocalAccountPin(process.env.ANTHROPIC_BASE_URL, port);
   if (await isProxyUp(port)) {
     if (useMitm) {
@@ -751,7 +751,7 @@ async function runCommand() {
       // lets Claude Code stay in subscription mode (full model access).
       // JAYNSHARE_ACCOUNT wins; jaynshare builds the pinned URL itself rather than making
       // the caller hand-write one. Otherwise an existing /jaynshare-account/ base URL
-      // pointing at this proxy is preserved for configs written against 1.1.10.
+      // pointing at this proxy is preserved for configs written against that form.
       if (tcAcct) {
         env.ANTHROPIC_BASE_URL = `http://localhost:${port}/jaynshare-account/${encodePinComponent(tcAcct)}`;
         console.error(`[Jaynshare] Pinned to account "${tcAcct}" (JAYNSHARE_ACCOUNT)`);
@@ -1072,7 +1072,6 @@ async function apiCommand() {
     process.exit(1);
   }
 
-  // Find account to use
   const accountName = argValue('--account');
   const method = (argValue('--method') || 'GET').toUpperCase();
   const data = argValue('--data');
@@ -1786,9 +1785,6 @@ async function upsertOAuthAccount(config, name, creds, source = 'unknown') {
 
 // ── config sync helpers ─────────────────────────────────────
 
-/**
- * Find a config account entry matching an in-memory account by account+org identity.
- */
 function findConfigAccount(diskConfig, account) {
   return diskConfig.accounts.findIndex(a => sameIdentity(a, account));
 }

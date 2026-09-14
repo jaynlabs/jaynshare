@@ -64,7 +64,7 @@ test('renderStatus shows per-model eligibility when a family is metered separate
   const status = sampleStatus();
   // Shared 5h has headroom, general/Opus weekly is fine, but the Fable weekly is
   // spent: Fable should read ✗ (with its reset) while Opus stays ✓ — the
-  // "some accounts are disabled for specific models" view of issue #85.
+  // "some accounts are disabled for specific models" view.
   status.accounts[0].quota = {
     unified5h: 0.2, unified5hReset: now + 60_000,
     unified7d: 0.3, unified7dReset: now + 600_000,

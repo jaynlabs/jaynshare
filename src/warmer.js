@@ -1,4 +1,4 @@
-// Opt-in "keep-warm" scheduler (issue #76).
+// Opt-in "keep-warm" scheduler.
 //
 // DISABLED BY DEFAULT. When enabled (config.warmupSeconds > 0), periodically
 // starts the rolling 5-hour session window on idle accounts, so that when the
@@ -12,7 +12,7 @@
 // per window. To keep that cost minimal we warm an account only when its 5h
 // window is not already running, and we use the cheapest model.
 //
-// Mechanism (chosen in #76): for each eligible idle account we spawn a one-shot,
+// Mechanism: for each eligible idle account we spawn a one-shot,
 // minimal `claude` (`--bare -p`) pointed at THIS proxy with the account pinned
 // via the `/jaynshare-account/<index>` path prefix. Using the real client means the
 // warm-up request is byte-identical to normal Claude Code traffic, routed to

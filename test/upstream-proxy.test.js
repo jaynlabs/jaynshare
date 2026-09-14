@@ -68,8 +68,8 @@ test('config wins over the environment', () => {
   assert.equal(r.proxy.host, 'cfg');
 });
 
-// The reporter had already set HTTPS_PROXY and reasonably expected it to work
-// (#155); every other CLI on that machine honours it.
+// An operator who has already set HTTPS_PROXY reasonably expects it to work;
+// every other CLI on that machine honours it.
 test('the environment is honoured when the config says nothing', () => {
   const r = resolveUpstreamProxy({}, { HTTPS_PROXY: 'http://env:3128' });
   assert.equal(r.source, 'env:HTTPS_PROXY');

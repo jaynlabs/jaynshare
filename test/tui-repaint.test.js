@@ -5,7 +5,7 @@ import { TUI } from '../src/tui.js';
 // The TUI used to repaint the whole screen every 500ms for as long as the proxy
 // ran. The spinner it was animating is drawn only next to in-flight requests, so
 // while idle each tick redrew a frame indistinguishable from the last — enough
-// wake-ups to keep a laptop from sleeping (issue #134).
+// wake-ups to keep a laptop from sleeping.
 //
 // Two properties keep that from coming back: the tick slows down when there is
 // nothing to animate, and an unchanged frame is not written to the terminal at

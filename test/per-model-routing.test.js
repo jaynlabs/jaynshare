@@ -29,7 +29,7 @@ test('weeklyBucketForModel maps each family to the bucket that governs it', () =
   assert.equal(weeklyBucketForModel('deepseek-x'), 'unified7d');
 });
 
-// ── per-model availability (issue #85) ────────────────────────
+// ── per-model availability ──────────────────────────────────
 
 test('a spent Fable weekly bucket bars only Fable — Opus/Sonnet still route there', () => {
   const am = new AccountManager([oauth('a')], 0.98);
@@ -160,7 +160,7 @@ test('a route bucket override governs eligibility for a custom model id', () => 
 });
 
 test('routes with no account list fall back to the legacy per-account models claim', () => {
-  // No route restricts accounts, but account b claims Fable via models[] (PR #74).
+  // No route restricts accounts, but account b claims Fable via models[].
   const am = new AccountManager([oauth('a'), oauth('b', { models: ['claude-fable-5'] })], 0.98);
   assert.equal(am._isAvailable(am.accounts[0], FABLE), false, 'a not an owner');
   assert.equal(am._isAvailable(am.accounts[1], FABLE), true, 'b owns Fable');
