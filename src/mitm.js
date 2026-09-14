@@ -1,7 +1,5 @@
-// MITM forward proxy: a CONNECT to the upstream host is terminated with a
-// locally-minted leaf and each request goes through the same buffering,
-// retrying listener as the base proxy. The test host is answered locally;
-// any other host is blind-tunneled.
+// MITM forward proxy: CONNECT to the upstream host is terminated with a
+// locally-minted leaf; the test host is answered locally; anything else is blind-tunneled.
 
 import { readFile, writeFile, mkdir, rename } from 'node:fs/promises';
 import { X509Certificate } from 'node:crypto';

@@ -1,7 +1,5 @@
-// Removes tool_use / tool_result blocks whose counterpart is not in the
-// adjacent message: upstream rejects those with a non-retryable 400 after a
-// client compacts or interrupts a turn. Only ever removes; a valid body comes
-// back as the same Buffer.
+// Removes tool_use / tool_result blocks whose counterpart is not in the adjacent
+// message (upstream 400s on those). A valid body comes back as the same Buffer.
 
 const MESSAGES_PATH = '/v1/messages';
 

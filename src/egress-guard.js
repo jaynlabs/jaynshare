@@ -1,6 +1,5 @@
-// Egress pinning (opt-in): hold requests while the exit IP is not the pinned one,
-// so a dropped VPN never sends from the wrong address (upstream 403s, and Claude
-// Code reads that as a dead session).
+// Opt-in egress pinning: hold requests while the exit IP is not the pinned one,
+// so a dropped VPN never sends from the wrong address.
 
 const DEFAULT_CHECK_URL = 'https://api.ipify.org';
 const DEFAULT_TTL_MS = 30_000;

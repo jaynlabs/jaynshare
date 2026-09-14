@@ -287,10 +287,8 @@ async function readControlBody(req, limit = 64 * 1024) {
   return Buffer.concat(chunks).toString('utf8');
 }
 
-/**
- * Accepts, first match wins: `accountUuid/orgUuid`, `accountUuid`, `orgUuid`,
- * display name, bare email. Never the rotation index: it shifts on delete.
- */
+// First match wins: `accountUuid/orgUuid`, `accountUuid`, `orgUuid`, display
+// name, bare email. Never the rotation index: it shifts on delete.
 export function resolveAccountPin(accountManager, token) {
   const accounts = accountManager.accounts || [];
   const norm = (s) => (s || '').trim().toLowerCase();

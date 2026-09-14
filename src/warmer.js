@@ -1,6 +1,5 @@
-// Opt-in (config.warmupSeconds) keep-warm: spawns a minimal `claude` pinned to
-// each idle account so its 5-hour window is already running when rotation
-// reaches it. Spends a little quota, hence opt-in.
+// Opt-in (config.warmupSeconds): spawns a minimal `claude` pinned to each idle
+// account so its 5-hour window is already running when rotation reaches it.
 
 import { spawn } from 'node:child_process';
 import { encodePinComponent } from './claude-env.js';

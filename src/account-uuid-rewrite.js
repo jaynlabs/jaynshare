@@ -1,6 +1,5 @@
-// Streaming rewrite of the `account_uuid` inside `metadata.user_id` (a JSON
-// string within the JSON body) to the account whose token is injected. Same
-// length in, same length out; nothing else in the body is touched.
+// Streaming rewrite of the `account_uuid` in `metadata.user_id` to the injected
+// account's; same length in, same length out.
 
 // `account_uuid":"` as it appears escaped inside the user_id string.
 const PREFIX = Buffer.from('account_uuid\\":\\"', 'latin1');

@@ -150,11 +150,8 @@ export class AccountManager {
     if (this.ramp.enabled) account.rampStartedAt = account.pausedUntil; // release the backlog through a ramp
   }
 
-  /**
-   * The best available account, or null when every account is exhausted. The
-   * advisor sub-inference runs on the same account, so `advisorModel` must be
-   * eligible too; when nothing satisfies both, routing degrades to `model` alone.
-   */
+  // Null when every account is exhausted. The advisor runs on the same account, so
+  // `advisorModel` must be eligible too; failing both, `model` alone decides.
   getActiveAccount(exclude = null, model = null, advisorModel = null, sessionId = null, preferredIndex = null) {
     this.refreshExpiredQuotas();
     // Preference beats current/priority order but not availability or route rules.

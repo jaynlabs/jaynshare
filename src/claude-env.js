@@ -3,9 +3,8 @@ export function encodePinComponent(s) {
   return encodeURIComponent(s).replace(/[!'()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
 }
 
-// The shell `export` lines for `eval "$(jaynshare env)"`: the same environment
-// `jaynshare run` gives claude. No ANTHROPIC_API_KEY — it would drop Claude Code
-// out of subscription mode.
+// The `export` lines for `eval "$(jaynshare env)"`. No ANTHROPIC_API_KEY: it
+// would drop Claude Code out of subscription mode.
 export function buildClaudeEnvLines({ port, useMitm = true, caPath = null, holdSeconds = 0, account = null, proxyApiKey = '' }) {
   const lines = [];
   const pin = (account || '').trim();

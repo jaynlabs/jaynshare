@@ -1,6 +1,5 @@
-// Corporate HTTP CONNECT proxy for all outbound traffic (config `upstreamProxy`
-// or HTTPS_PROXY). Not `config.proxy` (the inbound server) nor `config.sx` (a
-// routing policy); when sx routes an attempt, it wins over this.
+// Corporate HTTP CONNECT proxy for outbound traffic (config `upstreamProxy` or
+// HTTPS_PROXY); when sx routes an attempt, sx wins.
 
 import http from 'node:http';
 import https from 'node:https';
