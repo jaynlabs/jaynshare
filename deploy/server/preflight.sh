@@ -15,7 +15,7 @@ if [ "$(uname -s 2>/dev/null)" = Linux ]; then ok 'Linux host'; else fail 'serve
 
 if command -v node >/dev/null 2>&1; then
   node_major=$(node -e 'process.stdout.write(process.versions.node.split(".")[0])' 2>/dev/null || printf 0)
-  if [ "$node_major" -ge 20 ]; then ok "Node.js $(node --version)"; else fail 'Node.js 20+ is required'; fi
+  if [ "$node_major" -ge 26 ]; then ok "Node.js $(node --version)"; else fail 'Node.js 26+ is required'; fi
 else
   fail 'Node.js is missing'
 fi

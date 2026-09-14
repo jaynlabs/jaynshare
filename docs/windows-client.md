@@ -5,7 +5,7 @@ use are in the [onboarding guide](../README.md#4-windows-1011-desktop);
 this is the reference for anyone changing `deploy/client/`.
 
 The supported environment is Git for Windows Bash on Windows 10/11, x64 or
-ARM64, against the native Windows builds of Node 20+ and Claude Code. WSL,
+ARM64, against the native Windows builds of Node 26+ and Claude Code. WSL,
 containers, PowerShell and CMD are out of scope. Nothing needs Administrator
 rights.
 
@@ -131,13 +131,13 @@ re-install rather than an upgrade.
 
 `npm test` covers the Windows code paths on any platform by driving the shipped
 scripts with `JAYNSHARE_PLATFORM=win32` and stub `cygpath`, `icacls`, and
-`whoami.exe` executables (`test/windows-client.test.js`).
+`whoami.exe` executables (`test/windows-client.test.ts`).
 
 `test-support/client-install-check.sh` is the end-to-end check: it installs
 into a throwaway profile, exercises the launcher and both picker modes through
 pipes, and asserts the access rules. On macOS it runs with the stubs; the
 `windows-client` CI job runs it on `windows-latest` under `shell: bash` against
-the real tools on Node 20, 22 and 24. It is the only suite that runs on native
+the real tools on Node 26. It is the only suite that runs on native
 Windows: the Node suite spawns `/bin/sh` in many places and asserts POSIX mode
 bits.
 

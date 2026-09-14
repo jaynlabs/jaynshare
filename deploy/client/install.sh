@@ -11,10 +11,10 @@ die() { printf '%s\n' "jaynshare install: $*" >&2; exit 1; }
 umask 077
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 
-command -v node >/dev/null 2>&1 || die 'Node.js 20 or newer is required'
+command -v node >/dev/null 2>&1 || die 'Node.js 26 or newer is required'
 node_major=$(node -e 'process.stdout.write(process.versions.node.split(".")[0])' | tr -d '\r')
 case "$node_major" in ''|*[!0-9]*) die 'could not read the Node.js version' ;; esac
-[ "$node_major" -ge 20 ] || die 'Node.js 20 or newer is required'
+[ "$node_major" -ge 26 ] || die 'Node.js 26 or newer is required'
 
 # Node, not uname: it is what interprets the paths. JAYNSHARE_PLATFORM is for the tests.
 platform=${JAYNSHARE_PLATFORM:-$(node -p 'process.platform' | tr -d '\r')}
@@ -22,7 +22,7 @@ platform=${JAYNSHARE_PLATFORM:-$(node -p 'process.platform' | tr -d '\r')}
 case "$(uname -s 2>/dev/null || printf 'unknown')" in
   MINGW*|MSYS*|CYGWIN*)
     [ "$platform" = win32 ] || die "this shell runs on Windows but node reports \"$platform\";
-install the Windows build of Node.js 20+ and rerun this from Git Bash" ;;
+install the Windows build of Node.js 26+ and rerun this from Git Bash" ;;
 esac
 
 if [ "$platform" = win32 ]; then

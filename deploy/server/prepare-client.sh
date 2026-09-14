@@ -18,9 +18,9 @@ case "$client_id" in *[!a-z0-9_-]*|'') die 'client ID must use lowercase letters
 [ -n "$display_name" ] || die 'display name must not be empty'
 case "$proxy_host" in *[!A-Za-z0-9.-]*|'') die 'Tailscale host must be a DNS name or IPv4 address' ;; esac
 
-command -v node >/dev/null 2>&1 || die 'Node.js 20+ is required'
+command -v node >/dev/null 2>&1 || die 'Node.js 26+ is required'
 node_major=$(node -e 'process.stdout.write(process.versions.node.split(".")[0])')
-[ "$node_major" -ge 20 ] || die 'Node.js 20+ is required'
+[ "$node_major" -ge 26 ] || die 'Node.js 26+ is required'
 command -v tar >/dev/null 2>&1 || die 'tar is required'
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
@@ -79,7 +79,7 @@ tar -C "$work_dir" -czf "$archive_path" "jaynshare-$client_id"
 chmod 600 "$archive_path"
 
 # Last, so a packaging failure leaves no client record.
-if ! JAYNSHARE_CONFIG="$config_path" node "$repo_dir/src/index.js" client add "$client_id" --name "$display_name" > "$secret_path"; then
+if ! JAYNSHARE_CONFIG="$config_path" node "$repo_dir/src/index.ts" client add "$client_id" --name "$display_name" > "$secret_path"; then
   rm -f -- "$archive_path" "$secret_path"
   die 'could not register client (does that ID already exist?)'
 fi

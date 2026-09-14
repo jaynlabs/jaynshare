@@ -14,7 +14,7 @@ contributing to it should be correspondingly simple.
 
 ## Setting up
 
-Node.js 20 or newer. There are no runtime dependencies; `npm install` fetches
+Node.js 26 or newer. There are no runtime dependencies; `npm install` fetches
 ESLint and nothing else.
 
 ```sh
@@ -37,7 +37,7 @@ Nix users can also run `nix flake check` and `nix run .#jaynshare -- help`.
 
 ## What CI requires
 
-`.github/workflows/ci.yml` runs the Node suite on Node 20, 22 and 24, ESLint on
+`.github/workflows/ci.yml` runs the Node suite on Node 26, ESLint on
 24, the client install check on `windows-latest`, and the Nix flake check. The
 aggregate `test` job is the single required status. Please make sure the suite
 and lint pass locally before opening a pull request.

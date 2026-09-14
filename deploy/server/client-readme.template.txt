@@ -27,7 +27,7 @@ and it never needs Administrator rights.
 
 1. Install Git for Windows if you do not already have it, which provides the
    "Git Bash" terminal.
-2. Make sure Node.js 20+ and Claude Code are the native Windows builds, and that
+2. Make sure Node.js 26+ and Claude Code are the native Windows builds, and that
    `node --version` and `claude --version` both work inside Git Bash.
 3. Right-click this folder and choose "Open Git Bash here", then run:
 

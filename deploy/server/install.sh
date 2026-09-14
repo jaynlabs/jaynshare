@@ -5,9 +5,9 @@ die() { printf '%s\n' "jaynshare install: $*" >&2; exit 1; }
 
 [ "$(uname -s)" = Linux ] || die 'the server package supports Linux only'
 [ "$(id -un)" = jaynshare ] || die 'run this script as the dedicated jaynshare user'
-command -v node >/dev/null 2>&1 || die 'Node.js 20+ must already be installed'
+command -v node >/dev/null 2>&1 || die 'Node.js 26+ must already be installed'
 node_major=$(node -e 'process.stdout.write(process.versions.node.split(".")[0])')
-[ "$node_major" -ge 20 ] || die 'Node.js 20+ is required'
+[ "$node_major" -ge 26 ] || die 'Node.js 26+ is required'
 command -v systemctl >/dev/null 2>&1 || die 'systemd is required'
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
@@ -29,7 +29,7 @@ chmod 700 "$HOME/.config" "$HOME/.local/state/jaynshare" 2>/dev/null || true
 chmod 600 "$config_path"
 
 JAYNSHARE_CONFIG=$config_path JAYNSHARE_DISABLE_AUTOUPDATE=1 \
-  node "$repo_dir/src/index.js" service install --config "$config_path"
+  node "$repo_dir/src/index.ts" service install --config "$config_path"
 
 printf '%s\n' 'Installed the pinned local checkout.'
 printf '%s\n' 'An administrator must run: loginctl enable-linger jaynshare'

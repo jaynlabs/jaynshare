@@ -1,0 +1,324 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import http2 from 'node:http2';
+import http from 'node:http';
+import net from 'node:net';
+import tls from 'node:tls';
+import { once } from 'node:events';
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { generateCertChain } from '../src/x509.ts';
+import { createConnectHandler } from '../src/mitm.ts';
+import { AccountManager } from '../src/account-manager.ts';
+import type { Config } from '../src/types.ts';
+
+// A real CONNECT + TLS client against the terminating MITM, with a plain-HTTP fake upstream.
+
+function listen(server: any): Promise<number> { return new Promise(r => server.listen(0, '127.0.0.1', () => r((server.address() as { port: number }).port))); }
+const T = { timeout: 30000 };
+
+function closeHard(server) {
+  if (!server) return;
+  server.closeAllConnections?.();
+  try { server.close(); } catch { /* already closing */ }
+}
+
+function connectThroughProxy(proxyPort: number, target: string, caCertPem: string, alpn: string[]): Promise<tls.TLSSocket> {
+  return new Promise((resolve, reject) => {
+    const raw = net.connect(proxyPort, '127.0.0.1');
+    raw.once('error', reject);
+    raw.once('connect', () => raw.write(`CONNECT ${target} HTTP/1.1\r\nHost: ${target}\r\n\r\n`));
+    let buf = Buffer.alloc(0);
+    const onData = (d: Buffer) => {
+      buf = Buffer.concat([buf, d]);
+      if (buf.includes('\r\n\r\n')) {
+        raw.removeListener('data', onData);
+        const sock = tls.connect(
+          { socket: raw, servername: 'localhost', ca: [caCertPem], ALPNProtocols: alpn },
+          () => resolve(sock),
+        );
+        sock.once('error', reject);
+      }
+    };
+    raw.on('data', onData);
+  });
+}
+
+const ACCOUNT_UUID = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+
+// Request logs stream to disk asynchronously; poll for the content instead of sleeping.
+async function waitForLog(dir, pattern, what) {
+  const deadline = Date.now() + 5000;
+  for (;;) {
+    const file = readdirSync(dir).find(f => f.endsWith('.log'));
+    if (file) {
+      const content = readFileSync(join(dir, file), 'utf8');
+      if (pattern.test(content)) return content;
+    }
+    if (Date.now() > deadline) assert.fail(`timed out waiting for ${what}`);
+    await new Promise(r => setTimeout(r, 5));
+  }
+}
+
+// `handler(req, body) -> { status, headers, body }`
+function makeUpstream(handler: (req: http.IncomingMessage, body: string) => any) {
+  return http.createServer((req, res) => {
+    const chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => {
+      const out = handler(req, Buffer.concat(chunks).toString('utf8')) || {};
+      res.writeHead(out.status || 200, out.headers || {});
+      res.end(out.body ?? '');
+    });
+  });
+}
+
+function makeProxy(am: any, upPort: number, { leafCertPem, leafKeyPem }: any, { logDir = null, hooks = {}, sx = null }: any = {}) {
+  const proxy = http.createServer();
+  proxy.on('connect', createConnectHandler({
+    // upstream host is 127.0.0.1 so a `CONNECT 127.0.0.1:<port>` is 'rewrite' mode.
+    config: { upstream: `http://127.0.0.1:${upPort}`, proxy: {}, accounts: [] } as Config,
+    accountManager: am,
+    ensureLeaf: async () => ({ key: leafKeyPem, cert: leafCertPem }),
+    logDir, hooks, log: () => {}, sx,
+  }));
+  return proxy;
+}
+
+function oauthAccount(name, token, extra = {}) {
+  return { name, type: 'oauth', accessToken: token, refreshToken: 'r', expiresAt: Date.now() + 3600_000, ...extra };
+}
+
+test('MITM h2: authorization injected, x-api-key dropped, quota observed, body relayed', T, async () => {
+  const { caCertPem, leafCertPem, leafKeyPem } = generateCertChain(['localhost']);
+  const upstream = makeUpstream((req, _body) => ({
+    status: 200,
+    headers: {
+      'x-saw-auth': req.headers['authorization'] || 'none',
+      'x-saw-xkey': req.headers['x-api-key'] || 'none',
+      'x-saw-ct': req.headers['content-type'] || 'none',
+      'anthropic-ratelimit-unified-5h-utilization': '0.7',
+      'content-type': 'text/plain',
+    },
+    body: 'upstream-ok',
+  }));
+  const upPort = await listen(upstream);
+
+  const am = new AccountManager([oauthAccount('acct@x', 'REAL-TOKEN', { accountUuid: ACCOUNT_UUID })], 0.98);
+  const proxy = makeProxy(am, upPort, { caCertPem, leafCertPem, leafKeyPem });
+  const proxyPort = await listen(proxy);
+
+  const tlsSock = await connectThroughProxy(proxyPort, `127.0.0.1:${upPort}`, caCertPem, ['h2', 'http/1.1']);
+  try {
+    assert.equal(tlsSock.alpnProtocol, 'h2');
+    const client = http2.connect('https://localhost', { createConnection: () => tlsSock } as any);
+    const req = client.request({
+      ':method': 'POST', ':path': '/v1/messages',
+      authorization: 'Bearer FAKE', 'x-api-key': 'sk-fake', 'content-type': 'application/json',
+    });
+    let resp, body = '';
+    req.on('response', (h) => { resp = h; });
+    req.setEncoding('utf8'); req.on('data', (d) => { body += d; }); req.end('{"model":"x"}');
+    await once(req, 'close');
+
+    assert.equal(resp['x-saw-auth'], 'Bearer REAL-TOKEN'); // injected
+    assert.equal(resp['x-saw-xkey'], 'none');              // dropped
+    assert.equal(resp['x-saw-ct'], 'application/json');    // preserved
+    assert.equal(body, 'upstream-ok');
+    assert.equal(am.accounts[0].quota.unified5h, 0.7);     // quota observed
+    client.close();
+  } finally {
+    tlsSock.destroy(); closeHard(proxy); closeHard(upstream);
+  }
+});
+
+test('MITM h1: over http/1.1, authorization is injected and the body relayed', T, async () => {
+  const { caCertPem, leafCertPem, leafKeyPem } = generateCertChain(['localhost']);
+  const upstream = makeUpstream((req, body) => ({
+    status: 200,
+    headers: { 'x-saw-auth': req.headers['authorization'] || 'none', 'content-type': 'text/plain' },
+    body: `echo:${body}`,
+  }));
+  const upPort = await listen(upstream);
+
+  const am = new AccountManager([oauthAccount('acct@x', 'REAL-TOKEN')], 0.98);
+  const proxy = makeProxy(am, upPort, { caCertPem, leafCertPem, leafKeyPem });
+  const proxyPort = await listen(proxy);
+
+  const tlsSock = await connectThroughProxy(proxyPort, `127.0.0.1:${upPort}`, caCertPem, ['http/1.1']);
+  try {
+    assert.equal(tlsSock.alpnProtocol, 'http/1.1');
+    const resp = await new Promise<any>((resolve, reject) => {
+      const r = http.request({ createConnection: () => tlsSock, method: 'POST', path: '/v1/messages',
+        headers: { authorization: 'Bearer FAKE', 'x-api-key': 'sk', 'content-type': 'application/json' } }, (res) => {
+        let b = ''; res.setEncoding('utf8'); res.on('data', (d) => b += d); res.on('end', () => resolve({ res, b }));
+      });
+      r.on('error', reject);
+      r.end('{"model":"y"}');
+    });
+    assert.equal(resp.res.headers['x-saw-auth'], 'Bearer REAL-TOKEN');
+    assert.equal(resp.b, 'echo:{"model":"y"}');
+  } finally {
+    tlsSock.destroy(); closeHard(proxy); closeHard(upstream);
+  }
+});
+
+test('MITM h2: body account_uuid is rewritten to the injected account', T, async () => {
+  const { caCertPem, leafCertPem, leafKeyPem } = generateCertChain(['localhost']);
+  const upstream = makeUpstream((_req, body) => {
+    let seen = 'none';
+    try { seen = JSON.parse(JSON.parse(body).metadata.user_id).account_uuid; } catch { /* ignore */ }
+    return { status: 200, headers: { 'x-saw-uuid': seen, 'content-type': 'text/plain' }, body: 'ok' };
+  });
+  const upPort = await listen(upstream);
+
+  const am = new AccountManager([oauthAccount('acct@x', 'REAL-TOKEN', { accountUuid: ACCOUNT_UUID })], 0.98);
+  const proxy = makeProxy(am, upPort, { caCertPem, leafCertPem, leafKeyPem });
+  const proxyPort = await listen(proxy);
+
+  const tlsSock = await connectThroughProxy(proxyPort, `127.0.0.1:${upPort}`, caCertPem, ['h2', 'http/1.1']);
+  try {
+    const client = http2.connect('https://localhost', { createConnection: () => tlsSock } as any);
+    const reqBody = JSON.stringify({ model: 'x', metadata: { user_id: JSON.stringify({ account_uuid: '11111111-2222-3333-4444-555555555555' }) } });
+    const req = client.request({ ':method': 'POST', ':path': '/v1/messages', authorization: 'Bearer FAKE', 'content-type': 'application/json' });
+    let resp; req.on('response', (h) => { resp = h; }); req.resume(); req.end(reqBody);
+    await once(req, 'close');
+    assert.equal(resp['x-saw-uuid'], ACCOUNT_UUID); // rewritten to the injected account
+    client.close();
+  } finally {
+    tlsSock.destroy(); closeHard(proxy); closeHard(upstream);
+  }
+});
+
+test('MITM h2: a quota-429 on one account is transparently retried on another', T, async () => {
+  const { caCertPem, leafCertPem, leafKeyPem } = generateCertChain(['localhost']);
+  const hits = [];
+  const upstream = makeUpstream((req) => {
+    const auth = req.headers['authorization'];
+    hits.push(auth);
+    if (auth === 'Bearer TOK-A') {
+      // Durable quota rejection → the proxy must switch accounts, not surface this.
+      return { status: 429, headers: {
+        'anthropic-ratelimit-unified-status': 'rejected',
+        'anthropic-ratelimit-unified-7d-status': 'rejected',
+        'anthropic-ratelimit-unified-7d-utilization': '1.0',
+        'anthropic-ratelimit-unified-7d-reset': String(Math.floor(Date.now() / 1000) + 3600),
+        'retry-after': '3600', 'content-type': 'application/json',
+      }, body: '{"type":"error","error":{"type":"rate_limit_error"}}' };
+    }
+    return { status: 200, headers: { 'x-served-by': auth, 'content-type': 'text/plain' }, body: 'served-by-B' };
+  });
+  const upPort = await listen(upstream);
+
+  const am = new AccountManager([oauthAccount('A', 'TOK-A'), oauthAccount('B', 'TOK-B')], 0.98);
+  const proxy = makeProxy(am, upPort, { caCertPem, leafCertPem, leafKeyPem });
+  const proxyPort = await listen(proxy);
+
+  const tlsSock = await connectThroughProxy(proxyPort, `127.0.0.1:${upPort}`, caCertPem, ['h2', 'http/1.1']);
+  try {
+    const client = http2.connect('https://localhost', { createConnection: () => tlsSock } as any);
+    const req = client.request({ ':method': 'POST', ':path': '/v1/messages', authorization: 'Bearer FAKE', 'content-type': 'application/json' });
+    let resp, body = ''; req.on('response', (h) => { resp = h; });
+    req.setEncoding('utf8'); req.on('data', (d) => body += d); req.end('{"model":"x"}');
+    await once(req, 'close');
+
+    assert.equal(resp[':status'], 200, 'client sees a 200, not the 429');
+    assert.equal(body, 'served-by-B');
+    assert.deepEqual(hits, ['Bearer TOK-A', 'Bearer TOK-B'], 'tried A, then retried on B');
+    assert.equal(am.accounts[0].status, 'throttled', 'account A held after its quota rejection');
+    client.close();
+  } finally {
+    tlsSock.destroy(); closeHard(proxy); closeHard(upstream);
+  }
+});
+
+test('MITM h2: relayed requests fire the TUI activity hooks with the injected account', T, async () => {
+  const { caCertPem, leafCertPem, leafKeyPem } = generateCertChain(['localhost']);
+  const upstream = makeUpstream(() => ({ status: 201, headers: { 'content-type': 'text/plain' }, body: 'ok' }));
+  const upPort = await listen(upstream);
+
+  const events = [];
+  const hooks = {
+    onRequestStart: (id, info) => events.push({ ev: 'start', id, ...info }),
+    onRequestRouted: (id, info) => events.push({ ev: 'routed', id, ...info }),
+    onRequestEnd: (id, info) => events.push({ ev: 'end', id, ...info }),
+  };
+  const am = new AccountManager([oauthAccount('acct@x', 'REAL-TOKEN')], 0.98);
+  const proxy = makeProxy(am, upPort, { caCertPem, leafCertPem, leafKeyPem }, { hooks });
+  const proxyPort = await listen(proxy);
+
+  const tlsSock = await connectThroughProxy(proxyPort, `127.0.0.1:${upPort}`, caCertPem, ['h2', 'http/1.1']);
+  try {
+    const client = http2.connect('https://localhost', { createConnection: () => tlsSock } as any);
+    const req = client.request({ ':method': 'POST', ':path': '/v1/messages', authorization: 'Bearer FAKE', 'content-type': 'application/json' });
+    req.resume(); req.end('{"model":"x"}');
+    await once(req, 'close');
+    client.close();
+
+    const start = events.find((e: any) => e.ev === 'start');
+    const routed = events.find((e: any) => e.ev === 'routed');
+    const end = events.find((e: any) => e.ev === 'end');
+    assert.ok(start && start.method === 'POST' && start.path === '/v1/messages');
+    assert.equal(routed?.account, 'acct@x');
+    assert.ok(end && end.id === start.id);
+    assert.equal(String(end.status), '201');
+    assert.equal(end.model, 'x'); // the requested model is reported for the query log
+  } finally {
+    tlsSock.destroy(); closeHard(proxy); closeHard(upstream);
+  }
+});
+
+test('MITM logs proxied requests when a log dir is set', T, async () => {
+  const { caCertPem, leafCertPem, leafKeyPem } = generateCertChain(['localhost']);
+  const upstream = makeUpstream(() => ({ status: 200, headers: { 'content-type': 'application/json' }, body: '{"ok":true}' }));
+  const upPort = await listen(upstream);
+
+  const logDir = mkdtempSync(join(tmpdir(), 'tc-mitm-log-'));
+  const am = new AccountManager([oauthAccount('acct@x', 'REAL-TOKEN')], 0.98);
+  const proxy = makeProxy(am, upPort, { caCertPem, leafCertPem, leafKeyPem }, { logDir });
+  const proxyPort = await listen(proxy);
+
+  const tlsSock = await connectThroughProxy(proxyPort, `127.0.0.1:${upPort}`, caCertPem, ['h2', 'http/1.1']);
+  try {
+    const client = http2.connect('https://localhost', { createConnection: () => tlsSock } as any);
+    const req = client.request({ ':method': 'POST', ':path': '/v1/messages', authorization: 'Bearer FAKE', 'content-type': 'application/json' });
+    req.resume(); req.end('{"model":"x"}');
+    await once(req, 'close');
+    client.close();
+
+    // Wait for the async log stream to flush its final marker.
+    const contents = await waitForLog(logDir, /RESPONSE 200/, 'the request log to be written');
+    assert.match(contents, /RESPONSE 200/);
+  } finally {
+    tlsSock.destroy(); closeHard(proxy); closeHard(upstream);
+    rmSync(logDir, { recursive: true, force: true });
+  }
+});
+
+test('tunnel: upstream connect failure returns 502, not a silent drop', T, async () => {
+  const { caCertPem, leafCertPem, leafKeyPem } = generateCertChain(['localhost']);
+  // Grab a port, then free it so a connect there is refused deterministically.
+  const dead = http.createServer();
+  const deadPort = await listen(dead);
+  await new Promise((r) => dead.close(r));
+
+  // config.upstream host is 127.0.0.1, so `CONNECT localhost:<port>` is tunnel mode.
+  const am = new AccountManager([oauthAccount('acct@x', 'T')], 0.98);
+  const proxy = makeProxy(am, 65500, { caCertPem, leafCertPem, leafKeyPem });
+  const proxyPort = await listen(proxy);
+
+  try {
+    const status = await new Promise<string>((resolve, reject) => {
+      const raw = net.connect(proxyPort, '127.0.0.1');
+      raw.once('error', reject);
+      raw.once('connect', () => raw.write(`CONNECT localhost:${deadPort} HTTP/1.1\r\nHost: localhost:${deadPort}\r\n\r\n`));
+      let buf = '';
+      raw.on('data', (d) => { buf += d.toString('latin1'); if (buf.includes('\r\n\r\n')) resolve(buf.split('\r\n')[0]); });
+      raw.on('close', () => { if (!buf) reject(new Error('socket closed with no CONNECT response')); });
+    });
+    assert.match(status, /^HTTP\/1\.1 502/, `expected a 502 status line, got: ${status}`);
+  } finally {
+    closeHard(proxy);
+  }
+});

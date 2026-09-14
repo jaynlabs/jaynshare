@@ -4,7 +4,7 @@ set -eu
 [ "$(id -un)" = jaynshare ] || { printf '%s\n' 'run as the jaynshare user' >&2; exit 1; }
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_dir=$(CDPATH= cd -- "$script_dir/../.." && pwd)
-node "$repo_dir/src/index.js" service uninstall
+node "$repo_dir/src/index.ts" service uninstall
 
 if [ "${1:-}" = --purge-state ]; then
   state_dir="$HOME/.local/state/jaynshare"

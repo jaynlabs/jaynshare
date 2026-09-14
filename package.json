@@ -3,16 +3,16 @@
   "version": "1.0.0",
   "description": "Self-hosted Claude subscription pool: quota-aware routing across multiple Claude accounts",
   "type": "module",
-  "main": "src/index.js",
+  "main": "src/index.ts",
   "bin": {
-    "jaynshare": "src/index.js"
+    "jaynshare": "src/index.ts"
   },
   "files": [
     "src/",
     "NOTICE.md"
   ],
   "scripts": {
-    "start": "node src/index.js",
+    "start": "node src/index.ts",
     "test": "node --test --test-timeout=120000",
     "lint": "eslint ."
   },
@@ -33,9 +33,12 @@
   },
   "homepage": "https://github.com/jaynlabs/jaynshare#readme",
   "engines": {
-    "node": ">=20.0.0"
+    "node": ">=26.0.0"
   },
   "devDependencies": {
-    "eslint": "^9.0.0"
+    "@types/node": "^26.5.1",
+    "eslint": "^9.0.0",
+    "tsx": "^4.23.13",
+    "typescript": "^7.0.2"
   }
 }

@@ -6,7 +6,7 @@ whichever account has quota. Every engineer keeps Claude Code, repositories,
 transcripts and credentials on their own machine — macOS or Windows — and
 reaches the host over a private network.
 
-Node.js 20+, no runtime dependencies.
+Node.js 26+, no runtime dependencies.
 
 This file is the onboarding guide. It contains every command, in order, for
 each role. Everything else in the repository is reference.
@@ -34,13 +34,13 @@ The server is one process on one Linux host, run by an unprivileged
 It installs from this checkout: no npm, no curl, no updater.
 
 Every command in this section runs **as the `jaynshare` user, from the root of
-the checkout** (for example `/home/jaynshare/app`). `node src/index.js` is the
+the checkout** (for example `/home/jaynshare/app`). `node src/index.ts` is the
 CLI; the docs call it `jaynshare` for short.
 
 ### 1.1 Prerequisites
 
 - Linux with systemd, and an administrator who can run one `loginctl` command.
-- Node.js 20 or newer available to the `jaynshare` user.
+- Node.js 26 or newer available to the `jaynshare` user.
 - Tailscale installed and connected on the host.
 - The dedicated user:
 
@@ -75,9 +75,9 @@ returns the one-time callback URL or code. Never ask for or watch anyone's
 Claude password. Callback URLs are credentials — do not paste them into chat.
 
 ```sh
-node src/index.js login --oauth --name account-1
-node src/index.js login --oauth --name account-2
-node src/index.js accounts               # both listed with tier and token state
+node src/index.ts login --oauth --name account-1
+node src/index.ts login --oauth --name account-2
+node src/index.ts accounts               # both listed with tier and token state
 ```
 
 ### 1.4 Install the service
@@ -110,7 +110,7 @@ bundles need.
 
 ```sh
 umask 077
-node src/index.js client admin rotate > ~/operator.secret
+node src/index.ts client admin rotate > ~/operator.secret
 ```
 
 This is the only credential that can read `jaynshare status` on the server and
@@ -260,7 +260,7 @@ Administrator rights. Both x64 and ARM64 are supported.
 1. **Git for Windows** — <https://git-scm.com/download/win>. This provides
    Git Bash. Any recent build works; 2.55 or newer gives the arrow-key
    picker, older builds give the numbered one (see 4.5).
-2. **Node.js 20 or newer, native Windows build** — <https://nodejs.org>. Not
+2. **Node.js 26 or newer, native Windows build** — <https://nodejs.org>. Not
    inside WSL.
 3. **Claude Code, native Windows build**, installed and working.
 4. **Tailscale for Windows** — sign in with your **own** account and accept
@@ -383,7 +383,7 @@ revoked.
 
 The Windows client passed three test layers before merge (PR #7,
 2026-09-12): the platform-independent suite with stubbed Windows tools, the
-`windows-client` CI job on `windows-latest` under Git Bash on Node 20/22/24,
+`windows-client` CI job on `windows-latest` under Git Bash on Node 26,
 and an interactive pass on a real Windows 11 ARM64 desktop (Git for Windows
 2.55, Node 24) covering install with a typed secret, both picker modes,
 cancellation, `Ctrl-C`, `--auto`, `--direct`, refusal with the proxy down,
@@ -451,16 +451,16 @@ From the checkout as `jaynshare`. These take effect immediately; the CLI
 notifies the running service.
 
 ```sh
-node src/index.js client list                     # enrolments, no hashes or secrets
-node src/index.js status                          # fleet view: quota, routing, current account
+node src/index.ts client list                     # enrolments, no hashes or secrets
+node src/index.ts status                          # fleet view: quota, routing, current account
 journalctl --user --unit jaynshare.service --follow
 
-node src/index.js client disable alice            # pause one person
-node src/index.js client enable alice
+node src/index.ts client disable alice            # pause one person
+node src/index.ts client enable alice
 
 umask 077
-node src/index.js client rotate alice > ~/alice-replacement.secret   # after a leak
-node src/index.js client revoke alice             # permanent
+node src/index.ts client rotate alice > ~/alice-replacement.secret   # after a leak
+node src/index.ts client revoke alice             # permanent
 ```
 
 After `rotate`, deliver the new secret privately and have the person re-run the
@@ -512,7 +512,7 @@ deploy/server/uninstall.sh --purge-state   # destructive; only for the dedicated
 
 ## 7. Develop and test
 
-Node 20+ and no runtime dependencies. All commands from the repository root.
+Node 26+ and no runtime dependencies. All commands from the repository root.
 
 **macOS / Linux:**
 

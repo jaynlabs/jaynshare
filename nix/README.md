@@ -35,7 +35,7 @@ Supported package systems are:
 - `version` comes from `package.json`.
 - `src` is the repository checkout via `lib.cleanSource ../.`.
 - The install phase copies runtime files into `$out/share/jaynshare`.
-- The wrapper runs `src/index.js` with pinned Nixpkgs `nodejs_24`.
+- The wrapper runs `src/index.ts` with pinned Nixpkgs `nodejs_24`.
 - The build does not run `npm install`, invoke Bun, or fetch package registry
   dependencies. Jaynshare currently uses Node built-ins and local source files
   at runtime.

@@ -53,7 +53,7 @@ state rather than from a half-installed one.
    So do not predict the mode from the terminal. Run the probe below in the
    shell you will actually use, take the answer it gives, then cover the other
    mode with `JAYNSHARE_PICKER` rather than by hunting for a second terminal.
-2. Install the **native Windows build of Node 20 or newer** — the one Claude Code
+2. Install the **native Windows build of Node 26 or newer** — the one Claude Code
    itself runs on. Do not install Node inside WSL.
 3. Copy the repository into the guest, or clone it. Everything below runs from
    the `jaynshare/` directory in **Git Bash**, never PowerShell, CMD, or WSL, and
@@ -222,6 +222,6 @@ Result:               pass | fail, with the failing checklist items
 ```
 
 A failure here is reproduced and covered by a test in
-`test/windows-client.test.js` or `test-support/client-install-check.sh` before
+`test/windows-client.test.ts` or `test-support/client-install-check.sh` before
 the branch merges. The VM exists so that a tester's machine is never the first
 place a defect is found.

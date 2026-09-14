@@ -4,12 +4,12 @@ set -eu
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 
 command -v node >/dev/null 2>&1 || {
-  printf '%s\n' 'Node.js 20+ is required. Install it, then run this file again.' >&2
+  printf '%s\n' 'Node.js 26+ is required. Install it, then run this file again.' >&2
   exit 1
 }
 node_major=$(node -e 'process.stdout.write(process.versions.node.split(".")[0])' | tr -d '\r')
-[ "$node_major" -ge 20 ] || {
-  printf '%s\n' 'Node.js 20+ is required. Upgrade it, then run this file again.' >&2
+[ "$node_major" -ge 26 ] || {
+  printf '%s\n' 'Node.js 26+ is required. Upgrade it, then run this file again.' >&2
   exit 1
 }
 command -v claude >/dev/null 2>&1 || {
