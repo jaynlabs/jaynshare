@@ -189,7 +189,7 @@ not replace the preview.
 
 Production sets `JAYNSHARE_DISABLE_AUTOUPDATE=1` and `"autoUpdate": false`. Do not use the
 inherited `jaynshare update` command for this deployment. Updates are deliberate imports into the
-private repository followed by review, tests, rehearsal, and a new pinned archive and checksum.
+repository followed by review, tests, rehearsal, and a new pinned archive and checksum.
 
 ## Request logging
 

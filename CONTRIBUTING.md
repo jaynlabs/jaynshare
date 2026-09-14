@@ -1,7 +1,7 @@
 # Contributing
 
-Thanks for taking a look. Jaynshare is a small, dependency-free Node project;
-contributing to it should be correspondingly simple.
+Thanks for taking a look. Jaynshare is a small Node project with no runtime npm
+dependencies; contributing to it should be correspondingly simple.
 
 ## Before you start
 
@@ -14,8 +14,8 @@ contributing to it should be correspondingly simple.
 
 ## Setting up
 
-Node.js 26 or newer. There are no runtime dependencies; `npm install` fetches
-ESLint and nothing else.
+Node.js 26 or newer. `npm install` fetches the development toolchain; the
+application itself has no runtime npm dependencies.
 
 ```sh
 npm install
@@ -37,15 +37,15 @@ Nix users can also run `nix flake check` and `nix run .#jaynshare -- help`.
 
 ## What CI requires
 
-`.github/workflows/ci.yml` runs the Node suite on Node 26, ESLint on
-24, the client install check on `windows-latest`, and the Nix flake check. The
+`.github/workflows/ci.yml` runs the test suite and ESLint on Node 26, the client
+install check on `windows-latest`, and the Nix flake check. The
 aggregate `test` job is the single required status. Please make sure the suite
 and lint pass locally before opening a pull request.
 
 ## House style
 
-- Match the surrounding code. The codebase is plain modern JavaScript with no
-  framework and no transpile step; keep it that way.
+- Match the surrounding code. The core codebase is strict TypeScript executed
+  with Node's native type stripping, with no framework or transpile step.
 - Every behavioral change needs a test. The suite is `node --test` with no
   helpers library — look at a neighbouring file in `test/` for the shape.
 - Comments explain *why*, not *what*. Several existing comments record a

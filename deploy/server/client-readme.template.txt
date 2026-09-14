@@ -7,7 +7,7 @@ section for your machine.
 Before starting, on either platform:
 
 1. Install and connect Tailscale using the private invite from the operator.
-2. Make sure `node --version` reports 20 or newer.
+2. Make sure `node --version` reports 26 or newer.
 3. Make sure the existing `claude` command starts normally.
 4. Obtain your one-time Jaynshare secret through the separate private channel.
 
@@ -68,3 +68,8 @@ Claude account:
 
 Do not share the secret or this bundle's CA publicly. Report a lost secret to
 the operator so only your credential can be revoked and replaced.
+
+To remove Jaynshare, ask the operator to revoke your credential, then follow
+the client removal instructions at:
+
+    https://github.com/jaynlabs/jaynshare/blob/main/docs/deployment.md#removal

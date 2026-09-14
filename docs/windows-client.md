@@ -1,7 +1,7 @@
 # Windows client internals
 
 How and why the desktop client works on native Windows. Installation and daily
-use are in the [onboarding guide](../README.md#4-windows-1011-desktop);
+use are in the [deployment guide](deployment.md#windows-1011);
 this is the reference for anyone changing `deploy/client/`.
 
 The supported environment is Git for Windows Bash on Windows 10/11, x64 or
@@ -143,21 +143,5 @@ bits.
 
 What CI cannot prove — an interactive terminal, Explorer, a real profile, and
 ARM64 — is covered once per candidate by
-[windows-vm-smoke-test.md](windows-vm-smoke-test.md). A defect found there is
-reproduced in one of the two automated layers before the branch merges, so a
-tester's machine is never the first place it is seen.
-
-The last recorded pass, from PR #7 (2026-09-12):
-
-```text
-Windows build:        10.0.26200.9445 (Windows 11 ARM64, Parallels guest)
-Git for Windows:      2.55.0.windows.5
-Node:                 v24.21.0 arm64
-Terminal host:        mintty wrapping a ConPTY — arrow-key picker
-Candidate commit:     2bf269d
-Result:               pass, all five sections
-```
-
-The yellow `◆ JAYNSHARE` status line inside Claude Code was not part of that
-pass because Claude Code was not installed in the VM; it is verified by test
-only.
+[windows-vm-smoke-test.md](windows-vm-smoke-test.md). Reproduce any defect
+found there in an automated test before release.

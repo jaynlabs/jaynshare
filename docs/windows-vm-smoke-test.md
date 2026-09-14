@@ -196,7 +196,7 @@ any of that.
 
 ## 5. Uninstall
 
-Run the documented cleanup from [the onboarding guide](../README.md#47-uninstall),
+Run the cleanup from the bundle's generated `START-HERE.txt`,
 then prove nothing survived:
 
 ```sh
@@ -210,7 +210,7 @@ grep -ril SYNTHETIC "$profile/.config" "$profile/.claude" "$profile/.local/bin" 
 
 ## Recording the result
 
-Put this in the pull request, as the plan requires:
+Record this in the pull request or release checklist:
 
 ```
 Windows build:        (cmd //c ver)
@@ -223,5 +223,4 @@ Result:               pass | fail, with the failing checklist items
 
 A failure here is reproduced and covered by a test in
 `test/windows-client.test.ts` or `test-support/client-install-check.sh` before
-the branch merges. The VM exists so that a tester's machine is never the first
-place a defect is found.
+release.

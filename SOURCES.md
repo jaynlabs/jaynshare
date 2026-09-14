@@ -6,7 +6,7 @@ repository is self-contained: a fresh clone needs no submodule initialization.
 
 | Imported revision | Upstream | License |
 | --- | --- | --- |
-| `3ca78adcef705ff90a181fcc637efb718af9758d` (based on upstream `1342e92b7207d5e3bb5af08402909810d7378019`) | `https://github.com/KarpelesLab/teamclaude.git` | MIT, KarpelesLab and Jayn Labs (2026) |
+| `3ca78adcef705ff90a181fcc637efb718af9758d` (based on upstream `1342e92b7207d5e3bb5af08402909810d7378019`) | `https://github.com/KarpelesLab/teamclaude.git` | MIT; TeamClaude © KarpelesLab, Jaynshare modifications © Jayn Labs (2026) |
 
 The original MIT license and copyright notice are retained in
 [LICENSE](LICENSE); attribution is in [NOTICE.md](NOTICE.md).
