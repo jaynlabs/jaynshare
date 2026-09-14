@@ -1219,8 +1219,8 @@ export class TUI {
     if (k === 'up' || k === 'k') picker.idx = Math.max(0, picker.idx - 1);
     else if (k === 'down' || k === 'j') picker.idx = Math.min(len - 1, picker.idx + 1);
     else if (picker.multi && (k === ' ' || k === 'x')) {
-      const v = picker.items[picker.idx]?.value;
-      if (v != null) { picker.sel.has(v) ? picker.sel.delete(v) : picker.sel.add(v); }
+      const selected = picker.items[picker.idx]?.value;
+      if (selected != null) { picker.sel.has(selected) ? picker.sel.delete(selected) : picker.sel.add(selected); }
     }
     else if (k === 'enter') {
       const cb = picker.cb;

@@ -735,7 +735,7 @@ async function attachCommand() {
 
   await new Promise(resolve => {
     const session = createAttachSession({ control, config, onQuit: resolve });
-    session.am.applyStatus(first);
+    session.accountManager.applyStatus(first);
     session.start();
   });
 }

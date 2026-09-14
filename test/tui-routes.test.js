@@ -22,7 +22,7 @@ function makeTUI({ routes = [] } = {}) {
   const saved = { routes: null };
   const config = { proxy: { port: 1 }, routes: [] };
   const tui = new TUI({
-    accountManager: accountManager, config, sx: null,
+    accountManager, config, sx: null,
     saveConfig: async (c) => { saved.routes = JSON.parse(JSON.stringify(c.routes)); },
     syncAccounts: async () => 0, onQuit: () => {},
   });

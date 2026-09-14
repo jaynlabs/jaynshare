@@ -37,7 +37,7 @@ function escapeRegExp(s) {
 // Display-only approximation: two globs overlap when either literal core contains the other.
 export function modelGlobOverlaps(globA, globB) {
   if (typeof globA !== 'string' || typeof globB !== 'string') return false;
-  const core = s => s.replace(/\*/g, '').toLowerCase();
+  const core = text => text.replace(/\*/g, '').toLowerCase();
   const coreA = core(globA);
   const coreB = core(globB);
   return coreA.includes(coreB) || coreB.includes(coreA);
