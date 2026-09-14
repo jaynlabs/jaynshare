@@ -10,10 +10,7 @@ function listen(server) {
 
 const HOUR = 3600_000;
 
-// Upstream answers 403 "Request not allowed" to every token outside `live` —
-// how Anthropic rejects a credential it will not serve at all (as opposed to a
-// 401, which says the token merely needs refreshing). Records each bearer so a
-// test can prove which account was tried.
+// 403s every token outside `live`; records the bearer of each hit.
 function forbiddingUpstream(live) {
   const seen = [];
   const server = http.createServer((req, res) => {
@@ -39,11 +36,7 @@ async function post(port) {
   return { status: res.status, body: await res.text() };
 }
 
-// The client never sees the credential the proxy injects, so a 403 about that
-// credential is not something the client can act on — but Claude Code reads a
-// 403 as "your session is dead", drops its own login and asks for a re-login.
-// Report it as a proxy error instead: the account needs attention, the client's
-// own credential is untouched.
+// Claude Code reads a 403 as a dead session and drops its own login.
 test('a 403 on the injected credential reaches the client as a proxy error, not a 403', async () => {
   const { server: upstream, seen } = forbiddingUpstream(new Set());   // nothing is accepted
   const upstreamPort = await listen(upstream);
@@ -68,8 +61,6 @@ test('a 403 on the injected credential reaches the client as a proxy error, not 
   }
 });
 
-// A 403 is about one account's credential, so the request itself is still
-// serveable — fail over the way the 401 path does rather than giving up.
 test('a 403 fails over to another account', async () => {
   const { server: upstream, seen } = forbiddingUpstream(new Set(['b-token']));
   const upstreamPort = await listen(upstream);
@@ -95,8 +86,6 @@ test('a 403 fails over to another account', async () => {
   }
 });
 
-// Two dead credentials and nothing else: there is genuinely nothing to wait for,
-// so fail fast and name both rather than inventing a retry-after.
 test('with every account refused the error names all of them', async () => {
   const { server: upstream } = forbiddingUpstream(new Set());
   const upstreamPort = await listen(upstream);
@@ -123,11 +112,6 @@ test('with every account refused the error names all of them', async () => {
   }
 });
 
-// The mixed fleet: one credential is refused, the other account is merely out of
-// quota. A reset will still serve this request, so the refusal must not short —
-// circuit the exhaustion path — otherwise one bad credential turns every
-// recoverable exhaustion into a hard 502 and skips the holdSeconds wait that an
-// unattended run depends on.
 test('a refusal alongside a merely-exhausted account still reports exhaustion', async () => {
   const upstream = http.createServer((req, res) => {
     if (req.headers.authorization === 'Bearer ta') {

@@ -2,9 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { AccountManager } from '../src/account-manager.js';
 
-// Ephemeral per-route manual pins (distinct from the keep-warm account pin in
-// account-pin.test.js): a pin biases selection for a route's models while the
-// pinned account is eligible, and falls back to best-available otherwise.
+// Per-route manual pins, not the request pin of account-pin.test.js.
 
 function oauth(name, extra = {}) {
   return { name, type: 'oauth', accessToken: 't', refreshToken: 'r', expiresAt: Date.now() + 3600_000, ...extra };

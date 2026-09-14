@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { X509Certificate } from 'node:crypto';
 
-// Point cert storage at a temp dir before importing modules that read the path.
+// Before importing the modules that read the cert path.
 const TMP = mkdtempSync(join(tmpdir(), 'tc-mitm-'));
 process.env.JAYNSHARE_CONFIG = join(TMP, 'config.json');
 
@@ -20,7 +20,6 @@ function listen(server) {
   return new Promise((r) => server.listen(0, '127.0.0.1', () => r(server.address().port)));
 }
 
-// CONNECT through the proxy, then TLS over the tunnel; resolve the decrypted socket.
 function connectTls(proxyPort, target, caCertPem, servername) {
   return new Promise((resolve, reject) => {
     const raw = net.connect(proxyPort, '127.0.0.1');

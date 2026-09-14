@@ -12,11 +12,7 @@ import { generateCertChain } from '../src/x509.js';
 import { createConnectHandler } from '../src/mitm.js';
 import { AccountManager } from '../src/account-manager.js';
 
-// The MITM now TERMINATES the tunnel (real h2/h1 server) and forwards each
-// request with the shared buffering/retrying proxy listener — so these tests
-// drive a real CONNECT + TLS client and a plain-HTTP fake upstream (reachable by
-// the forwarder's `fetch`), asserting auth injection, uuid patching, quota
-// observation, activity hooks, logging, and transparent retry across accounts.
+// A real CONNECT + TLS client against the terminating MITM, with a plain-HTTP fake upstream.
 
 function listen(server) { return new Promise(r => server.listen(0, '127.0.0.1', () => r(server.address().port))); }
 const T = { timeout: 30000 };
@@ -27,7 +23,6 @@ function closeHard(server) {
   try { server.close(); } catch { /* already closing */ }
 }
 
-// Drive a CONNECT through the proxy, then TLS over the tunnel; resolve the TLS socket.
 function connectThroughProxy(proxyPort, target, caCertPem, alpn) {
   return new Promise((resolve, reject) => {
     const raw = net.connect(proxyPort, '127.0.0.1');
@@ -51,7 +46,7 @@ function connectThroughProxy(proxyPort, target, caCertPem, alpn) {
 
 const ACCOUNT_UUID = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
 
-// A plain-HTTP fake upstream. `handler(req, body) -> { status, headers, body }`.
+// `handler(req, body) -> { status, headers, body }`
 function makeUpstream(handler) {
   return http.createServer((req, res) => {
     const chunks = [];
@@ -64,7 +59,6 @@ function makeUpstream(handler) {
   });
 }
 
-// Build the jaynshare proxy (CONNECT → terminate + forward) against `upPort`.
 function makeProxy(am, upPort, { leafCertPem, leafKeyPem }, { logDir = null, hooks = {}, sx = null } = {}) {
   const proxy = http.createServer();
   proxy.on('connect', createConnectHandler({
@@ -290,9 +284,6 @@ test('MITM logs proxied requests when a log dir is set', T, async () => {
   }
 });
 
-// Regression: a tunnel-mode CONNECT whose upstream connect FAILS must return a
-// proper proxy error status line, not a silent socket drop. Dropping it made
-// the client report "Proxy connection ended before receiving CONNECT response".
 test('tunnel: upstream connect failure returns 502, not a silent drop', T, async () => {
   const { caCertPem, leafCertPem, leafKeyPem } = generateCertChain('localhost');
   // Grab a port, then free it so a connect there is refused deterministically.

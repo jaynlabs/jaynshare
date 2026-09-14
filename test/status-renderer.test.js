@@ -62,9 +62,7 @@ test('renderStatus colors active accounts and bars', () => {
 
 test('renderStatus shows per-model eligibility when a family is metered separately', () => {
   const status = sampleStatus();
-  // Shared 5h has headroom, general/Opus weekly is fine, but the Fable weekly is
-  // spent: Fable should read ✗ (with its reset) while Opus stays ✓ — the
-  // "some accounts are disabled for specific models" view.
+  // Only the Fable weekly is spent.
   status.accounts[0].quota = {
     unified5h: 0.2, unified5hReset: now + 60_000,
     unified7d: 0.3, unified7dReset: now + 600_000,
@@ -127,10 +125,7 @@ test('renderStatus sanitizes probe errors', () => {
   assert.doesNotMatch(output, /\x1b\[31m/);
 });
 
-// --- blocklist visibility (issue: a blocked model read as available) ---------
-// `Models` reports quota headroom, so a fully-blocked family used to render ✓
-// while every request for it got a 400. Quota and the blocklist are separate
-// gates; status has to surface both.
+// ── blocklist visibility ──────────────────────────────────────
 
 function blockedStatus(blockedModels) {
   const status = sampleStatus();
@@ -158,8 +153,6 @@ test('renderStatus omits the Blocked row when nothing is blocked', () => {
 
 test('renderStatus marks a blocked family blocked, not available, despite free quota', () => {
   const output = renderStatus(blockedStatus(['*fable*']), { color: false, now });
-  // Fable has 89% headroom and the session bucket is nearly empty, so the
-  // quota-only path would have rendered "Fable ✓".
   assert.match(output, /Fable ⊘ blocked/);
   assert.doesNotMatch(output, /Fable ✓/);
   assert.match(output, /Opus ✓/); // unrelated families keep reporting quota

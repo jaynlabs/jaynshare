@@ -2,9 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { TUI } from '../src/tui.js';
 
-// TUI account management (settings screen) + the on-demand quota probe (`p`).
-// Same approach as tui-routes.test.js: a minimal AccountManager stand-in and a
-// stubbed render() so these exercise the state machine, not the terminal.
+// render() is stubbed: these exercise the state machine, not the terminal.
 
 function makeTUI({ accounts = [{ name: 'a', index: 0, type: 'oauth', credential: 't' }], probeQuota } = {}) {
   const calls = { added: [], removed: [], probed: 0 };
@@ -31,7 +29,6 @@ function makeTUI({ accounts = [{ name: 'a', index: 0, type: 'oauth', credential:
 const type = (tui, s) => { for (const ch of s) tui._key(ch); };
 const settle = () => new Promise(r => setTimeout(r, 5)); // let async handlers finish
 
-// Open a settings row by its field id (robust to fields being added/reordered).
 function openSettingsRow(tui, id) {
   tui._key('g');
   const idx = tui._settingsFields().findIndex(f => f.id === id);
@@ -179,11 +176,7 @@ test('select mode entered from the dashboard still returns to normal', () => {
   assert.equal(tui.mode, 'normal');
 });
 
-// Importing the credentials of a second organization must not swallow the first.
-// Both entries are named from the same email, so matching on the name alone drops
-// one from the config and — worse here — rewrites the surviving in-memory
-// account's accountUuid/orgUuid, collapsing two live accounts into one without
-// even a restart.
+// Both orgs of one person are named from the same email.
 test('importing a second org adds an account instead of overwriting the first', async () => {
   const accounts = [{ name: 'a@x.com', index: 0, type: 'oauth', credential: 'old', accountUuid: 'u1', orgUuid: 'o-personal', orgName: 'Personal' }];
   const { tui, am, config, calls } = makeTUI({ accounts });

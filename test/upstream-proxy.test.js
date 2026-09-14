@@ -24,8 +24,6 @@ test('parses the forms people actually write', () => {
   assert.equal(parseProxyUrl(null), null);
 });
 
-// A password with reserved characters is exactly the case that gets mangled by
-// naive string splitting, and it fails at connect time with a useless error.
 test('credentials survive a round trip through percent-encoding', () => {
   const parsed = parseProxyUrl('http://user%40corp:p%40ss%3Aword@host:3128');
   assert.equal(parsed.username, 'user@corp');
@@ -35,8 +33,6 @@ test('credentials survive a round trip through percent-encoding', () => {
 
 test('a wrong protocol is named rather than failing later inside the tunnel', () => {
   assert.throws(() => parseProxyUrl('socks5://host:1080'), /unsupported proxy protocol "socks5"/);
-  // Node's URL rejects an out-of-range port itself; either message is fine as
-  // long as it names the offending value rather than failing at connect time.
   assert.throws(() => parseProxyUrl('http://host:99999'), /invalid proxy URL|invalid port/);
 });
 
@@ -68,8 +64,6 @@ test('config wins over the environment', () => {
   assert.equal(r.proxy.host, 'cfg');
 });
 
-// An operator who has already set HTTPS_PROXY reasonably expects it to work;
-// every other CLI on that machine honours it.
 test('the environment is honoured when the config says nothing', () => {
   const r = resolveUpstreamProxy({}, { HTTPS_PROXY: 'http://env:3128' });
   assert.equal(r.source, 'env:HTTPS_PROXY');
@@ -90,8 +84,7 @@ test('proxyForHost applies NO_PROXY', () => {
   assert.equal(proxyForHost('svc.internal.example'), null);
 });
 
-// Nothing resolved it yet: a short-lived command that never loads a config must
-// still honour the environment rather than silently going direct.
+// A short-lived command never loads a config.
 test('an unset proxy falls back to the environment on first read', () => {
   resetUpstreamProxy();
   const prev = process.env.HTTPS_PROXY;
@@ -106,8 +99,7 @@ test('an unset proxy falls back to the environment on first read', () => {
 
 // ── End to end through a real CONNECT proxy ──────────────────
 
-// A minimal CONNECT proxy: answers 200, then splices bytes both ways. Records
-// every tunnel target so a test can prove the request really went through it.
+// Records every tunnel target.
 function connectProxy() {
   const targets = [];
   let authSeen = null;
@@ -132,8 +124,6 @@ function listen(server) {
   return new Promise(resolve => server.listen(0, '127.0.0.1', () => resolve(server.address().port)));
 }
 
-// The point of the whole feature: on a host with no direct route, the request
-// still reaches upstream — and it reaches it *through the proxy*.
 test('an upstream request is tunneled through the configured proxy', async () => {
   const origin = http.createServer((req, res) => {
     res.writeHead(200, { 'content-type': 'application/json' });
@@ -143,10 +133,7 @@ test('an upstream request is tunneled through the configured proxy', async () =>
   const { server: proxy, targets } = connectProxy();
   const proxyPort = await listen(proxy);
 
-  // Every e2e test resolves with an explicit empty env: the developer's own
-  // shell commonly carries NO_PROXY=127.0.0.1 (and HTTP(S)_PROXY), which would
-  // silently bypass the mock proxy and fail the "went through the proxy"
-  // assertions. resolveUpstreamProxy falls back to process.env otherwise.
+  // An explicit empty env: the developer's NO_PROXY=127.0.0.1 would bypass the mock proxy.
   setUpstreamProxy(resolveUpstreamProxy({ upstreamProxy: `127.0.0.1:${proxyPort}` }, {}));
 
   try {
@@ -177,8 +164,6 @@ test('proxy credentials are offered as Proxy-Authorization', async () => {
   }
 });
 
-// Login and token refresh go out the same way, or the account can never be added
-// or kept alive on a proxied host — which would leave the feature useless.
 test('control-plane calls (oauth) are tunneled too', async () => {
   const origin = http.createServer((_req, res) => {
     res.writeHead(200, { 'content-type': 'application/json' });
@@ -201,7 +186,6 @@ test('control-plane calls (oauth) are tunneled too', async () => {
   }
 });
 
-// A NO_PROXY host must not be dragged through the tunnel.
 test('a bypassed host goes direct even with a proxy configured', async () => {
   const origin = http.createServer((_req, res) => { res.writeHead(200); res.end('direct'); });
   const originPort = await listen(origin);
@@ -220,8 +204,7 @@ test('a bypassed host goes direct even with a proxy configured', async () => {
   }
 });
 
-// An AbortSignal has to keep working over the tunnel: oauth's refresh timeout
-// depends on it, and a refresh that hangs wedges every request for that account.
+// oauth's refresh timeout depends on it.
 test('an AbortSignal still cancels a tunneled request', async () => {
   const origin = http.createServer(() => { /* never answers */ });
   const originPort = await listen(origin);
@@ -241,8 +224,6 @@ test('an AbortSignal still cancels a tunneled request', async () => {
   }
 });
 
-// A proxy that refuses the tunnel must surface as its own error, not as a
-// mystery socket failure attributed to sx.org.
 test('a refused CONNECT names the upstream proxy', async () => {
   const proxy = http.createServer((_req, res) => { res.writeHead(405); res.end(); });
   proxy.on('connect', (_req, sock) => { sock.write('HTTP/1.1 403 Forbidden\r\n\r\n'); sock.end(); });

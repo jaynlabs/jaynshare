@@ -9,8 +9,7 @@ import { getCrashLogPath } from '../src/config.js';
 
 const CRASH_LOG = fileURLToPath(new URL('../src/crash-log.js', import.meta.url));
 
-// The handlers end the process, so they can only be exercised from a child.
-// Returns { code, stderr, logged } — the last being what survived on disk.
+// The handlers end the process, so a child runs them. Returns { code, stderr, logged }.
 function crashIn(dir, source) {
   const path = join(dir, 'crash.log');
   return new Promise((resolve) => {
@@ -42,8 +41,6 @@ test('an uncaught exception is recorded before the process dies', async () => {
   }
 });
 
-// A rejected promise nobody handles kills the process the same way an uncaught
-// exception does, and is just as invisible under the TUI.
 test('an unhandled rejection is recorded too', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'tc-crash-'));
   try {
@@ -56,8 +53,6 @@ test('an unhandled rejection is recorded too', async () => {
   }
 });
 
-// Successive crashes must accumulate: the interesting one is often the first,
-// and a restart loop would otherwise overwrite it.
 test('crashes append rather than overwrite', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'tc-crash-'));
   try {

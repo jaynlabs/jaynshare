@@ -6,8 +6,7 @@ function oauth(name, extra = {}) {
   return { name, type: 'oauth', accessToken: 't', refreshToken: 'r', expiresAt: Date.now() + 3600_000, ...extra };
 }
 
-// Drive an account to a "soft" exhausted state: utilization at/above the switch
-// threshold with a reset still in the future (so it isn't cleared as stale).
+// Over the switch threshold with a future reset, so it is not cleared as stale.
 function exhaust(account, utilization) {
   account.quota.unified7d = utilization;
   account.quota.unified7dReset = Date.now() + 3600_000;

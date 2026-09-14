@@ -8,10 +8,7 @@ const buf = (obj) => Buffer.from(JSON.stringify(obj), 'utf8');
 const parse = (b) => JSON.parse(b.toString('utf8'));
 const run = (obj, url = MESSAGES, ct = JSON_CT) => sanitizeToolPairs(buf(obj), url, ct);
 
-// True when the body satisfies Anthropic's ACTUAL rule: every tool_use is answered
-// by a matching tool_result in the IMMEDIATELY FOLLOWING message, and every
-// tool_result is grounded by a tool_use in the message right before it. (Whole-body
-// "does the id exist anywhere" is too lenient — it was the bug.)
+// Anthropic's rule: a tool_use is answered in the immediately following message, and vice versa.
 function idsOf(msg, type, key) {
   const ids = new Set();
   for (const b of Array.isArray(msg?.content) ? msg.content : []) {
@@ -146,9 +143,7 @@ test('also covers /v1/messages/count_tokens', () => {
 });
 
 test('strips a SEPARATED pair — result present but not immediately after (the messages.2 case)', () => {
-  // A compaction that keeps a tool_use at messages[2] but moves its tool_result to
-  // messages[4] instead of [3]. The id still exists in the body, so whole-body
-  // pairing would keep it and Anthropic still 400s. Positional pairing must strip it.
+  // The tool_result exists, but two messages later; Anthropic still 400s.
   const out = run({
     model: 'claude',
     messages: [

@@ -3,15 +3,10 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import { RemoteControl, createAttachSession } from '../src/tui-remote.js';
 
-// Attach mode: a dashboard driven by polled /jaynshare/status instead of a live
-// AccountManager. The control plane here is a real HTTP server serving canned
-// status payloads, so the client is exercised over the wire it actually uses.
+// Attach mode against a real HTTP server serving canned status payloads.
 
 const stripAnsi = s => s.replace(/\x1b\[[0-9;]*m/g, '');
 
-// Every action here crosses a real socket, so wait for the thing to have
-// happened rather than for a duration: a fixed sleep is a race that a loaded
-// machine loses, and these tests run alongside the rest of the suite.
 async function waitFor(predicate, what, timeoutMs = 5000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -23,8 +18,7 @@ async function waitFor(predicate, what, timeoutMs = 5000) {
 
 const logged = tui => waitFor(() => tui.log.length > 0, 'a message in the pane');
 const reached = seen => waitFor(() => seen.length > 0, 'a request to reach the server');
-// Only for asserting that nothing happens: there is no condition to wait on, so
-// this has to be a duration, and it is generous on purpose.
+// Only for asserting that nothing happens.
 const nothingHappens = () => new Promise(r => setTimeout(r, 50));
 
 const HOUR = 3600_000;
@@ -61,9 +55,7 @@ function statusFixture(over = {}) {
   };
 }
 
-// A stand-in control plane. `routes` maps "METHOD /path" to a handler; anything
-// unmapped answers 404, which is how an older server without the switch endpoint
-// behaves.
+// `routes` maps "METHOD /path" to a handler; anything else answers 404 like an older server.
 async function fakeServer(t, routes = {}) {
   const seen = [];
   const server = http.createServer((req, res) => {
@@ -77,15 +69,11 @@ async function fakeServer(t, routes = {}) {
     });
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
-  // fetch() pools keep-alive sockets, and server.close() waits for them: without
-  // dropping them explicitly the teardown lingers and leaves sockets behind for
-  // whatever runs next.
   t.after(() => new Promise(resolve => { server.closeAllConnections(); server.close(resolve); }));
   return { server, seen, port: server.address().port };
 }
 
-// The three members _call reads off a fetch reply. Cheaper than a real Response,
-// and it keeps these tests free of fetch globals.
+// The three members _call reads off a fetch reply.
 const reply = (status, body) => ({ ok: status >= 200 && status < 300, status, text: async () => body });
 
 const json = payload => (req, res) => {
@@ -149,9 +137,7 @@ test('a server without the switch endpoint says so instead of reporting success'
   await assert.rejects(() => control.switchAccount('alpha'), /does not support/i);
 });
 
-// The endpoint answers 404 for an account it cannot resolve, which is a
-// different failure from the path not existing at all — and the only thing
-// separating them is the control plane's own { ok: false, error } shape.
+// Only the { ok: false, error } shape separates this 404 from a missing endpoint.
 test('an unresolvable account is reported by reason, not as a missing feature', async (t) => {
   const { control } = await makeSession(t, {
     routes: {
@@ -165,8 +151,6 @@ test('an unresolvable account is reported by reason, not as a missing feature', 
   await assert.rejects(() => control.switchAccount('ghost'), /no such account "ghost"/);
 });
 
-// Something else listening on the configured port answers 200 to anything. A
-// bare 200 is not evidence that an account was switched.
 test('a 200 from something that is not this control plane is not a switch', async (t) => {
   const { control } = await makeSession(t, {
     routes: {
@@ -238,8 +222,6 @@ test('a status payload with no routes and no quota data renders nothing rather t
   am.refreshExpiredQuotas(); // server-side concern; must be a harmless no-op here
 });
 
-// The payload comes from another process over a port the user configured, so a
-// reply can be JSON and still not be the status this dashboard expects.
 test('a payload missing the fields the renderer formats reads as unknown, not a crash', async (t) => {
   const { am, tui } = await makeSession(t);
   am.applyStatus({ accounts: [{ status: 'active' }, {}] });
@@ -248,8 +230,6 @@ test('a payload missing the fields the renderer formats reads as unknown, not a 
   assert.match(out, /\(unnamed\)/);
 });
 
-// "Connected, no accounts" would send the user looking at their account list;
-// the actual problem is that the port answers from something else entirely.
 test('a reply that is not a status payload is a connection problem, not an empty fleet', async (t) => {
   const { session, am, tui } = await makeSession(t, {
     routes: { 'GET /jaynshare/status': json({ hello: 'this is some other service' }) },
@@ -337,9 +317,6 @@ test('a wedged server does not collect one pending request per tick', async (t) 
   assert.equal(seen.length, 2);
 });
 
-// A server that accepts the connection and then goes silent — SIGSTOPped, or the
-// laptop suspended mid-request — must read as lost contact. Without a deadline the
-// dashboard sits on a frozen snapshot under a green marker for minutes.
 test('a poll that never gets an answer becomes a lost connection, not a live view', async (t) => {
   const never = new Promise(() => {});
   const fake = await fakeServer(t, { 'GET /jaynshare/status': async () => { await never; } });
@@ -368,8 +345,6 @@ test('the poll deadline is derived from the poll interval', async (t) => {
   assert.equal(fixed.timeoutMs, 250); // an explicit deadline is not overridden
 });
 
-// A general (non-family) route is drawn as a marker column on every account row,
-// which reaches into route.accounts. The payload is not ours to trust.
 test('a general route renders, and a half-specified one does not take the dashboard down', async (t) => {
   const { tui, am } = await makeSession(t);
   const status = statusFixture();
@@ -458,9 +433,6 @@ test('s switches the running server to the selected account', async (t) => {
   assert.match(tui.log[0].msg, /alpha/);
 });
 
-// The server applies a switch to a disabled account and says so with
-// eligible:false. The row already carries the disabled marker, but the moment of
-// choosing is where it matters.
 test('switching to an account that cannot serve says so', async (t) => {
   const { tui, am } = await makeSession(t, {
     routes: {
@@ -492,7 +464,6 @@ test('the server\'s own reason for ineligibility is what gets shown', async (t) 
   assert.match(tui.log[0].msg, /it is outranked by higher-priority account "bravo"/);
 });
 
-// The reason crosses the wire and is drawn into a fixed-width frame.
 test('a reason carrying control characters cannot corrupt the frame', async (t) => {
   const { tui, am } = await makeSession(t, {
     routes: {

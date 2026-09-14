@@ -6,17 +6,12 @@ function oauth(name, extra = {}) {
   return { name, type: 'oauth', accessToken: 't', refreshToken: 'r', expiresAt: Date.now() + 3600_000, ...extra };
 }
 
-// Make an account genuinely unavailable via near-quota with a FUTURE reset, so
-// selection has to fall through to the probe/soonest-reset fallback paths.
+// Unavailable without an expired hold, so selection reaches the fallback paths.
 function nearQuotaFutureReset(am, i) {
   am.accounts[i].quota.unified7d = 0.999;
   am.accounts[i].quota.unified7dReset = Date.now() + 3600_000;
 }
 
-// F1: the "all unavailable → soonest reset" fallback in _selectNext must not
-// resurrect a DISABLED account. The disabled check in _isAvailable short-circuits
-// before the expired-hold clear, so a disabled account with a past hold slips
-// into the fallback and (pre-fix) got force-reactivated.
 test('the soonest-reset fallback never resurrects a disabled account', () => {
   const am = new AccountManager([oauth('disabled'), oauth('busy')], 0.98);
   am.markRateLimited(0, 1);
@@ -31,7 +26,6 @@ test('the soonest-reset fallback never resurrects a disabled account', () => {
   assert.notEqual(am.accounts[0].rateLimitedUntil, null); // hold NOT cleared
 });
 
-// F1 (sibling): the same must hold for an errored (dead-token) account.
 test('the soonest-reset fallback never resurrects an errored account', () => {
   const am = new AccountManager([oauth('broken'), oauth('busy')], 0.98);
   am.markRateLimited(0, 1);
@@ -44,10 +38,6 @@ test('the soonest-reset fallback never resurrects an errored account', () => {
   assert.equal(am.accounts[0].status, 'error'); // not silently reactivated
 });
 
-// F2: a request for an OWNED model must never fall back / probe onto a non-owner
-// account (which would just reject the unknown model id). When the owner is
-// unavailable, the correct result is "nothing" (→ synthetic 429), not a Claude
-// account.
 test('an owned-model request never falls back to a non-owner account', () => {
   const am = new AccountManager([
     oauth('claude'),
@@ -60,8 +50,6 @@ test('an owned-model request never falls back to a non-owner account', () => {
   assert.notEqual(acct?.name, 'claude'); // the deepseek model must not hit Claude
 });
 
-// Positive control: with no owner declared, the probe/fallback still works
-// normally (ownership routing is inert unless someone declares a models list).
 test('ownership guard is inert when no account claims the model', () => {
   const am = new AccountManager([oauth('a'), oauth('b')], 0.98);
   nearQuotaFutureReset(am, 0);

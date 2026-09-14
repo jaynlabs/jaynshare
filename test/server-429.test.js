@@ -8,8 +8,6 @@ function listen(server) {
   return new Promise(resolve => server.listen(0, '127.0.0.1', () => resolve(server.address().port)));
 }
 
-// Drive one request through the proxy against an upstream that always 429s with
-// the given Retry-After header, and report how the request terminated.
 async function runAgainstThrottlingUpstream(retryAfterHeader) {
   let upstreamHits = 0;
   const upstream = http.createServer((_req, res) => {
@@ -47,10 +45,6 @@ async function runAgainstThrottlingUpstream(retryAfterHeader) {
   }
 }
 
-// Regression: a persistently rate-limited upstream must terminate (bounded
-// retries), not loop forever tying up the client connection. A rate-limit 429
-// does NOT rotate/throttle the account — it pauses it (so concurrent
-// requests wait) and retries the same account, then surfaces a 429.
 test('persistent upstream 429 terminates with a bounded number of retries', async () => {
   const { status, upstreamHits, accountStatus, paused } = await runAgainstThrottlingUpstream('1');
   assert.equal(status, 429);                                   // returns 429 instead of hanging
@@ -59,9 +53,6 @@ test('persistent upstream 429 terminates with a bounded number of retries', asyn
   assert.ok(paused, 'account should be paused, so concurrent requests wait');
 });
 
-// A negative (or otherwise out-of-range) Retry-After must not bypass the cap:
-// it would make setTimeout return immediately (and previously mark the account
-// rate-limited in the past, reactivating it instantly).
 test('negative Retry-After is clamped and still terminates', async () => {
   const { status, upstreamHits, accountStatus, paused } = await runAgainstThrottlingUpstream('-1');
   assert.equal(status, 429);
@@ -115,9 +106,6 @@ test('long upstream Retry-After is surfaced without sleeping in client request',
   }
 });
 
-// A rate-limit 429 (no quota-rejected status) must NOT rotate to another
-// account — every retry stays on the same one (rotating just moves the
-// burst and drops the KV cache).
 test('a rate-limit 429 never rotates to another account', async () => {
   const seen = [];
   const upstream = http.createServer((req, res) => {
@@ -152,8 +140,6 @@ test('a rate-limit 429 never rotates to another account', async () => {
   }
 });
 
-// A quota-rejection 429 (unified status "rejected") is durable exhaustion, so it
-// DOES rotate — account a is throttled and the request succeeds on account b.
 test('a quota-rejection 429 rotates to the next account', async () => {
   const seen = [];
   const upstream = http.createServer((req, res) => {
@@ -233,10 +219,6 @@ test('temporarily exhausted fleet waits and retries instead of surfacing synthet
   }
 });
 
-// Regression: a stale/poisoned cached quota (e.g. 0.98 from before a
-// plan upgrade, with a reset still in the future) must NOT pin the proxy in a
-// permanent synthetic 429. The next request should probe upstream, succeed, and
-// refresh the cached quota — rather than refusing locally without any call.
 test('stale over-threshold quota is re-probed, not refused forever', async () => {
   let upstreamHits = 0;
   const upstream = http.createServer((_req, res) => {

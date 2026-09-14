@@ -9,8 +9,6 @@ function listen(server) {
   return new Promise(resolve => server.listen(0, '127.0.0.1', () => resolve(server.address().port)));
 }
 
-// Counts what actually reached upstream — the point of the guard is that a
-// request made from the wrong address never gets there.
 function countingUpstream() {
   const seen = [];
   const server = http.createServer((req, res) => {
@@ -63,8 +61,6 @@ test('with the egress pinned and matching, requests pass through untouched', asy
   }
 });
 
-// The core guarantee: a VPN that dropped must not leak the account onto the
-// machine's own address. Upstream must see nothing at all.
 test('an unpinned egress holds the request and never reaches upstream', async () => {
   const { server: upstream, seen } = countingUpstream();
   const upstreamPort = await listen(upstream);
@@ -86,8 +82,6 @@ test('an unpinned egress holds the request and never reaches upstream', async ()
   }
 });
 
-// A flap shorter than the hold budget should be invisible to the client beyond
-// the delay: the request waits, then goes out from the right address.
 test('a request held through a flap is sent once the pinned egress returns', async () => {
   const { server: upstream, seen } = countingUpstream();
   const upstreamPort = await listen(upstream);

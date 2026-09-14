@@ -5,9 +5,7 @@ import { AccountManager } from '../src/account-manager.js';
 
 const stripAnsi = s => s.replace(/\x1b\[[0-9;]*m/g, '');
 
-// Minimal AccountManager stand-in for the routes editor: it only needs the
-// surface the editor touches (accounts, setRoutes). render() is stubbed out so
-// these tests exercise the editor state machine, not the terminal renderer.
+// render() is stubbed: these exercise the state machine, not the terminal.
 function makeTUI({ routes = [] } = {}) {
   const applied = { routes: null };
   const pins = { calls: [], byName: new Map() };
@@ -35,8 +33,6 @@ function makeTUI({ routes = [] } = {}) {
 const type = (tui, s) => { for (const ch of s) tui._key(ch); };
 const settle = () => new Promise(r => setTimeout(r, 5)); // let async save finish
 
-// Routing lives under the settings screen (g → "Manage routing"): open settings,
-// move the cursor to the routes row by id (robust to added fields), press Enter.
 function openRoutes(tui) {
   tui._key('g');
   const idx = tui._settingsFields().findIndex(f => f.id === 'routes');

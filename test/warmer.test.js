@@ -7,8 +7,7 @@ function oauth(name, extra = {}) {
   return { name, type: 'oauth', accessToken: 't-' + name, refreshToken: 'r', expiresAt: Date.now() + 3600_000, ...extra };
 }
 
-// A fake spawner: records each spawn spec and resolves like a clean `claude` run
-// (exit 0). Lets us assert the warmer's behavior without launching anything.
+// Records each spawn spec and resolves like a clean `claude` run.
 function fakeSpawner(result = 0) {
   const calls = [];
   const fn = async (spec) => {

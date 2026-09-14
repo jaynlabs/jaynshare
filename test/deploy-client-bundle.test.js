@@ -60,8 +60,7 @@ test('prepare-client creates a secret-free bundle and a separate one-time secret
       'the Mac instructions must survive transfer channels that strip executable bits');
     assert.match(readme, /Git Bash/, 'the same bundle has to tell a Windows tester what to run');
 
-    // Nothing anywhere in the archive may carry the credential, not just the
-    // installer: the bundle and the secret travel through different channels.
+    // The bundle and the secret travel through different channels.
     const bundled = await readdir(join(extract, 'jaynshare-friend-one'), { recursive: true, withFileTypes: true });
     for (const entry of bundled) {
       if (!entry.isFile()) continue;

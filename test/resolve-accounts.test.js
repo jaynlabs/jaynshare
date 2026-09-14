@@ -7,7 +7,6 @@ import { resolveAccounts } from '../src/resolve-accounts.js';
 
 const HOUR = 3600_000;
 
-// Write a Claude Code credentials file and return its path.
 async function credsFile(dir, name, data) {
   const path = join(dir, name);
   await writeFile(path, JSON.stringify({ claudeAiOauth: data }));
@@ -23,10 +22,6 @@ async function withTmp(fn) {
   }
 }
 
-// The regression. An importFrom account used to be rebuilt from scratch as
-// { name, type, ...creds }, so every other field configured on it was dropped
-// on the floor at startup — most damagingly `disabled`, which meant an account
-// switched off on disk quietly rejoined rotation on the next restart.
 test('importFrom preserves the account fields that are not credentials', async () => {
   await withTmp(async dir => {
     const path = await credsFile(dir, 'creds.json', {
@@ -62,8 +57,6 @@ test('importFrom preserves the account fields that are not credentials', async (
   });
 });
 
-// The file is the source of truth for credentials: a stale accessToken left in
-// the config must not win over the freshly imported one.
 test('imported credentials override stale ones in the config', async () => {
   await withTmp(async dir => {
     const path = await credsFile(dir, 'creds.json', {
@@ -80,8 +73,6 @@ test('imported credentials override stale ones in the config', async () => {
   });
 });
 
-// A readable file with no token is as unusable as a missing one — pushing it
-// would send `Bearer undefined` upstream on every request.
 test('a credentials file with no token is skipped', async () => {
   await withTmp(async dir => {
     const path = await credsFile(dir, 'empty.json', { refreshToken: 'r' });
@@ -97,7 +88,6 @@ test('a credentials file with no token is skipped', async () => {
   });
 });
 
-// An unreadable importFrom must drop that account only, not abort the rest.
 test('a failed import skips the account and keeps the others', async () => {
   const accounts = await resolveAccounts({
     accounts: [
@@ -109,7 +99,6 @@ test('a failed import skips the account and keeps the others', async () => {
   assert.deepEqual(accounts.map(a => a.name), ['direct']);
 });
 
-// Non-import accounts were always passed through untouched; keep it that way.
 test('non-import accounts pass through with every field intact', async () => {
   const accounts = await resolveAccounts({
     accounts: [

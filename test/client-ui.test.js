@@ -20,8 +20,7 @@ import {
 } from '../deploy/client/jaynshare-client.mjs';
 import { startFakeUsageServer } from '../test-support/fake-usage-server.mjs';
 
-// The installer's own credential check is answered by a fake server in this
-// process, so any script that triggers it has to run without blocking the loop.
+// Must not block the loop: the fake server answering the installer runs in this process.
 function runScript(command, args, options) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { ...options, encoding: 'utf8' });
@@ -192,8 +191,6 @@ test('desktop client upgrade reuses enrollment and installs status without askin
   try {
     const configDir = join(tempHome, '.config/jaynshare');
     await mkdir(configDir, { recursive: true });
-    // The installer confirms the enrolled credential against the server before
-    // it keeps anything, so the upgrade needs something to authenticate to.
     fake = await startFakeUsageServer({ secret: 'existing-secret' });
     await writeFile(join(configDir, 'client.env'),
       `JAYNSHARE_CLIENT_ID='alice'\nJAYNSHARE_HOST='127.0.0.1'\nJAYNSHARE_PORT='${fake.port}'\n`);
@@ -202,12 +199,7 @@ test('desktop client upgrade reuses enrollment and installs status without askin
       '-----BEGIN CERTIFICATE-----\nsynthetic\n-----END CERTIFICATE-----\n');
     const installer = fileURLToPath(new URL('../deploy/client/install.sh', import.meta.url));
 
-    // spawnSync would block this process's event loop, and the installer's final
-    // credential check talks to the fake server running inside it.
     const result = await runScript('/bin/sh', [installer, '--upgrade'], {
-      // install.sh resolves config_dir from XDG_CONFIG_HOME when it is set (CI runners set
-      // it), so overriding HOME alone would leave the installer pointing at the real
-      // user config instead of this sandbox. Redirect both.
       env: { ...process.env, HOME: tempHome, XDG_CONFIG_HOME: join(tempHome, '.config') },
     });
     assert.equal(result.status, 0, result.stderr);

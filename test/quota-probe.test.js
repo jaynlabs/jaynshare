@@ -33,8 +33,7 @@ test('normalizeUsageBucket normalizes resets to ms epoch', () => {
 // ── findScopedWeeklyLimit ─────────────────────────────────────
 
 test('findScopedWeeklyLimit pulls a per-model weekly bucket from limits[]', () => {
-  // Shape mirrors the real /api/oauth/usage payload: model-scoped weekly quota
-  // lives in limits[] (the legacy seven_day_<model> top-level keys read null).
+  // The real payload: model-scoped weekly quota lives in limits[].
   const data = { limits: [
     { kind: 'session', group: 'session', percent: 47, scope: null },
     { kind: 'weekly_all', group: 'weekly', percent: 8, scope: null },

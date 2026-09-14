@@ -10,11 +10,7 @@ function listen(server) {
 
 const HOUR = 3600_000;
 
-// An upstream that accepts only the tokens in `live` and 401s everything else —
-// exactly how Anthropic answers an access token that was revoked before its
-// clock expiry (something else refreshed the same token family). Records the
-// bearer token presented on every hit so a test can prove WHICH credential was
-// retried.
+// 401s every token outside `live`; records the bearer of each hit.
 function revokingUpstream(live) {
   const seen = [];
   const server = http.createServer((req, res) => {
@@ -41,8 +37,6 @@ async function post(port) {
   return res.status;
 }
 
-// The core recovery: a token that upstream considers revoked is indistinguishable
-// from a valid one by expiry alone, so only the 401 itself can trigger a refresh.
 test('401 forces a token refresh and retries the same account', async () => {
   const { server: upstream, seen } = revokingUpstream(new Set(['fresh']));
   const upstreamPort = await listen(upstream);
@@ -68,9 +62,6 @@ test('401 forces a token refresh and retries the same account', async () => {
   }
 });
 
-// When the refresh token is dead too (the whole family was revoked), there is
-// nothing to recover on this account — it must drop out of rotation and the
-// request must be served by another account rather than failing.
 test('401 with a rejected refresh errors the account and fails over', async () => {
   const { server: upstream, seen } = revokingUpstream(new Set(['b-token']));
   const upstreamPort = await listen(upstream);
@@ -103,8 +94,6 @@ test('401 with a rejected refresh errors the account and fails over', async () =
   }
 });
 
-// Regression: the retry must be bounded. An upstream that 401s even a
-// freshly-minted token must surface the 401, not loop refreshing forever.
 test('persistent 401 terminates instead of looping', async () => {
   const { server: upstream, seen } = revokingUpstream(new Set());   // nothing is ever accepted
   const upstreamPort = await listen(upstream);
@@ -128,8 +117,6 @@ test('persistent 401 terminates instead of looping', async () => {
   }
 });
 
-// An API-key account has no refresh token, so a 401 is a bad key — retrying it
-// would just burn a round trip. It must pass straight through.
 test('401 on an api-key account is not retried', async () => {
   const { server: upstream, seen } = revokingUpstream(new Set());
   const upstreamPort = await listen(upstream);
@@ -147,11 +134,7 @@ test('401 on an api-key account is not retried', async () => {
   }
 });
 
-// The refresh-storm guard. Every request already in flight when a token turns
-// over comes back 401, staggered — so they miss the concurrent-refresh
-// coalescing and would each force their own refresh, rotating the refresh-token
-// family once per request. A 401 for a just-minted token is stale news; the
-// forced refresh must be suppressed for a short window after a successful one.
+// In-flight requests come back 401 staggered, so coalescing alone would rotate the family once each.
 test('a forced refresh is suppressed right after a successful refresh', async () => {
   let refreshes = 0;
   const am = new AccountManager(
@@ -174,7 +157,6 @@ test('a forced refresh is suppressed right after a successful refresh', async ()
   assert.equal(am.accounts[0].credential, 't1');       // the good token survives
 });
 
-// The suppression must expire, or a token that really is bad stays stuck.
 test('a forced refresh is allowed again once the floor elapses', async () => {
   let refreshes = 0;
   const am = new AccountManager(
@@ -194,9 +176,6 @@ test('a forced refresh is allowed again once the floor elapses', async () => {
   assert.equal(refreshes, 2);                          // floor elapsed, allowed
 });
 
-// End to end: a second request arriving inside the floor must not trigger a
-// second rotation, even though it too gets a 401 (this upstream accepts
-// nothing). Without the guard, refreshes would climb with every request.
 test('back-to-back 401 requests rotate the token family once', async () => {
   const { server: upstream } = revokingUpstream(new Set());
   const upstreamPort = await listen(upstream);

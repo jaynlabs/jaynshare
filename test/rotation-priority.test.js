@@ -6,15 +6,13 @@ function oauth(name, extra = {}) {
   return { name, type: 'oauth', accessToken: 't-' + name, refreshToken: 'r', expiresAt: Date.now() + 3600_000, ...extra };
 }
 
-// Make an account "exhausted" so _selectNext skips it, isolating the priority sort.
 function exhaust(am, idx) {
   am.accounts[idx].status = 'exhausted';
 }
 
 test('default priority (all 0) preserves the existing selection (first available)', () => {
   const am = new AccountManager([oauth('a'), oauth('b'), oauth('c')], 0.98);
-  // No quota known anywhere → weeklyReset is -Infinity for all, ties on priority 0,
-  // so the first available account is chosen, matching pre-priority behavior.
+  // Nothing known: every account ties, so the first available wins.
   const next = am._selectNext();
   assert.equal(next.name, 'a');
 });
@@ -80,7 +78,7 @@ test('common case: all-equal priority leaves getActiveAccount on the healthy cur
   assert.equal(am.getActiveAccount().name, 'c'); // unchanged — no preemption when priorities tie
 });
 
-// ── selectActiveAccount (daemon-launch up-front selection) ───────────────────
+// ── selectActiveAccount ──────────────────────────────────────────────────────
 
 test('selectActiveAccount picks the soonest-resetting weekly window, not index 0', () => {
   const now = Date.now();

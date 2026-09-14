@@ -7,7 +7,6 @@ import { TextEncoder, TextDecoder } from 'node:util';
 import { upstreamFetch } from '../src/upstream-fetch.js';
 import { readWithIdleTimeout } from '../src/server.js';
 
-// Bring up an HTTP server on an ephemeral port and hand back {server, port}.
 async function listen(handler) {
   const server = http.createServer(handler);
   server.listen(0);
@@ -15,9 +14,7 @@ async function listen(handler) {
   return { server, port: server.address().port };
 }
 
-// A half-dead upstream: it accepts the connection but never sends a response —
-// exactly what a keep-alive socket becomes after the host's network drops and
-// reconnects. Without the headers timeout this hangs until Node's 300s default.
+// What a keep-alive socket becomes after the network drops and reconnects.
 test('fails fast (does not hang) when upstream never sends headers', async () => {
   const { server, port } = await listen(() => { /* never respond */ });
 
@@ -33,11 +30,7 @@ test('fails fast (does not hang) when upstream never sends headers', async () =>
   server.close();
 });
 
-// The mechanism the whole fix rests on: after a hung request the dead socket is
-// dropped from the pool, so the next request to the SAME origin opens a fresh
-// connection and succeeds. Same origin is the point: two ports would be two
-// pools and prove nothing about eviction. We count TCP connections and assert
-// the second request opened a new one rather than reusing the dead keep-alive.
+// Same origin, or two pools would prove nothing about eviction.
 test('evicts the dead socket and reconnects on the same origin', async () => {
   let conns = 0;
   let mode = 'hang';
@@ -57,18 +50,12 @@ test('evicts the dead socket and reconnects on the same origin', async () => {
   const res = await upstreamFetch(origin, { headersTimeoutMs: 5000 });
   assert.equal(res.status, 200);
   assert.equal(await res.text(), 'ok');
-  // >1 connection proves the dead socket was evicted and a fresh one opened; a
-  // reuse of the aborted socket would leave the count at 1 (and hang). undici may
-  // open more than one on the abort path, so assert the invariant, not an exact n.
+  // undici may open more than one on the abort path.
   assert.ok(conns >= 2, `expected a fresh socket after eviction, saw ${conns} connection(s)`);
 
   server.close();
 });
 
-// The headers deadline is headers-only: once headers arrive it is disarmed, so a
-// body that streams well past the timeout window is NOT cut off (SSE completions
-// run for minutes). Headers here return instantly; the body finishes at ~400ms
-// with a 150ms headers timeout.
 test('does not cut a slow body once headers have arrived', async () => {
   const { server, port } = await listen(async (req, res) => {
     res.writeHead(200, { 'content-type': 'text/event-stream' });
@@ -85,15 +72,8 @@ test('does not cut a slow body once headers have arrived', async () => {
   server.close();
 });
 
-// Mid-stream recovery (extends the PR): once headers have arrived the headers
-// timeout is disarmed, so a drop DURING the body would hang forever. The
-// body-idle watchdog in streamResponse guards each read. Here the stream yields
-// one chunk then goes silent; the second read must fail fast with a transient
-// JAYNSHARE_BODY_TIMEOUT (which server.js treats as retryable) rather than hang.
 test('body watchdog fails fast when the stream goes silent mid-body', async () => {
-  // readWithIdleTimeout's watchdog is unref'd (in production the listening socket
-  // keeps the loop alive; here this test has no socket of its own), so hold a
-  // ref'd handle for the test's duration or the loop can drain before it fires.
+  // The watchdog is unref'd; without a socket the loop would drain before it fires.
   const alive = setInterval(() => {}, 60_000);
   try {
     const stream = new ReadableStream({
@@ -122,8 +102,6 @@ test('body watchdog fails fast when the stream goes silent mid-body', async () =
   }
 });
 
-// The watchdog must not fire on a healthy-but-slow stream: a chunk that arrives
-// within the window resets nothing artificially — it simply resolves.
 test('body watchdog does not fire when chunks keep arriving', async () => {
   const alive = setInterval(() => {}, 60_000); // see note above: keep the loop alive
   try {

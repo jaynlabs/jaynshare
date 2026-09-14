@@ -29,8 +29,6 @@ test('resolveAccountPin matches by accountUuid, orgUuid, name and email', () => 
   assert.equal(resolveAccountPin(am, 'BbB'), 2);              // case-insensitive
 });
 
-// One account across several orgs shares an accountUuid, so the qualified form
-// is the only way to name the second one; a bare uuid takes the first match.
 test('accountUuid/orgUuid selects one account among an org set', () => {
   const am = new AccountManager([
     withIds('me@x.com (Acme)', 'AAA', 'O1'),
@@ -42,8 +40,6 @@ test('accountUuid/orgUuid selects one account among an org set', () => {
   assert.equal(resolveAccountPin(am, 'me@x.com'), 0);  // ditto for the email
 });
 
-// The rotation index is array position: deleting an account would repoint every
-// later pin at a DIFFERENT account, so it is not an accepted pin form.
 test('resolveAccountPin does not accept a rotation index', () => {
   const am = new AccountManager([oauth('alpha'), oauth('beta')], 0.98);
   assert.equal(resolveAccountPin(am, '0'), null);
@@ -64,9 +60,7 @@ test('an account literally named "0" still resolves by name', () => {
 
 // ── end-to-end pin routing (integration) ─────────────────────────────────────
 
-// Stand up a mock upstream that records the path and Authorization it received,
-// so we can prove which account a pinned request was routed to and that the
-// /jaynshare-account/<pin> prefix was stripped before forwarding.
+// The upstream records the path and Authorization it received.
 async function withProxy(run) {
   const seen = [];
   const upstream = http.createServer((req, res) => {

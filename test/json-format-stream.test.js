@@ -2,7 +2,6 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { JsonStreamFormatter } from '../src/json-format-stream.js';
 
-// Format a value by feeding it as one chunk.
 function fmt(value) {
   const f = new JsonStreamFormatter();
   return f.push(Buffer.from(JSON.stringify(value)));

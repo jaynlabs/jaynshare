@@ -6,11 +6,7 @@ function oauth(name, extra = {}) {
   return { name, type: 'oauth', accessToken: 't', refreshToken: 'r', expiresAt: Date.now() + 3600_000, ...extra };
 }
 
-// The scenario these tests guard against (reproduced live in a sandbox): a 429
-// burst throttles every account with a long retry-after hold; the hold lives
-// only in memory and nothing revalidates it, so jaynshare keeps refusing with
-// synthetic 429s even after upstream is healthy again, until a restart wipes
-// the holds. Revalidation lets a live probe clear a stale hold instead.
+// A stale in-memory 429 hold must be cleared by a live probe, not a restart.
 
 test('within the floor, a rate-limit hold is respected verbatim (no probe)', () => {
   const am = new AccountManager([oauth('a'), oauth('b')], 0.98);

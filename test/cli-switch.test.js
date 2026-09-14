@@ -10,8 +10,6 @@ import { fileURLToPath } from 'node:url';
 import { AccountManager } from '../src/account-manager.js';
 import { createProxyServer } from '../src/server.js';
 
-// `jaynshare switch` drives the real control endpoint, so these run the CLI
-// against a real proxy server rather than a stubbed one.
 
 const cliPath = fileURLToPath(new URL('../src/index.js', import.meta.url));
 
@@ -24,7 +22,6 @@ function listen(server) {
   return new Promise(resolve => server.listen(0, '127.0.0.1', () => resolve(server.address().port)));
 }
 
-// A port nothing is listening on: bind one, learn its number, give it back.
 function closedPort() {
   return new Promise(resolve => {
     const probe = net.createServer();
@@ -41,11 +38,7 @@ async function writeConfig(port) {
   await writeFile(path, JSON.stringify({
     proxy: { port, apiKey: 'tc-test' },
     upstream: 'https://api.anthropic.com',
-    // Belt and braces, not load-bearing: Node's global fetch ignores proxy env
-    // vars unless NODE_USE_ENV_PROXY is set, so an inherited HTTPS_PROXY does not
-    // reach these localhost calls today. Pinned anyway so the test does not start
-    // depending on that default.
-    upstreamProxy: false,
+    upstreamProxy: false, // an inherited HTTPS_PROXY must not reach these calls
     switchThreshold: 0.98,
     accounts: ACCTS,
   }));
@@ -116,8 +109,6 @@ test('an unknown name exits 1 and prints the valid names', async () => {
   });
 });
 
-// Same rule as the endpoint: the switch is recorded, but a caller must not be
-// told plainly that it worked when no request will ever reach that account.
 async function withDisabled(fn) {
   const accts = [
     { name: 'alice@example.com', type: 'apikey', apiKey: 'k1' },
@@ -161,8 +152,6 @@ test('the listing marks a disabled account', async () => {
   });
 });
 
-// A reply from something that is not our proxy, or from a version that predates
-// the endpoint, must not be reported as "no server" or as an empty account list.
 test('an unexpected reply is reported as such, not as a down server', async () => {
   const impostor = http.createServer((_req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/html' });
@@ -186,9 +175,7 @@ test('an unexpected reply is reported as such, not as a down server', async () =
   }
 });
 
-// An old server has no /jaynshare/switch, so the request falls through to the
-// proxy path and Anthropic answers with an error OBJECT. Printing it raw yields
-// "[object Object]", which tells the user nothing.
+// An older server forwards the request upstream, whose error is an object.
 test('a non-string error field does not print as [object Object]', async () => {
   const oldServer = http.createServer((req, res) => {
     if (req.url === '/jaynshare/status') {

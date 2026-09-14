@@ -8,7 +8,6 @@ import {
   renderLaunchAgent, renderSystemdUnit, installService, uninstallService, serviceStatus, LABEL,
 } from '../src/service.js';
 
-// Records every command a call would run, and answers each with a canned result.
 function recorder(results = {}) {
   const calls = [];
   const run = (cmd, args) => {
@@ -32,9 +31,7 @@ test('unit files land in the per-user locations', () => {
   assert.equal(logPath('/Users/x', 'darwin'), '/Users/x/Library/Logs/jaynshare.log');
 });
 
-// The regression this guards: process.execPath on a Homebrew node points into
-// the versioned Cellar directory, which the next `brew upgrade node` deletes.
-// The PATH symlink survives upgrades and is what belongs in a unit file.
+// A Homebrew execPath points into the versioned Cellar, which the next upgrade deletes.
 test('resolveExec prefers a PATH symlink over the versioned real path', () => {
   const exec = resolveExec({
     execPath: '/opt/homebrew/Cellar/node/26.5.0_1/bin/node',
@@ -58,7 +55,6 @@ test('resolveExec keeps the real path when no PATH entry matches it', () => {
   assert.equal(exec.node, '/usr/local/n/versions/node/24/bin/node');
 });
 
-// A different node on PATH must not be substituted for the one actually running.
 test('resolveExec ignores a PATH node that is a different binary', () => {
   const exec = resolveExec({
     execPath: '/opt/homebrew/Cellar/node/26.5.0_1/bin/node',
@@ -70,8 +66,7 @@ test('resolveExec ignores a PATH node that is a different binary', () => {
   assert.equal(exec.node, '/opt/homebrew/Cellar/node/26.5.0_1/bin/node');
 });
 
-// launchd starts with an empty environment — an inherited-looking PATH is not
-// inherited at all, so the unit has to carry one or self-update can't find npm.
+// launchd starts with an empty environment.
 test('the service PATH covers both binaries and the system directories', () => {
   const p = servicePath({ node: '/opt/homebrew/bin/node', entry: '/opt/homebrew/bin/jaynshare' });
   assert.match(p, /^\/opt\/homebrew\/bin:/);
@@ -153,10 +148,7 @@ test('installing on systemd reloads the daemon before enabling', async () => {
   const home = await mkdtemp(join(tmpdir(), 'tc-svc-'));
   try {
     const { run, calls } = recorder();
-    // xdgConfig: null keeps the unit under `home`. Without it the call honours
-    // the ambient XDG_CONFIG_HOME — set on CI and on plenty of desktops — and
-    // the test would write a real unit file into the developer's own config dir
-    // while asserting against a temp path that was never written.
+    // xdgConfig: null, or the ambient XDG_CONFIG_HOME would put a real unit file in the developer's config.
     const res = await installService({
       kind: 'systemd', home, platform: 'linux', run, log: () => {}, xdgConfig: null,
       exec: { node: '/usr/bin/node', entry: '/usr/bin/jaynshare' },
@@ -172,9 +164,6 @@ test('installing on systemd reloads the daemon before enabling', async () => {
   }
 });
 
-// XDG_CONFIG_HOME wins over ~/.config for the unit's location — that is where a
-// systemd --user unit belongs on a machine that sets it. Asserted explicitly
-// because the same knob decides whether a test can reach the real config dir.
 test('the systemd unit follows XDG_CONFIG_HOME when one is set', async () => {
   const home = await mkdtemp(join(tmpdir(), 'tc-svc-'));
   try {

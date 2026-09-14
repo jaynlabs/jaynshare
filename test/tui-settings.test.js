@@ -2,11 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { TUI } from '../src/tui.js';
 
-// The settings screen keeps two lists in step: _settingsFields() drives the
-// cursor (↑↓ walk it, ←→/Enter act on the current entry) and _renderSettings()
-// draws the rows. A field present in the first but missing from the second is
-// invisible yet reachable: the cursor lands on nothing and ←→ silently change a
-// setting the operator can't see.
+// A field in _settingsFields() but not in _renderSettings() is invisible yet reachable.
 
 const stripAnsi = s => s.replace(/\x1b\[[0-9;]*m/g, '');
 

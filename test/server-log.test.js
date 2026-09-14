@@ -79,8 +79,7 @@ test('reverse-proxy streams an SSE response to the log as it arrives', { timeout
     const file = readdirSync(dir).find(f => f.endsWith('.log'));
     const content = readFileSync(join(dir, file), 'utf8');
     assert.match(content, /=== RESPONSE BODY \(streamed\) ===/);
-    // SSE written verbatim (not JSON-reformatted): the raw "event:"/"data:"
-    // lines survive intact, which a JSON pretty-printer would have mangled.
+    // SSE is written verbatim, not JSON-reformatted.
     assert.match(content, /event: message_start\ndata: \{"type":"message_start"/);
     assert.match(content, /event: message_delta/);
   } finally {

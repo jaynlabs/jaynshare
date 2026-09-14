@@ -11,10 +11,7 @@ async function listen(handler) {
   return { server, port: server.address().port };
 }
 
-// The default direct path pools HTTP/1.1 connections, so N
-// concurrent requests use N connections and run in PARALLEL — they do not
-// serialize behind one shared connection the way Node global fetch's single
-// HTTP/2 connection does under concurrent uploads.
+// Global fetch would serialize concurrent uploads on one HTTP/2 connection.
 test('concurrent requests each open their own connection and run in parallel', async () => {
   let conns = 0;
   const HEADER_DELAY = 300;
@@ -39,8 +36,6 @@ test('concurrent requests each open their own connection and run in parallel', a
   server.close();
 });
 
-// A large POST body (the workload that serializes on one h2 connection) streams
-// through, and the fetch-Response surface server.js relies on is intact.
 test('streams a large POST body and exposes the fetch-Response surface', async () => {
   const bodyLen = 1_000_000;
   const { server, port } = await listen((req, res) => {
@@ -66,7 +61,6 @@ test('streams a large POST body and exposes the fetch-Response surface', async (
   server.close();
 });
 
-// Streaming (SSE) response is delivered incrementally through the web-stream body.
 test('streams an SSE response body incrementally', async () => {
   const { server, port } = await listen(async (req, res) => {
     res.writeHead(200, { 'content-type': 'text/event-stream' });

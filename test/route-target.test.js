@@ -2,9 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { AccountManager } from '../src/account-manager.js';
 
-// The `target` field on a getRoutes() entry: the account that route would pick
-// for a request right now. The dashboard draws one marker per route from it, so
-// it has to track live eligibility rather than route membership.
+// `target` on a getRoutes() entry tracks live eligibility, not route membership.
 
 function oauth(name, extra = {}) {
   return { name, type: 'oauth', accessToken: 't', refreshToken: 'r', expiresAt: Date.now() + 3600_000, ...extra };
@@ -30,8 +28,6 @@ test('an auto-detected family route names its live target', () => {
   }
   assert.equal(byName(am.getRoutes(), 'fable').target, 'a');
 
-  // a's Fable bucket crosses the switch threshold — the bucket, not the account,
-  // is what moves the marker.
   am.accounts[0].quota.unified7dFable = 0.999;
   assert.equal(byName(am.getRoutes(), 'fable').target, 'b');
 });
@@ -62,8 +58,7 @@ test('target is derived for display only and never reaches the stored routing ta
   const am = new AccountManager([oauth('a')], 0.98, { routes: configured });
   am.getRoutes();
 
-  // The config array the caller handed in — the object that gets written back to
-  // disk — must be untouched, as must the manager's normalized copy.
+  // Neither the config array written to disk nor the manager's copy may change.
   assert.equal('target' in configured[0], false);
   assert.equal('target' in am.routes[0], false);
 });

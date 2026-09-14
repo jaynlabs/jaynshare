@@ -82,7 +82,7 @@ test('release never drives inFlight negative', () => {
   assert.equal(am.accounts[0].inFlight, 0);
 });
 
-// ── rate-limit pause (no-switch on 429) ───────────────────────
+// ── rate-limit pause ──────────────────────────────────────────
 
 test('pauseAccount pauses without throttling — account stays selectable (no rotation)', () => {
   const am = new AccountManager([oauth('a')], 0.98, { ramp: { pollMs: 5 } });
@@ -148,9 +148,6 @@ test('addAccount initializes storm-control fields so a runtime-added account can
   const idx = am.addAccount(oauth('b'));
   const acct = am.accounts[idx];
 
-  // Regression: addAccount once omitted inFlight/rampStartedAt/pausedUntil, so
-  // `undefined < cap` in admit() was always false and every request routed to a
-  // runtime-added account hung forever (and release() was a silent no-op).
   assert.equal(acct.inFlight, 0);
   assert.equal(acct.rampStartedAt, null);
   assert.equal(acct.pausedUntil, null);

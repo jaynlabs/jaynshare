@@ -64,8 +64,6 @@ test('the shared 5h bucket still gates every model', () => {
 });
 
 test('a spent family bucket with no shared-weekly value falls back to the shared weekly', () => {
-  // When the plan does not expose a Fable-specific bucket, a Fable request must
-  // still honor the shared weekly cap rather than sail past it.
   const am = new AccountManager([oauth('a')], 0.98);
   const q = am.accounts[0].quota;
   q.unified5h = 0.1;
@@ -91,8 +89,6 @@ test('selection spends the account whose GOVERNING weekly resets soonest', () =>
 // ── streaming model peek (shown immediately) ──────────────────
 
 test('the top-level model resolves from the first streamed chunk, before the full body', () => {
-  // A realistic messages body: `model` is an early top-level field, the bulk is
-  // the messages array. The finder must resolve on the first chunk.
   const head = Buffer.from('{"model":"claude-opus-4-6","messages":[');
   const tail = Buffer.from('{"role":"user","content":"' + 'x'.repeat(10_000) + '"}]}');
 
@@ -186,8 +182,7 @@ test('previewRouteIndex names the ONE account a model routes to, matching getAct
 test('previewRouteIndex is read-only — it never moves currentIndex', () => {
   const am = new AccountManager([oauth('a'), oauth('b')], 0.98);
   const future = Date.now() + 3600_000;
-  // a is Fable-spent, so a Fable request routes to b — but previewing it must not
-  // shift the global current account away from a (that thrash is the bug we fix).
+  // a is Fable-spent; previewing the Fable route must not move the current account.
   am.accounts[0].quota.unified5h = 0.1; am.accounts[0].quota.unified7d = 0.1;
   am.accounts[0].quota.unified7dFable = 1.0; am.accounts[0].quota.unified7dFableReset = future;
   am.accounts[1].quota.unified5h = 0.1; am.accounts[1].quota.unified7d = 0.1;

@@ -41,9 +41,6 @@ test('orgName falls back as discriminator when orgUuid absent', () => {
   assert.equal(sameIdentity(a, c), true);
 });
 
-// The migration scenario end-to-end: a legacy entry exists, then two different
-// orgs for the same person are added in sequence. After the first add backfills
-// the legacy entry's org, the second org must be recognized as distinct.
 test('legacy + two different orgs added in sequence resolves to two distinct accounts', () => {
   const accounts = [{ accountUuid: 'p1', name: 'a@x.com' }]; // legacy, org unknown
 
@@ -73,7 +70,6 @@ test('emailOf strips a " (org)" suffix', () => {
   assert.equal(emailOf({}), '');
 });
 
-// resolveAccount in index.js is built on matchAccounts; cover the routing here.
 const ACCTS = [
   { name: 'a@x.com (Acme)', accountUuid: 'p1', orgUuid: 'o-acme', orgName: 'Acme' },
   { name: 'a@x.com (Personal)', accountUuid: 'p1', orgUuid: 'o-pers', orgName: 'Personal' },
@@ -105,12 +101,7 @@ test('matchAccounts: no match returns empty', () => {
   assert.equal(matchAccounts(ACCTS, 'nobody@z.com').length, 0);
 });
 
-// The failure this guards against: one person, two organizations. Both entries
-// are auto-named from the same email, so a name match is not evidence that the
-// incoming login is the same account — and taking it as such overwrites the
-// other org's entry. The account disappears from the config while the running
-// server still holds it in memory, so the loss only becomes visible at the next
-// restart, far from the login that caused it.
+// Both orgs of one person are auto-named from the same email.
 test('findUpsertTarget: a second org of the same person is a NEW entry, not an overwrite', () => {
   const accounts = [
     { name: 'a@x.com', accountUuid: 'u1', orgUuid: 'o-personal', orgName: 'Personal' },
@@ -127,8 +118,6 @@ test('findUpsertTarget: the same account+org updates in place', () => {
   assert.equal(findUpsertTarget(accounts, { name: 'a@x.com', accountUuid: 'u1', orgUuid: 'o-acme' }), 1);
 });
 
-// A legacy entry predating stored org UUIDs must still be backfilled rather than
-// duplicated — "org unknown" means cannot tell, not different.
 test('findUpsertTarget: an entry with no org backfills instead of duplicating', () => {
   const accounts = [{ name: 'a@x.com', accountUuid: 'u1' }];
   assert.equal(findUpsertTarget(accounts, { name: 'a@x.com', accountUuid: 'u1', orgUuid: 'o-acme' }), 0);
@@ -139,8 +128,6 @@ test('findUpsertTarget: matches by name when neither side carries a UUID', () =>
   assert.equal(findUpsertTarget(accounts, { name: 'a@x.com', accountUuid: null }), 0);
 });
 
-// Two different people whose entries somehow share a display name must not
-// collapse into one either.
 test('findUpsertTarget: a different person with the same name is a new entry', () => {
   const accounts = [{ name: 'shared', accountUuid: 'u1', orgUuid: 'o1' }];
   assert.equal(findUpsertTarget(accounts, { name: 'shared', accountUuid: 'u2', orgUuid: 'o2' }), -1);

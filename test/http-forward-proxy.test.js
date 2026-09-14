@@ -10,16 +10,13 @@ async function listen(server) {
   return server.address().port;
 }
 
-// An accountManager that MUST NOT be consulted for a third-party host — if the
-// forward path ever routed to Anthropic, getActiveAccount would throw. This is
-// the principle under test: account logic only for hosts we manage.
+// Throws if the forward path ever consults account logic.
 const noRouteManager = {
   getActiveAccount() { throw new Error('third-party host must not be routed to Anthropic'); },
   getStatus() { return {}; },
 };
 
-// Absolute-form request through the proxy (`GET http://target/…`), as sent by any
-// tool honoring HTTP_PROXY.
+// Absolute-form, as a tool honoring HTTP_PROXY sends it.
 function proxyRequest({ proxyPort, method = 'GET', absoluteUrl, body }) {
   return new Promise((resolve, reject) => {
     const req = http.request({ host: '127.0.0.1', port: proxyPort, method, path: absoluteUrl }, (res) => {

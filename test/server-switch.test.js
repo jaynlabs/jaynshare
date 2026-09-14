@@ -4,12 +4,7 @@ import { Readable } from 'node:stream';
 import { AccountManager } from '../src/account-manager.js';
 import { createProxyServer } from '../src/server.js';
 
-// POST /jaynshare/switch is the headless equivalent of picking an account with
-// 's' in the TUI: both only move the manager's currentIndex. The TUI is not
-// reachable when the proxy runs as a background service, which is what this
-// endpoint exists for. currentIndex is a weak preference — selection drops it
-// when the account is unavailable and also when an available account has a
-// lower priority value — so "recorded" and "in effect" are tested separately.
+// currentIndex is a weak preference, so "recorded" and "in effect" are tested separately.
 
 function listen(server) {
   return new Promise(resolve => server.listen(0, '127.0.0.1', () => resolve(server.address().port)));
@@ -81,9 +76,6 @@ test('an unknown account is refused with 404 and the valid names', async () => {
   });
 });
 
-// The rotation index is array position, so accepting it would silently repoint a
-// script at a DIFFERENT account after a removal. resolveAccountPin refuses it and
-// the endpoint inherits that.
 test('a numeric rotation index is not an account name', async () => {
   await withServer(async (am, port) => {
     const res = await post(port, JSON.stringify({ account: '1' }));
@@ -112,10 +104,6 @@ test('a malformed body is a 400, not a crash', async () => {
   });
 });
 
-// A switch that cannot take effect must not report a bare success. currentIndex
-// still moves (that is the TUI's behaviour), but selection skips an unavailable
-// account on the very next request, so the answer says whether traffic will
-// actually follow the choice.
 test('switching to a disabled account succeeds but reports it as ineligible', async () => {
   const am = new AccountManager([
     { name: 'live@example.com', type: 'apikey', apiKey: 'k1' },
@@ -147,10 +135,6 @@ test('switching to a usable account reports it as eligible', async () => {
   });
 });
 
-// Unavailability is not the only way a switch gets undone. A perfectly healthy
-// account is dropped just as fast when another available account outranks it on
-// priority, so "eligible" has to answer the real question — would a request go
-// here — rather than only "is this account usable at all".
 test('a switch that priority will immediately override is reported as ineligible', async () => {
   const am = new AccountManager([
     { name: 'high@example.com', type: 'apikey', apiKey: 'k1', priority: 0 },
@@ -191,8 +175,6 @@ test('switching to the highest-priority account is eligible', async () => {
   }
 });
 
-// Equal priority must NOT read as preemption, or every default fleet would
-// report its own current account as ineligible.
 test('accounts at the same priority do not preempt each other', async () => {
   await withServer(async (am, port) => {
     const res = await post(port, JSON.stringify({ account: 'bob@example.com (Acme)' }));
@@ -211,8 +193,6 @@ test('an over-limit body is refused as 413 without echoing parser internals', as
   });
 });
 
-// The log line is the only record of a manual switch on a headless server, so a
-// refactor that drops it must fail something.
 test('a successful switch is logged, and says so when the target is ineligible', async () => {
   const am = new AccountManager([
     { name: 'live@example.com', type: 'apikey', apiKey: 'k1' },
@@ -236,8 +216,7 @@ test('a successful switch is logged, and says so when the target is ineligible',
   assert.match(offLine, /disabled/, 'the log must not claim a clean switch to an unusable account');
 });
 
-// Loopback is exempt from the proxy-key gate (that is what makes the fetch-based
-// tests above work), so the gate itself has to be exercised with a remote peer.
+// Loopback is exempt from the key gate, so the gate needs a remote peer.
 function remoteRequest(server, { headers = {}, body = '{}' } = {}) {
   const req = Readable.from([Buffer.from(body)]);
   req.method = 'POST';

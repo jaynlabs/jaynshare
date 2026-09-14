@@ -94,8 +94,7 @@ test('install adds the alias, is idempotent, and uninstall removes it cleanly', 
 test('uninstall removes our block even if the embedded path differs', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'tc-alias-'));
   const rcPath = join(dir, '.bashrc');
-  // Simulate a previously-installed alias with an absolute path that no longer
-  // matches what jaynshareRef() would compute now.
+  // An installed alias whose path no longer matches jaynshareRef().
   await writeFile(rcPath, 'export FOO=1\n# jaynshare alias\nalias claude=\'"/old/path/index.js" run --\'\n');
   try {
     uninstallAlias({ shell: 'bash', rcPath });

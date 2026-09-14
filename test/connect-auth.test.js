@@ -3,9 +3,7 @@ import assert from 'node:assert/strict';
 import { connectAuthorized } from '../src/mitm.js';
 import { safeKeyEqual, isLoopbackAddr, isSelfConnection } from '../src/server.js';
 
-// The CONNECT auth gate is the fix for the unauthenticated-MITM token-theft /
-// open-relay hole: without it, a remote client can CONNECT api.anthropic.com and
-// have an account token injected, or blind-tunnel anywhere.
+// Without the CONNECT gate, a remote client gets a token injected or an open relay.
 
 const sock = (remoteAddress) => ({ remoteAddress });
 const req = (auth) => ({ headers: auth ? { 'proxy-authorization': auth } : {} });

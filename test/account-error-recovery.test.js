@@ -7,7 +7,6 @@ import { refreshAccessToken } from '../src/oauth.js';
 function oauth(name, extra = {}) {
   return { name, type: 'oauth', accessToken: 't', refreshToken: 'r', expiresAt: Date.now() + 3600_000, ...extra };
 }
-// expiresAt within the 5-minute "expiring soon" window so ensureTokenFresh refreshes.
 function expiring(name) {
   return { name, type: 'oauth', accessToken: 't', refreshToken: 'r', expiresAt: Date.now() + 1000 };
 }
@@ -37,8 +36,6 @@ test('excluding an account for one request never changes its persistent status',
 // ── getActiveAccountFresh: block-refresh an already-expired token ───────────
 
 test('getActiveAccountFresh refreshes an ALREADY-expired token before returning', async () => {
-  // Rotating onto an account that sat idle past its token lifetime must not hand
-  // back a dead token — the selector blocks on a refresh first.
   let calls = 0;
   const am = new AccountManager(
     [{ name: 'a', type: 'oauth', accessToken: 'STALE', refreshToken: 'r', expiresAt: Date.now() - 1000 }],
@@ -51,8 +48,6 @@ test('getActiveAccountFresh refreshes an ALREADY-expired token before returning'
 });
 
 test('getActiveAccountFresh does NOT block-refresh a still-valid token', async () => {
-  // A merely "expiring soon" (still valid) token is left for the caller's
-  // opportunistic background refresh — selection must not block on it.
   let calls = 0;
   const am = new AccountManager(
     [{ name: 'a', type: 'oauth', accessToken: 'GOOD', refreshToken: 'r', expiresAt: Date.now() + 3600_000 }],
@@ -64,7 +59,7 @@ test('getActiveAccountFresh does NOT block-refresh a still-valid token', async (
   assert.equal(calls, 0, 'no blocking refresh for a valid token');
 });
 
-// ── refresh-failure classification (the wrongly-errored bug) ────────────────
+// ── refresh-failure classification ──────────────────────────────────────────
 
 test('ensureTokenFresh marks error only on a genuine auth rejection', async () => {
   for (const status of [400, 401, 403]) {
@@ -77,8 +72,6 @@ test('ensureTokenFresh marks error only on a genuine auth rejection', async () =
 });
 
 test('ensureTokenFresh does NOT sideline on a transient refresh failure', async () => {
-  // Network error (no .status) and an exhausted-retries 5xx must both be treated
-  // as transient — the account stays healthy and is retried next request.
   for (const err of [
     Object.assign(new Error('fetch failed'), { code: 'ECONNRESET' }),
     Object.assign(new Error('refresh 503'), { status: 503 }),

@@ -45,8 +45,6 @@ test('holdSeconds 0 / unset adds no API_TIMEOUT_MS', () => {
   assert.ok(!lines.some((l) => l.startsWith('export API_TIMEOUT_MS')));
 });
 
-// JAYNSHARE_ACCOUNT parity with `jaynshare run`: the pin must be carried by the routing
-// itself, in whichever form the mode uses, and must not survive into the child.
 test('an account pin rides in the proxy userinfo under MITM', () => {
   const lines = buildClaudeEnvLines({ port: 3456, account: 'work (Acme)', proxyApiKey: 'secret' });
   const url = 'http://work%20%28Acme%29:secret@127.0.0.1:3456';
@@ -63,9 +61,7 @@ test('an account pin becomes a /jaynshare-account/ prefix under --no-mitm', () =
   ]);
 });
 
-// An email-style name must survive the round trip: encodeURIComponent escapes
-// the @, and the client percent-decodes userinfo before base64 (verified against
-// Claude Code 2.1.220), so the proxy sees the name exactly as configured.
+// Claude Code percent-decodes userinfo before base64-encoding it.
 test('an email-style account name is encoded in the proxy URL', () => {
   const lines = buildClaudeEnvLines({ port: 3456, account: 'me@example.com', proxyApiKey: '' });
   assert.ok(lines.includes('export HTTPS_PROXY=http://me%40example.com:@127.0.0.1:3456'), lines.join('\n'));
@@ -81,8 +77,7 @@ test('no pin leaves the environment exactly as before', () => {
   assert.ok(!mitm.some((l) => l.includes('JAYNSHARE_ACCOUNT')));
 });
 
-// These lines are eval'd by a shell. encodeURIComponent leaves ( ) ' ! * alone,
-// which would make `export HTTPS_PROXY=http://work%20(Acme)@...` a syntax error.
+// encodeURIComponent leaves ( ) ' ! * alone.
 test('a pinned line is shell-safe: no unquoted metacharacters survive', () => {
   for (const name of ["work (Acme)", "o'brien", "a!b", "x*y"]) {
     for (const useMitm of [true, false]) {

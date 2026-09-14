@@ -52,7 +52,7 @@ test('fetchLatestVersion returns null on a non-ok response or a throw', async ()
   assert.equal(await fetchLatestVersion({ fetchImpl: async () => { throw new Error('offline'); } }), null);
 });
 
-// ── checkForUpdate (throttle + compare) ──────────────────────
+// ── checkForUpdate ───────────────────────────────────────────
 
 function tmpCache() {
   return join(mkdtempSync(join(tmpdir(), 'tc-upd-')), 'update-check.json');

@@ -2,7 +2,6 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { EgressGuard, createEgressGuard } from '../src/egress-guard.js';
 
-// A probe whose answer the test controls, and which counts how often it ran.
 function fakeProbe(ips) {
   const state = { calls: 0 };
   const fetchImpl = async () => {
@@ -37,8 +36,6 @@ test('several pinned addresses are all accepted', async () => {
   assert.equal((await guard.check()).ok, true);
 });
 
-// 'auto' exists so the common case needs no configuration: the server starts
-// with the tunnel up, so whatever it sees first is the address to hold for.
 test('auto latches onto the first address it sees and holds it', async () => {
   const { fetchImpl } = fakeProbe(['203.0.113.7', '192.0.2.55']);
   const guard = new EgressGuard({ pin: 'auto', ttlMs: 0, fetchImpl });
@@ -50,8 +47,6 @@ test('auto latches onto the first address it sees and holds it', async () => {
   assert.deepEqual(after.expected, ['203.0.113.7']);
 });
 
-// A probe that cannot answer must not become an outage of our own: the point is
-// to block a KNOWN-wrong address, not to require the check service to be up.
 test('a failed probe is treated as unknown, not as wrong', async () => {
   const { fetchImpl } = fakeProbe(new Error('getaddrinfo ENOTFOUND'));
   const guard = new EgressGuard({ pin: '203.0.113.7', fetchImpl });
@@ -78,8 +73,6 @@ test('concurrent checks share one probe', async () => {
   assert.equal(state.calls, 1);
 });
 
-// The whole point: a request must wait out a flap instead of going out from the
-// wrong address.
 test('waiting returns as soon as the pinned address is back', async () => {
   const { fetchImpl } = fakeProbe(['192.0.2.55', '192.0.2.55', '203.0.113.7']);
   const guard = new EgressGuard({ pin: '203.0.113.7', ttlMs: 0, holdMs: 5_000, pollMs: 5, fetchImpl });

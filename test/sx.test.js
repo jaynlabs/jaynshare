@@ -12,8 +12,7 @@ const T = { timeout: 30000 };
 const listen = (s) => new Promise((r) => s.listen(0, '127.0.0.1', () => r(s.address().port)));
 function closeHard(s) { if (!s) return; s.closeAllConnections?.(); try { s.close(); } catch { /* closing */ } }
 
-// A minimal HTTP CONNECT proxy: requires Basic auth, then blind-tunnels to the
-// requested host:port. Records whether auth was seen and the CONNECT target.
+// Requires Basic auth, then blind-tunnels. Records the auth seen and the target.
 function makeConnectProxy({ requireAuth = 'user:pass' } = {}) {
   const seen = { auth: null, target: null };
   const srv = net.createServer((client) => {
@@ -27,10 +26,7 @@ function makeConnectProxy({ requireAuth = 'user:pass' } = {}) {
       seen.auth = authLine ? Buffer.from(authLine.split(/\s+/)[2], 'base64').toString() : null;
       if (requireAuth && seen.auth !== requireAuth) { client.end('HTTP/1.1 407 Proxy Authentication Required\r\n\r\n'); return; }
       const [host, port] = m[1].split(':');
-      // autoSelectFamily so 'localhost' falls back to IPv4 on Node 18 (no
-      // happy-eyeballs by default) instead of hanging on an unreachable ::1.
-      // After the 200, everything is TLS ciphertext — the proxy just relays it.
-      const up = net.connect({ port: parseInt(port, 10), host, autoSelectFamily: true }, () => {
+      const up = net.connect({ port: parseInt(port, 10), host }, () => {
         client.write('HTTP/1.1 200 Connection Established\r\n\r\n');
         up.pipe(client); client.pipe(up);
       });
@@ -144,11 +140,10 @@ test('upstreamFetch is plain global fetch when useProxy is false', T, async () =
   const server = http.createServer((req, res) => { res.writeHead(200, { 'content-type': 'application/json' }); res.end('{"direct":true}'); });
   const port = await listen(server);
   try {
-    // no sx
     const res = await upstreamFetch(`http://127.0.0.1:${port}/`, {}, null, true);
     assert.equal(res.status, 200);
     assert.deepEqual(JSON.parse(await res.text()), { direct: true });
-    // provisioned but useProxy=false → still direct (would otherwise fail: no real proxy)
+    // useProxy=false goes direct even when provisioned (port 1 would fail)
     const sx = { isProvisioned: () => true, getProxy: () => ({ host: '127.0.0.1', port: 1 }) };
     const res2 = await upstreamFetch(`http://127.0.0.1:${port}/`, {}, sx, false);
     assert.equal(res2.status, 200);
@@ -198,7 +193,6 @@ test('SxManager mode off keeps the key and skips provisioning; turning on provis
   } finally { delete process.env.SX_API_BASE; closeHard(api); }
 });
 
-// Mock the sx.org REST API so provision() can be exercised without network/spend.
 function makeSxApi(handler) {
   const srv = http.createServer((req, res) => {
     let body = '';

@@ -5,7 +5,6 @@ import net from 'node:net';
 import { once } from 'node:events';
 import { createProxyRequestListener, relayUpgrade } from '../src/server.js';
 
-// Bring up an HTTP server on an ephemeral port and hand back {server, port}.
 async function listen(handler) {
   const server = http.createServer(handler);
   server.listen(0);
@@ -23,10 +22,6 @@ async function requestThrough(listener, { method = 'GET', path, headers = {}, bo
   }
 }
 
-// Remote Control (/v1/code/*) must reach upstream with the client's OWN
-// authorization header untouched, never a rotated account token — a fake
-// accountManager whose getActiveAccount would throw proves relayStream never
-// even consults it for this path.
 test('a GET to /v1/code/* forwards the client credential and streams the response back untouched', async () => {
   const { server: upstream, port: upstreamPort } = await listen((req, res) => {
     assert.equal(req.headers.authorization, 'Bearer client-own-token');
@@ -35,9 +30,7 @@ test('a GET to /v1/code/* forwards the client credential and streams the respons
     res.end();
   });
 
-  // Cleanup lives in finally throughout this file: a failed assertion must not
-  // leave servers listening — leaked handles keep the child's event loop alive
-  // and hang the whole `node --test` run, not just this file.
+  // A leaked server would hang the whole `node --test` run.
   try {
     const accountManager = { getActiveAccount() { throw new Error('must not rotate Remote Control'); } };
     const listener = createProxyRequestListener({
@@ -56,10 +49,6 @@ test('a GET to /v1/code/* forwards the client credential and streams the respons
   }
 });
 
-// The whole point of the rewrite: relayStream must not wait for the request (or
-// the response) to fully materialize before starting to move bytes — a
-// long-poll upstream that waits before sending headers must not be treated as
-// a dead request the way a normal bounded /v1/messages call would be.
 test('does not wait for the request to end before the response can start streaming', async () => {
   const { server: upstream, port: upstreamPort } = await listen((req, res) => {
     res.writeHead(200, { 'content-type': 'text/event-stream' });
@@ -85,19 +74,10 @@ test('does not wait for the request to end before the response can start streami
     controller.abort();
     proxy.close();
     upstream.close();
-    // The upstream deliberately never end()s its response, so close() alone
-    // would wait on that live connection forever.
-    upstream.closeAllConnections();
+    upstream.closeAllConnections(); // the response is never ended
   }
 });
 
-// Remote Control's real-time channel is a WebSocket
-// (wss://api.anthropic.com/v1/session_ingress/ws/{session_id}), which is an
-// HTTP Upgrade handshake — Node fires 'upgrade' for this, never 'request', so
-// relayStream (built on req/res) never even sees it. relayUpgrade is the
-// dedicated handler for that event; this proves the handshake and the
-// bidirectional byte stream both survive the relay with the client's own
-// Authorization header intact (never rewritten to a rotated account token).
 test('relays a WebSocket Upgrade handshake and echoes bytes both ways', async () => {
   const { server: upstream, port: upstreamPort } = await listen(() => {});
   upstream.on('upgrade', (req, socket) => {
@@ -139,12 +119,7 @@ test('relays a WebSocket Upgrade handshake and echoes bytes both ways', async ()
   }
 });
 
-// Once the 101 fires, Node detaches the upgraded socket from the ClientRequest,
-// so upstreamReq's 'error' listener no longer covers it. A dropped link then
-// surfaces as an 'error' on that bare socket (write EPIPE / read ECONNRESET) —
-// with nothing listening, Node turns an unhandled 'error' event into an
-// uncaught exception and the whole proxy dies, taking every other session with
-// it. A flapping connection must close one relay, not the process.
+// The 101 detaches the socket from upstreamReq; an unhandled 'error' on it would kill the process.
 test('an upstream socket that dies mid-relay tears down the pair instead of crashing the proxy', async () => {
   const { server: upstream, port: upstreamPort } = await listen(() => {});
   upstream.on('upgrade', (req, socket) => {
@@ -175,10 +150,7 @@ test('an upstream socket that dies mid-relay tears down the pair instead of cras
     const [handshake] = await once(client, 'data');
     assert.match(handshake.toString(), /101 Switching Protocols/);
 
-    // Keep writing into the now-dead relay: this is the EPIPE path. Waiting
-    // for 'close' via events.once would reject on the ECONNRESET the dying
-    // relay is EXPECTED to surface (once() rejects whenever 'error' fires
-    // first) — that race is exactly what used to abandon the test mid-flight.
+    // Not events.once: it would reject on the ECONNRESET the dying relay is expected to surface.
     const closed = new Promise(resolve => client.once('close', resolve));
     writer = setInterval(() => client.write('ping'), 5);
     await closed;

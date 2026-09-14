@@ -2,14 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { TUI } from '../src/tui.js';
 
-// The TUI used to repaint the whole screen every 500ms for as long as the proxy
-// ran. The spinner it was animating is drawn only next to in-flight requests, so
-// while idle each tick redrew a frame indistinguishable from the last — enough
-// wake-ups to keep a laptop from sleeping.
-//
-// Two properties keep that from coming back: the tick slows down when there is
-// nothing to animate, and an unchanged frame is not written to the terminal at
-// all.
+// An idle TUI must not wake the machine: the tick slows down and an unchanged frame is not written.
 
 function makeTUI() {
   const am = {
@@ -44,8 +37,6 @@ test('the tick is slow while idle and fast only while something is animating', (
   assert.equal(tui._tickDelay(), idle, 'falls back to the idle cadence once nothing is in flight');
 });
 
-// Run exactly one real tick, driving the scheduler's own callback rather than a
-// hand-rolled copy of its body.
 function runOneTick(tui) {
   let captured = null;
   tui._setTimeout = (fn) => { captured = fn; return { unref() {} }; };
@@ -71,7 +62,6 @@ test('the spinner frame only advances when the spinner is on screen', () => {
   assert.notEqual(tui.frame, before, 'the spinner still animates while a request is in flight');
 });
 
-// An unchanged screen must not be rewritten: that write is the wake-up.
 test('an identical frame is not written to the terminal twice', () => {
   const tui = makeTUI();
   tui.running = true;
@@ -88,17 +78,13 @@ test('an identical frame is not written to the terminal twice', () => {
     tui._paint('DIFFERENT', false);
     assert.equal(writes.length, 2, 'a changed frame is written');
 
-    // force is how a resize gets through: the terminal reflowed, so the cached
-    // frame says nothing about what is actually on screen.
-    tui._paint('DIFFERENT', true);
+    tui._paint('DIFFERENT', true); // a resize
     assert.equal(writes.length, 3, 'a forced repaint is written even when unchanged');
   } finally {
     process.stdout.write = orig;
   }
 });
 
-// The terminal is shared state. If something else scribbles on it, an unchanged
-// frame would otherwise leave the screen corrupted indefinitely.
 test('an unchanged frame is still repainted eventually', () => {
   const tui = makeTUI();
   tui.running = true;
@@ -121,8 +107,6 @@ test('an unchanged frame is still repainted eventually', () => {
   }
 });
 
-// A request arriving mid-idle-tick must start animating immediately rather than
-// waiting out the remainder of the slow tick.
 test('a request arriving while idle re-arms the tick at once', () => {
   const tui = makeTUI();
   tui.running = true;

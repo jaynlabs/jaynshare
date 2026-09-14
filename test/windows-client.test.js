@@ -1,9 +1,4 @@
-// Platform-independent coverage of the Windows client paths.
-//
-// These run on every machine, including macOS and Linux CI, by driving the
-// shipped scripts with JAYNSHARE_PLATFORM=win32 and stub cygpath/icacls/whoami
-// executables. The `windows-client` job on windows-latest runs the same suite
-// plus test-support/client-install-check.sh against the real tools.
+// Runs everywhere: JAYNSHARE_PLATFORM=win32 plus stub cygpath/icacls/whoami executables.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -52,8 +47,6 @@ function runScript(command, args, options = {}) {
   });
 }
 
-// A Windows-shaped fixture: stub tools on PATH, a home directory that stands in
-// for the user profile, and the platform override the shipped scripts read.
 async function windowsFixture(name, { roamingProfile = false } = {}) {
   const root = await mkdtemp(join(tmpdir(), `jaynshare-win-${name}-`));
   const home = join(root, 'home');
@@ -61,9 +54,7 @@ async function windowsFixture(name, { roamingProfile = false } = {}) {
   await mkdir(home, { recursive: true });
   await mkdir(bin, { recursive: true });
 
-  // Git Bash puts its own /usr/bin ahead of C:\Windows\System32, so the two
-  // directories are kept apart here too: `bin` is what PATH finds first, and
-  // `system32` is where the real Windows tools live.
+  // Git Bash puts its own /usr/bin ahead of System32.
   const system32 = join(root, 'windows/System32');
   await mkdir(system32, { recursive: true });
   const writeIn = async (dir, file, body) => {
@@ -71,14 +62,11 @@ async function windowsFixture(name, { roamingProfile = false } = {}) {
     await chmod(join(dir, file), 0o755);
   };
   const write = (file, body) => writeIn(bin, file, body);
-  // cygpath returns a path this host can still open while recording what it was
-  // asked to convert, so the conversion itself stays assertable off Windows.
+  // Returns a path this host can open; records what it was asked to convert.
   await write('cygpath', '#!/bin/sh\n'
     + 'while [ "$#" -gt 0 ]; do case "$1" in -w|-u|--) shift ;; *) break ;; esac; done\n'
     + 'printf \'%s\\n\' "$1" >> "$CYGPATH_LOG"\nprintf \'%s\\n\' "$1"\n');
-  // Git Bash rewrites /switch arguments into paths unless conversion is turned
-  // off, and the real tools then reject them. These stubs fail the same way, so
-  // the shipped code cannot quietly lose that guard.
+  // Git Bash rewrites /switch arguments into paths unless MSYS_NO_PATHCONV is set.
   const noPathConv = '[ "${MSYS_NO_PATHCONV:-}" = 1 ] || '
     + '{ printf \'ERROR: Invalid argument/option - %s\\n\' "$1" >&2; exit 1; }\n';
   await writeIn(system32, 'icacls.exe', '#!/bin/sh\n' + noPathConv
@@ -90,18 +78,13 @@ async function windowsFixture(name, { roamingProfile = false } = {}) {
     + '[ -z "${ICACLS_EXTRA_ACE:-}" ] || printf \'          BUILTIN\\\\Users:(RX)\\n\'\n');
   await writeIn(system32, 'whoami.exe', '#!/bin/sh\n' + noPathConv
     + `printf '"machine\\\\tester","${SID}"\\n'\n`);
-  // The whoami.exe PATH finds first in Git Bash is GNU coreutils, which knows
-  // nothing about /user. Anything that reaches for it by name fails here the
-  // way it fails on Windows.
+  // Git Bash finds coreutils' whoami first, which knows nothing about /user.
   await write('whoami.exe', '#!/bin/sh\n'
     + '[ "$#" -eq 0 ] || { printf "whoami: extra operand \'%s\'\\n" "$1" >&2; exit 1; }\n'
     + 'printf \'machine\\\\tester\\n\'\n');
   await write('claude', '#!/bin/sh\nprintf \'claude %s\\n\' "$*"\n');
 
-  // A roaming profile or a HOMEDRIVE override leaves Git Bash exporting a HOME
-  // that is not the Windows profile os.homedir() reports. This stub node splits
-  // the two the same way: every Node process reports the profile while the
-  // shell keeps its own HOME.
+  // A roaming profile: the shell's HOME is not the profile os.homedir() reports.
   let shellHome = home;
   if (roamingProfile) {
     shellHome = join(root, 'git-bash-home');
@@ -123,9 +106,7 @@ async function windowsFixture(name, { roamingProfile = false } = {}) {
     ICACLS_LOG: join(root, 'icacls.log'),
   };
   delete env.XDG_CONFIG_HOME;
-  // On a Windows host this would otherwise point the lookup at the real
-  // System32 whenever the fixture's copy is incomplete.
-  delete env.WINDIR;
+  delete env.WINDIR; // would point at the real System32
 
   const ca = join(root, 'ca.pem');
   await writeFile(ca, '-----BEGIN CERTIFICATE-----\nsynthetic\n-----END CERTIFICATE-----\n');
@@ -161,21 +142,13 @@ test('Windows uses the inherited console because /dev/tty cannot be opened there
   const windows = openPickerTerminal({ platform: 'win32' });
   assert.equal(windows.ownsInput, false, 'stdin and stderr belong to the caller on Windows');
   assert.equal(windows.input, process.stdin);
-  // Which mode a Windows user gets follows the descriptor, not the platform:
-  // mintty handed Node a raw-mode-less MSYS pipe until it began wrapping a
-  // ConPTY, which hands over a real console. Both modes stay supported.
   assert.equal(pickerMode(process.stdin, { override: undefined }),
     typeof process.stdin.setRawMode === 'function' ? 'raw' : 'line');
   assert.equal(pickerMode({}, { override: undefined }), 'line');
   assert.equal(pickerMode({ setRawMode() {} }, { override: 'line' }), 'line');
-  // That console is written with raw bytes, which it decodes with its OEM
-  // output codepage rather than as UTF-8, so it may only be sent ASCII.
   assert.equal(windows.ascii, true, 'the Windows picker terminal asks for ASCII');
 });
 
-// Both picker modes draw on that terminal, so neither may emit a character the
-// console would render as the CP437 letters sharing its UTF-8 bytes: an up
-// arrow reaches the user as the mojibake the VM pass found.
 test('the Windows picker draws with characters every console codepage agrees on', () => {
   const now = Date.parse('2026-09-09T12:00:00Z');
   // A name past the column width, so the truncation marker is rendered too.
@@ -256,8 +229,6 @@ test('Claude settings run the Windows client through node by native path', async
     });
     assert.equal(result.status, 0, result.stderr);
     const settings = JSON.parse(await readFile(join(home, '.claude/settings.json'), 'utf8'));
-    // One spelling that Git Bash and cmd.exe parse identically, with the
-    // backslashes escaped by JSON encoding rather than by hand.
     assert.equal(settings.statusLine.command,
       'node "C:\\Users\\tester\\.local\\bin\\jaynshare" status --line');
     assert.equal(settings.hooks.UserPromptSubmit[0].hooks[0].command,
@@ -302,9 +273,7 @@ test('a Windows install locks the enrollment by SID and verifies it afterwards',
 
     const acl = await fixture.icaclsLog();
     assert.match(acl, /\/inheritance:r/, 'inherited entries have to be removed');
-    // An explicit entry left on the secret by an earlier install is not
-    // inherited, so /inheritance:r cannot remove it. Every locked path is reset
-    // first: the directory and all three enrollment files.
+    // /inheritance:r cannot remove an explicit entry left by an earlier install.
     assert.equal((acl.match(/\/reset/g) || []).length, 4,
       'every locked path is reset before access is granted');
     assert.match(acl, new RegExp(`grant:r \\*${SID}:\\(OI\\)\\(CI\\)F`), 'the directory grant is inheritable');
@@ -320,8 +289,6 @@ test('a Windows install locks the enrollment by SID and verifies it afterwards',
     assert.equal(result.stdout.includes(SECRET), false, 'the installer never echoes the secret');
     assert.equal(result.stderr.includes(SECRET), false);
 
-    // Windows resolves enrollment from the user profile, never from an MSYS
-    // XDG_CONFIG_HOME spelling that native Node cannot open.
     const elsewhere = await runScript(process.execPath, [join(fixture.binDir, 'jaynshare'), 'status', '--json'], {
       env: { ...fixture.env, XDG_CONFIG_HOME: '/c/Users/tester/.config' },
     });
@@ -336,8 +303,6 @@ test('enrollment follows the Windows profile even when Git Bash exports another 
   const fixture = await windowsFixture('roaming', { roamingProfile: true });
   const fake = await startFakeUsageServer({ secret: SECRET });
   try {
-    // The installer verifies itself by running the client, so success here
-    // already means both halves agreed on where enrollment lives.
     const result = await install(fixture, { port: fake.port });
     assert.equal(result.status, 0, result.stderr);
     assert.equal((await readFile(join(fixture.configDir, 'client.secret'), 'utf8')).trim(), SECRET);

@@ -19,9 +19,7 @@ test('parseRequestModel reads the top-level model', () => {
 });
 
 test('parseRequestModel ignores a "model" key nested in conversation content', () => {
-  // A user message literally contains `"model":"DECOY"`; the real field comes
-  // after it at the top level. A regex would grab DECOY — the structural finder
-  // must return the top-level value.
+  // A regex would grab the DECOY inside the message text.
   const body = JSON.stringify({
     messages: [{ role: 'user', content: 'here is json: {"model":"DECOY-should-be-ignored"}' }],
     system: [{ type: 'text', text: '"model": "ALSO-DECOY"' }],

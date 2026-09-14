@@ -58,8 +58,7 @@ test('distribution on: priority still wins over session load-balancing', () => {
     oauth('a', { priority: 0 }),
     oauth('b', { priority: 1 }), // less preferred
   ], 0.98, { distributeSessions: true });
-  // Even as 'a' accrues sessions, new sessions stay on the higher-priority 'a'
-  // (its whole tier is just one account) rather than spilling to lower-priority 'b'.
+  // New sessions stay in the higher-priority tier even as it fills up.
   for (const sid of ['s1', 's2', 's3']) {
     const acc = am.getActiveAccount(null, null, null, sid);
     am.recordSession(sid, acc.index);

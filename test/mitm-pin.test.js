@@ -10,11 +10,7 @@ import { createConnectHandler, resolveConnectPin, connectPinToken } from '../src
 import { AccountManager } from '../src/account-manager.js';
 import { ACCOUNT_PREFERENCE_PREFIX, encodeAccountPreference } from '../src/account-preference.js';
 
-// MITM-mode account pinning (JAYNSHARE_ACCOUNT). Inside a CONNECT tunnel the request path
-// is the real upstream one, so there is nowhere to hang a `/jaynshare-account/` prefix —
-// the pin rides in the proxy URL's userinfo and arrives as the Basic *username*
-// of `Proxy-Authorization` on the CONNECT. Verified against Claude Code 2.1.220,
-// which sends that header preemptively on every CONNECT.
+// In MITM mode the pin arrives as the Basic username of Proxy-Authorization on the CONNECT.
 
 function listen(server) { return new Promise(r => server.listen(0, '127.0.0.1', () => r(server.address().port))); }
 const T = { timeout: 30000 };
@@ -27,8 +23,7 @@ function closeHard(server) {
 
 const basic = (s) => 'Basic ' + Buffer.from(s).toString('base64');
 
-// CONNECT (optionally with Proxy-Authorization), then TLS over the tunnel.
-// Resolves the TLS socket, or rejects with the proxy's status line if refused.
+// Rejects with the proxy's status line when the CONNECT is refused.
 function connectThroughProxy(proxyPort, target, caCertPem, alpn, proxyAuth = null) {
   return new Promise((resolve, reject) => {
     const raw = net.connect(proxyPort, '127.0.0.1');
@@ -77,7 +72,6 @@ function makeProxy(am, upPort, { leafCertPem, leafKeyPem }, config = {}) {
 const oauthAccount = (name, token) =>
   ({ name, type: 'oauth', accessToken: token, refreshToken: 'r', expiresAt: Date.now() + 3600_000 });
 
-// Send one POST over the tunnel and resolve the response headers.
 async function postOverTunnel(tlsSock, headers = {}) {
   const client = http2.connect('https://localhost', { createConnection: () => tlsSock });
   const req = client.request({ ':method': 'POST', ':path': '/v1/messages', 'content-type': 'application/json', ...headers });
@@ -100,8 +94,7 @@ test('the Basic username selects the account', () => {
   assert.deepEqual(resolveConnectPin({ headers: { 'proxy-authorization': basic('1:') } }, am, null), { pin: null, error: 'Unknown account pin "1"' });
 });
 
-// The documented remote form is `--proxy http://<key>@host:port`, which puts the
-// API KEY in the username slot. That must stay auth, never be read as a pin.
+// The documented `--proxy http://<key>@host:port` form puts the key in the username slot.
 test('a username equal to the proxy key is auth, not a pin', () => {
   const am = { accounts: [{ name: 'work' }] };
   assert.deepEqual(resolveConnectPin({ headers: { 'proxy-authorization': basic('secret:') } }, am, 'secret'), { pin: null, error: null });
@@ -110,8 +103,6 @@ test('a username equal to the proxy key is auth, not a pin', () => {
   assert.deepEqual(resolveConnectPin({ headers: { 'proxy-authorization': basic('secret:') } }, clash, 'secret'), { pin: null, error: null });
 });
 
-// A typo'd pin that silently served from the wrong account is the failure this
-// feature exists to remove, so an unknown username is an error, not a shrug.
 test('an unknown username is an error rather than an ignored pin', () => {
   const am = { accounts: [{ name: 'work' }] };
   const { pin, error } = resolveConnectPin({ headers: { 'proxy-authorization': basic('typo:') } }, am, 'secret');
@@ -240,8 +231,6 @@ test('a quota-rejected soft preference falls back through normal routing', T, as
   }
 });
 
-// Two pins on one proxy must not bleed into each other — each tunnel gets the
-// listener bound to its own account.
 test('concurrent tunnels with different pins stay separate', T, async () => {
   const { caCertPem, leafCertPem, leafKeyPem } = generateCertChain('localhost');
   const upstream = makeUpstream((req) => ({
@@ -284,9 +273,7 @@ test('an unknown pin is refused at CONNECT', T, async () => {
   }
 });
 
-// Clients send Proxy-Authorization on EVERY CONNECT, including blind-tunneled
-// third-party hosts where a pin is meaningless. A pin meant for Anthropic must
-// not take down unrelated traffic.
+// Clients send Proxy-Authorization on every CONNECT, third-party hosts included.
 test('a pin on a blind-tunneled host is ignored, not refused', T, async () => {
   const { caCertPem, leafCertPem, leafKeyPem } = generateCertChain('localhost');
   const target = http.createServer((_req, res) => { res.writeHead(200); res.end('ok'); });
@@ -298,9 +285,7 @@ test('a pin on a blind-tunneled host is ignored, not refused', T, async () => {
   const proxy = makeProxy(am, upPort, { caCertPem, leafCertPem, leafKeyPem });
   const proxyPort = await listen(proxy);
 
-  // A garbage pin that WOULD 407 in rewrite mode. hostMode compares the HOST
-  // only, so the tunnel target must differ by name, not just port: the upstream
-  // is 127.0.0.1, so `localhost` is a different host and takes the tunnel path.
+  // A pin that would 407 in rewrite mode; `localhost` differs from the 127.0.0.1 upstream by name, so it tunnels.
   const raw = net.connect(proxyPort, '127.0.0.1');
   try {
     await once(raw, 'connect');

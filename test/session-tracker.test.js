@@ -2,7 +2,6 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { SessionTracker, SESSION_KNOWN_TTL_MS, SESSION_ACTIVE_TTL_MS } from '../src/session-tracker.js';
 
-// A tracker whose clock we drive by hand.
 function fixedClock(start = 1_000_000) {
   const c = { t: start };
   return { clock: c, now: () => c.t };

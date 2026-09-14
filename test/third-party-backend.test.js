@@ -3,16 +3,11 @@ import assert from 'node:assert/strict';
 import { AccountManager } from '../src/account-manager.js';
 import { rewriteModel } from '../src/server.js';
 
-// Covers the third-party-backend feature: per-account `upstream`/`modelMap`/
-// `models`, model-ownership routing in AccountManager, and the request-body model
-// rewrite in server.js.
 
 function oauth(name, extra = {}) {
   return { name, type: 'oauth', accessToken: 't-' + name, refreshToken: 'r', expiresAt: Date.now() + 3600_000, ...extra };
 }
 
-// A DeepSeek-style third-party account: alternate upstream, a modelMap, and a
-// `models` list it exclusively owns. Higher priority value = fallback only.
 function deepseek(extra = {}) {
   return oauth('deepseek', {
     upstream: 'https://api.deepseek.com/anthropic',
@@ -64,8 +59,7 @@ test('the [Nm] suffix is stripped when matching, so a bare model name still rout
 
 test('a Claude model is not owned by the third-party account → Claude accounts stay eligible', () => {
   const am = new AccountManager([oauth('claude'), deepseek()], 0.98);
-  // deepseek's models are all deepseek-*, so a Claude model claims no owner and
-  // any account may serve it — priority then makes deepseek a fallback only.
+  // A Claude model has no owner, so any account serves it; priority makes deepseek a fallback.
   assert.equal(am._isAvailable(am.accounts[0], 'claude-sonnet-4-6'), true);
   assert.equal(am._selectNext(null, 'claude-sonnet-4-6').name, 'claude');
 });
@@ -97,7 +91,7 @@ test('two accounts can co-own the same model — both stay eligible', () => {
   assert.equal(am._selectNext(null, 'deepseek-v4-pro').name, 'ds-a'); // lower priority value wins
 });
 
-// ── request-body model rewrite (server.rewriteModel) ─────────────────────────
+// ── rewriteModel ─────────────────────────────────────────────────────────────
 
 const modelMap = { 'claude-sonnet-4-6': 'deepseek-v4-pro[1m]' };
 
@@ -112,8 +106,7 @@ test('rewriteModel maps a known model and returns re-serialized JSON', () => {
 test('rewriteModel updates the byte length so Content-Length can be corrected', () => {
   const body = Buffer.from(JSON.stringify({ model: 'claude-sonnet-4-6' }));
   const out = rewriteModel(body, modelMap);
-  // The mapped name is a different length, so the buffer size changes — this is
-  // exactly why forwardRequest resets content-length from out.length.
+  // A different length is why forwardRequest resets content-length.
   assert.notEqual(out.length, body.length);
   assert.equal(out.length, Buffer.byteLength(out.toString('utf8'), 'utf8'));
 });
