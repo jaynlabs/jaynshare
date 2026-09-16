@@ -1,5 +1,7 @@
 # Jaynshare
 
+Share your claude subscriptions!
+
 Jaynshare is a self-hosted, quota-aware router for Claude Code. It pools
 multiple Claude accounts behind one private service, rotates away from
 exhausted or unhealthy accounts, and lets enrolled macOS and Windows clients
