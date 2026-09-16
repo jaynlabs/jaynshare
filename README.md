@@ -11,6 +11,11 @@ see fleet availability without receiving the server's credentials.
 > [compliance notes](docs/compliance.md), obtain every account owner's consent,
 > and never commit credentials, transcripts, or deployment details.
 
+## short demo
+
+https://github.com/user-attachments/assets/5e479305-e21b-48ed-bcb6-ac21d1507415
+
+
 ## Highlights
 
 - OAuth and API-key accounts with quota-aware failover
