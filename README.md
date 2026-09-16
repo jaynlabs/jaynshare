@@ -13,7 +13,7 @@ see fleet availability without receiving the server's credentials.
 
 ## short demo
 
-https://github.com/user-attachments/assets/963a4e52-695a-4bf3-b1b6-06a0144f5505
+<img width="900" height="575" alt="demo" src="https://github.com/user-attachments/assets/b56a5777-51eb-465d-947e-e0be8335ef7a" />
 
 ## Highlights
 
