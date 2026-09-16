@@ -7,6 +7,7 @@ see fleet availability without receiving the server's credentials.
 
 > [!WARNING]
 > Account pooling may conflict with your provider's terms. Read the
+> [subscription-sharing risk summary](is_this_safe.md) and
 > [compliance notes](docs/compliance.md), obtain every account owner's consent,
 > and never commit credentials, transcripts, or deployment details.
 
