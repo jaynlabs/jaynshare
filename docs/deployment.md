@@ -4,6 +4,11 @@ This guide installs Jaynshare on a private Linux host and enrolls macOS or
 Windows clients. Keep the service off the public internet; the supported setup
 uses a Tailscale address and shares only the Jaynshare host with each client.
 
+Before enrolling anyone, read the [security and privacy model](security-and-privacy.md)
+with them. The private network encrypts transport and client credentials prevent
+unauthorized use, but the Jaynshare server still receives routed content in
+plaintext. Every participant must trust the server operator and deployed code.
+
 ## Server
 
 ### Prerequisites
@@ -73,6 +78,11 @@ This creates two files under `onboarding/`:
 
 Send them through separate private channels. Delete the transferred secret
 after the client confirms that `jaynshare status` works.
+
+An enrolled client can see fleet names, organization names, quota, aggregate
+usage, and session counts, but not other clients' prompts or responses. Use
+separate deployments if even that metadata or shared-quota influence should not
+cross between groups.
 
 ### macOS
 

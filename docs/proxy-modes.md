@@ -4,6 +4,12 @@ Two independent things, both about how the traffic physically travels: how `clau
 
 ## MITM proxy mode (default)
 
+> [!WARNING]
+> MITM is literal here: Jaynshare decrypts the configured upstream's requests
+> and responses and can technically modify them. The server operator must be
+> trusted with the code and data sent through Claude Code. See the full
+> [security and privacy model](security-and-privacy.md).
+
 The plain reverse-proxy only intercepts what `ANTHROPIC_BASE_URL` covers. Some Claude Code features (e.g. the **Claude Design MCP**) use a **hardcoded** `https://api.anthropic.com` URL that ignores that variable, so they bypass the proxy. MITM proxy mode captures those too, which is why it's the default for `jaynshare run` (and the shell alias):
 
 ```bash

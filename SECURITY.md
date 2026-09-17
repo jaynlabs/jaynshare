@@ -1,5 +1,11 @@
 # Security policy
 
+For the product's trust boundaries, operator capabilities, client-to-client
+isolation, logging behavior, and safer deployment guidance, read the
+[security and privacy model](docs/security-and-privacy.md). In particular,
+Jaynshare is a trusted intermediary: the server can read and alter routed
+traffic, and is not a security boundary against its operator.
+
 ## Reporting a vulnerability
 
 Report suspected vulnerabilities privately through GitHub's **Security** tab on

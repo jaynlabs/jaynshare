@@ -8,10 +8,20 @@ exhausted or unhealthy accounts, and lets enrolled macOS and Windows clients
 see fleet availability without receiving the server's credentials.
 
 > [!WARNING]
-> You probably know that this is not accepted by Anthropic's TOS, that DOES NOT mean it's illegal. Please read the
-> [subscription-sharing risk summary](is_this_safe.md) and
-> [compliance notes](docs/compliance.md), obtain every account owner's consent,
-> and never commit credentials, transcripts, or deployment details.
+> Pooling Claude subscriptions conflicts with Anthropic's published terms and can
+> lead to suspension or termination of every account involved, without a refund.
+> Whether a particular deployment also raises legal issues depends on its facts
+> and jurisdiction; this project does not claim that it is legal or authorized.
+> Read the [subscription-sharing risk summary](is_this_safe.md),
+> [security and privacy model](docs/security-and-privacy.md), and
+> [compliance notes](docs/compliance.md) before deploying.
+
+> [!IMPORTANT]
+> Jaynshare is a trusted intermediary, not an end-to-end encrypted relay. The
+> server receives prompts, code context, tool results, and model responses in
+> plaintext so it can route and retry them. A server operator—or anyone who
+> compromises the server—can read or alter that traffic. Only use a server whose
+> operator and deployed code you trust.
 
 ## short demo
 
@@ -57,6 +67,7 @@ a private multi-machine installation, follow the [deployment guide](docs/deploym
 ## Documentation
 
 - [Deployment and client enrollment](docs/deployment.md)
+- [Security and privacy model](docs/security-and-privacy.md)
 - [Usage and CLI reference](docs/usage.md)
 - [Configuration](docs/configuration.md)
 - [Accounts](docs/accounts.md)
