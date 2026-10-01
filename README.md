@@ -1,7 +1,9 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/jaynshare-dark.svg">
-    <img src="docs/assets/jaynshare-light.svg" width="254" height="64" alt="jaynshare">
+    <source media="(prefers-color-scheme: dark)"
+      srcset="docs/assets/jaynshare-dark.svg">
+    <img src="docs/assets/jaynshare-light.svg" width="254" height="64"
+      alt="jaynshare">
   </picture>
 </p>
 
@@ -30,20 +32,37 @@ and enrolling a client, replace `claude` by `jaynshare claude` and you will be
 able to choose from which account to draw for your session.
 
 > [!WARNING]
-> Pooling Claude subscriptions conflicts with Anthropic's published terms and can
-> lead to suspension or termination of every account involved, without a refund.
-> Whether a particular deployment also raises legal issues depends on its facts
-> and jurisdiction; this project does not claim that it is legal or authorized.
-> Read the [subscription-sharing risk summary](is_this_safe.md), the
+> Pooling Claude subscriptions conflicts with Anthropic's published terms and
+> can lead to suspension or termination of every account involved, without a
+> refund. Whether a particular deployment also raises legal issues depends on
+> its facts and jurisdiction; this project does not claim that it is legal or
+> authorized. Read the [subscription-sharing risk summary](is_this_safe.md), the
 > [security and privacy model](docs/security-and-privacy.md), and the
 > [operator obligations](deploy/README-server.md) before deploying.
 
 ## Short demo
 
-<img width="900" height="575" alt="demo-2" src="https://github.com/user-attachments/assets/e68a0565-4ff2-40c0-96ef-2ae2408603aa" />
+<p align="center">
+  <img width="710" height="454" alt="demo-2"
+    src="https://github.com/user-attachments/assets/e68a0565-4ff2-40c0-96ef-2ae2408603aa">
+</p>
 
-This demo was v1.
-Pretty much still the same but v2 is now in Rust and CC config changes are less invasive.
+This demo was v1. Pretty much still the same but v2 is now in Rust and CC config
+changes are less invasive.
+
+## Quick Overview
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)"
+      srcset="docs/assets/overview-dark.png">
+    <img src="docs/assets/overview-light.png" width="710" height="400"
+      alt="jaynshare routes each prompt to an account with quota left">
+  </picture>
+</p>
+
+If reading the code or asking Claude to explain is too long for you, take a look
+at this figure for a basic understanding of how it works.
 
 ## Purpose and disclaimers
 
@@ -70,7 +89,9 @@ a product of Anthropic.
 
 ## Try it on your Mac
 
-Before having to set up a server, you can spin up one on your own Mac easily using this (it downloads the latest release, runs it, enrolls a client and prompts you to log your Claude account).
+Before having to set up a server, you can spin up one on your own Mac easily
+using this (it downloads the latest release, runs it, enrolls a client and
+prompts you to log your Claude account).
 
 It needs `python3` and Claude Code installed.
 
