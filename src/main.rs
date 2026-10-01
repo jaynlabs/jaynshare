@@ -10,6 +10,7 @@ mod config;
 mod control;
 mod data_plane;
 mod deploy;
+mod identity;
 mod launch;
 mod logfile;
 mod logging;

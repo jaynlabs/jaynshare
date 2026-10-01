@@ -1806,6 +1806,7 @@ async fn the_snapshot_sections_and_the_account_reads_agree() {
         "started_at",
         "listen",
         "tls",
+        "tls_pin",
         "control_api_versions",
         "telemetry_policy",
         "upstream_origin_override",
@@ -2291,6 +2292,7 @@ const CLIENT_ALLOW: &[&str] = &[
     "session",
     "serving_account_display_name",
     "sessions",
+    "tls_pin",
     "version",
     "five_hour",
     "weekly",
@@ -2426,7 +2428,10 @@ async fn operator_only_members_never_reach_the_client_projection() {
         .map(String::as_str)
         .collect();
     server.sort_unstable();
-    assert_eq!(server, ["available", "control_api_version", "version"]);
+    assert_eq!(
+        server,
+        ["available", "control_api_version", "tls_pin", "version"]
+    );
     let mut keys = Vec::new();
     collect_object_keys(&body, &mut keys);
     for key in &keys {

@@ -1,6 +1,7 @@
-//! The base-URL TLS listener: certificate and key loaded,
-//! matched and mode-checked before the bind; HTTP/2 advertised alongside
-//! HTTP/1.1 so one exchange behaves identically over either version.
+//! The base-URL TLS listener: the operator's certificate and key loaded,
+//! matched and mode-checked before the bind, or the server identity's own;
+//! HTTP/2 advertised alongside HTTP/1.1 so one exchange behaves identically
+//! over either version.
 
 use std::sync::Arc;
 
@@ -10,6 +11,7 @@ use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 pub use tokio_rustls::TlsAcceptor;
 
 use crate::config::TlsFiles;
+use crate::identity::Identity;
 use crate::state;
 
 /// HTTP/2 alongside HTTP/1.1 (an exchange behaves identically over
@@ -48,16 +50,28 @@ pub fn prepare(files: &TlsFiles) -> Result<TlsAcceptor, String> {
             files.certificate_file.display()
         ));
     }
+    acceptor(certs, key).map_err(|e| {
+        format!(
+            "{} and {}: the pair does not load together (the key may not match the certificate): {e}",
+            files.certificate_file.display(),
+            key_path.display()
+        )
+    })
+}
+
+/// The listener on the server identity's self-signed certificate.
+pub fn identity(identity: &Identity) -> Result<TlsAcceptor, String> {
+    let (certificate, key) = identity.certificate()?;
+    acceptor(vec![certificate], key).map_err(|e| format!("identity certificate: {e}"))
+}
+
+fn acceptor(
+    certs: Vec<CertificateDer<'static>>,
+    key: PrivateKeyDer<'static>,
+) -> Result<TlsAcceptor, rustls::Error> {
     let mut config = rustls::ServerConfig::builder()
         .with_no_client_auth()
-        .with_single_cert(certs, key)
-        .map_err(|e| {
-            format!(
-                "{} and {}: the pair does not load together (the key may not match the certificate): {e}",
-                files.certificate_file.display(),
-                key_path.display()
-            )
-        })?;
+        .with_single_cert(certs, key)?;
     config.alpn_protocols = ALPN.iter().map(|p| p.to_vec()).collect();
     Ok(TlsAcceptor::from(Arc::new(config)))
 }

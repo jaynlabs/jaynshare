@@ -4,7 +4,7 @@
 
 use serde_json::Value;
 
-use super::Config;
+use super::{Config, ListenerTls};
 
 /// Every restart key whose
 /// value the candidate changes, in table order.
@@ -14,20 +14,26 @@ pub fn changed_restart_keys(current: &Config, candidate: &Config) -> Vec<&'stati
         config
             .data_plane
             .tls
-            .as_ref()
+            .files()
             .map(|t| t.certificate_file.clone())
     };
     let private_key = |config: &Config| {
         config
             .data_plane
             .tls
-            .as_ref()
+            .files()
             .map(|t| t.private_key_file.clone())
     };
-    let rows: [(&'static str, bool); 16] = [
+    let rows: [(&'static str, bool); 17] = [
         (
             "data_plane.listen",
             c.data_plane.listen != n.data_plane.listen,
+        ),
+        // The certificate pair's rows name a change to or from it.
+        (
+            "data_plane.tls",
+            (c.data_plane.tls == ListenerTls::Identity)
+                != (n.data_plane.tls == ListenerTls::Identity),
         ),
         (
             "data_plane.tls_certificate_file",
@@ -168,6 +174,20 @@ mod tests {
             ]
         );
         assert!(changed_restart_keys(&current, &current).is_empty());
+        let identity = config("[data_plane]\ntls = \"identity\"\n");
+        assert_eq!(
+            changed_restart_keys(&current, &identity),
+            ["data_plane.tls"]
+        );
+        assert_eq!(
+            changed_restart_keys(&identity, &candidate)[..4],
+            [
+                "data_plane.listen",
+                "data_plane.tls",
+                "data_plane.tls_certificate_file",
+                "data_plane.tls_private_key_file",
+            ]
+        );
         let live_only =
             config("[data_plane]\nfirst_byte_timeout_seconds = 1\n[logging]\nlevel = \"debug\"\n");
         assert!(changed_restart_keys(&current, &live_only).is_empty());

@@ -33,8 +33,9 @@ use time::OffsetDateTime;
 
 use crate::audit::{AUDIT_LOG, AuditLog};
 use crate::capture::Capture;
-use crate::config;
+use crate::config::{self, ListenerTls};
 use crate::data_plane::upstream::Upstream;
+use crate::identity::{self, Identity};
 use crate::pool::refresh::{self, Trigger};
 use crate::pool::{Credential, Errored, Pool, probe};
 use crate::server::{COMMIT, Server, Stop, TARGET, VERSION};
@@ -45,7 +46,9 @@ use args::{
     OperatorSecretVerb, OperatorVerb, SecretVerb, ServerVerb, Verb,
 };
 use control::Control;
-pub(crate) use control::{error_chain, http_client, http_client_anchors, http_client_plain};
+pub(crate) use control::{
+    error_chain, http_client, http_client_anchors, http_client_pinned, http_client_plain,
+};
 use help::Role;
 use verbs::{
     account_add, account_availability, account_list, account_login, account_remove, account_rename,
@@ -865,9 +868,14 @@ fn serve_inner(cli: &Cli) -> Result<i32, (i32, String)> {
     if let Some(dir) = state_path.parent() {
         protected.push(("state directory", dir.to_path_buf()));
     }
-    if let Some(tls) = &cfg.data_plane.tls {
+    if let Some(tls) = cfg.data_plane.tls.files() {
         protected.push(("TLS private key", tls.private_key_file.clone()));
     }
+    let state_dir = state_path.parent().map_or_else(
+        || std::path::PathBuf::from("."),
+        std::path::Path::to_path_buf,
+    );
+    protected.push(("server identity key", state_dir.join(identity::KEY_FILE)));
     for (what, p) in &protected {
         state::check_private(p).map_err(|m| preflight(what, p, m))?;
     }
@@ -914,13 +922,19 @@ fn serve_inner(cli: &Cli) -> Result<i32, (i32, String)> {
     };
     let upstream =
         Upstream::new(&cfg.data_plane).map_err(|m| (23, format!("upstream client: {m}")))?;
-    // The TLS pair, if both files are set, is loaded and matched before the bind.
+    // The identity exists whatever the transport, so a plain-HTTP server's
+    // clients learn its pin before TLS is turned on.
+    let identity = Identity::load_or_generate(&state_dir)
+        .map_err(|m| (23, format!("server identity: {m}")))?;
+    // The listener's certificate, the identity's or the operator's matched
+    // pair, is ready before the bind.
     let tls = match &cfg.data_plane.tls {
-        Some(files) => {
-            Some(data_plane::tls::prepare(files).map_err(|m| (23, format!("TLS listener: {m}")))?)
-        }
-        None => None,
-    };
+        ListenerTls::Off => None,
+        ListenerTls::Identity => Some(data_plane::tls::identity(&identity)),
+        ListenerTls::Certificate(files) => Some(data_plane::tls::prepare(files)),
+    }
+    .transpose()
+    .map_err(|m| (23, format!("TLS listener: {m}")))?;
     let now = OffsetDateTime::now_utc();
     // Every preflight open succeeded: the one pre-bind state change (an
     // expired family with nothing to refresh it) may be written now.
@@ -964,10 +978,6 @@ fn serve_inner(cli: &Cli) -> Result<i32, (i32, String)> {
 
     let listen_addr = cfg.data_plane.listen;
     let mitm = cfg.mitm.clone();
-    let ca_state_dir = state_path.parent().map_or_else(
-        || std::path::PathBuf::from("."),
-        std::path::Path::to_path_buf,
-    );
     let runtime = tokio::runtime::Runtime::new().map_err(|e| (1, format!("runtime: {e}")))?;
     runtime.block_on(async move {
         // Before the first write the logs can fail: a file-size limit is an
@@ -996,7 +1006,7 @@ fn serve_inner(cli: &Cli) -> Result<i32, (i32, String)> {
         // and intercepted targets answer 503.
         let started = OffsetDateTime::now_utc();
         let ca = match mitm.enabled {
-            true => match crate::mitm::ca::Ca::load_or_generate(&ca_state_dir, started) {
+            true => match crate::mitm::ca::Ca::load_or_generate(&state_dir, started) {
                 Ok(ca) => {
                     ca.warn_expiry(started);
                     Some(Arc::new(ca))
@@ -1012,6 +1022,7 @@ fn serve_inner(cli: &Cli) -> Result<i32, (i32, String)> {
         let (path, digest) = (loaded.path.clone(), loaded.digest.clone());
         let server = Arc::new(Server::new(loaded, durable, pool, audit, capture, upstream));
         server.set_mitm_ca(ca);
+        server.set_identity(identity.pin());
         if restored_quota_changed {
             server.mark_quota_dirty();
         }
@@ -1028,7 +1039,7 @@ fn serve_inner(cli: &Cli) -> Result<i32, (i32, String)> {
             format!(" upstream {} verified against the system trust store", server.upstream.origin())
         };
         // The one startup line; the scheme names the transport.
-        let scheme = if server.config().config.data_plane.tls.is_some() { "https" } else { "http" };
+        let scheme = if server.config().config.data_plane.tls.is_on() { "https" } else { "http" };
         println!("jaynshare {VERSION} listening on {scheme}://{listen} configuration {} digest {digest}{upstream_note}", path.display());
         tracing::info!(event = "server_started", listen = %listen, configuration = %path.display(), digest = %digest, upstream = %server.upstream.origin(), upstream_override = server.upstream.override_active(), "server started");
         // The bootstrap exception says so, once, until it ends.

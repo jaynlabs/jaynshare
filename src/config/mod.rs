@@ -99,7 +99,7 @@ pub struct RampSettings {
 #[derive(Debug, Clone, Serialize)]
 pub struct DataPlaneSettings {
     pub listen: SocketAddr,
-    pub tls: Option<TlsFiles>,
+    pub tls: ListenerTls,
     /// Present only for a loopback harness origin.
     #[serde(serialize_with = "uri_option")]
     pub upstream_origin: Option<http::Uri>,
@@ -116,7 +116,39 @@ pub struct DataPlaneSettings {
     pub egress: EgressSettings,
 }
 
-#[derive(Debug, Clone, Serialize)]
+/// What the base-URL listener serves (`data_plane.tls`). Absent, the key
+/// follows the certificate files, so a configuration written before it
+/// keeps its transport.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub enum ListenerTls {
+    Off,
+    /// A self-signed certificate on the server identity key, which clients pin.
+    Identity,
+    Certificate(TlsFiles),
+}
+
+impl ListenerTls {
+    pub fn is_on(&self) -> bool {
+        *self != ListenerTls::Off
+    }
+
+    pub fn files(&self) -> Option<&TlsFiles> {
+        match self {
+            ListenerTls::Certificate(files) => Some(files),
+            _ => None,
+        }
+    }
+
+    pub fn name(&self) -> &'static str {
+        match self {
+            ListenerTls::Off => "off",
+            ListenerTls::Identity => "identity",
+            ListenerTls::Certificate(_) => "certificate",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct TlsFiles {
     pub certificate_file: PathBuf,
     pub private_key_file: PathBuf,
@@ -390,8 +422,9 @@ pub fn effective_view(config: &Config) -> serde_json::Value {
         "selection": config.selection,
         "data_plane": {
             "listen": d.listen.to_string(),
-            "tls_certificate_file": d.tls.as_ref().map(|t| path(&t.certificate_file)),
-            "tls_private_key_file": { "set": d.tls.is_some(), "path": d.tls.as_ref().map(|t| path(&t.private_key_file)) },
+            "tls": d.tls.name(),
+            "tls_certificate_file": d.tls.files().map(|t| path(&t.certificate_file)),
+            "tls_private_key_file": { "set": d.tls.files().is_some(), "path": d.tls.files().map(|t| path(&t.private_key_file)) },
             "upstream_origin": d.upstream_origin.as_ref().map(ToString::to_string),
             "max_connections": d.max_connections,
             "first_byte_timeout_seconds": d.first_byte_timeout_seconds,
@@ -601,6 +634,22 @@ max_bytes = 1024
         let e =
             parse_str("version = 1\n[data_plane]\ntls_certificate_file = \"c.pem\"\n").unwrap_err();
         assert_eq!(e.0[0].target, "data_plane.tls_private_key_file");
+    }
+
+    #[test]
+    fn tls_follows_the_certificate_pair_unless_named() {
+        let mode = |lines: &str| {
+            parse_str(&format!("version = 1\n[data_plane]\n{lines}"))
+                .map(|c| c.data_plane.tls.name())
+        };
+        let pair = "tls_certificate_file = \"c.pem\"\ntls_private_key_file = \"k.pem\"\n";
+        assert_eq!(mode("").expect("valid"), "off");
+        assert_eq!(mode("tls = \"identity\"\n").expect("valid"), "identity");
+        assert_eq!(mode(pair).expect("valid"), "certificate");
+        let e = mode(&format!("tls = \"identity\"\n{pair}")).unwrap_err();
+        assert_eq!(e.0[0].target, "data_plane.tls");
+        let e = mode("tls = \"certificate\"\n").unwrap_err();
+        assert_eq!(e.0[0].target, "data_plane.tls");
     }
 
     #[test]

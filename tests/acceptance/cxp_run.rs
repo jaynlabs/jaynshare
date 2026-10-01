@@ -53,9 +53,11 @@ async fn claude_code_never_gets_the_base_url() {
     // An `https` base URL is the launcher's own origin (snapshot,
     // catalogue); it trusts the `base-url-ca.pem` there, and Claude
     // Code still gets only the proxy's CA. A TLS front with the test pair
-    // stands before the plain listener.
+    // stands before the plain listener. An enrollment there carries no
+    // pin, so the one the plain launch above learned goes.
     let https = tls_front(instance.addr, &instance.root.join("tls-front")).await;
     machine.set("base_url", &format!("{https:?}"));
+    machine.set("server_identity", "\"\"");
     let anchor = machine.client_dir.join("base-url-ca.pem");
     std::fs::copy(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

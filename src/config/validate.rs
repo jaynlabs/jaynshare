@@ -10,9 +10,9 @@ use toml::{Table, Value};
 use super::platform;
 use super::{
     AccountSettings, AuditSettings, ClientSettings, Config, ConfigError, DEFAULT_LISTEN,
-    DataPlaneSettings, Diagnostics, EgressMode, EgressSettings, LogLevel, LoggingSettings,
-    MIN_LOG_BYTES, MitmSettings, Priority, QuotaSettings, RampSettings, ReferenceSite, Route,
-    SelectionSettings, Site, StorageSettings, TelemetryPolicy, TlsFiles,
+    DataPlaneSettings, Diagnostics, EgressMode, EgressSettings, ListenerTls, LogLevel,
+    LoggingSettings, MIN_LOG_BYTES, MitmSettings, Priority, QuotaSettings, RampSettings,
+    ReferenceSite, Route, SelectionSettings, Site, StorageSettings, TelemetryPolicy, TlsFiles,
 };
 
 pub(crate) struct Validator<'a> {
@@ -484,6 +484,7 @@ impl Validator<'_> {
             node,
             &[
                 "listen",
+                "tls",
                 "tls_certificate_file",
                 "tls_private_key_file",
                 "upstream_origin",
@@ -499,29 +500,7 @@ impl Validator<'_> {
             ],
         );
         let listen = self.listen(node, "listen", DEFAULT_LISTEN);
-        let cert = self.path(node, "tls_certificate_file");
-        let key = self.path(node, "tls_private_key_file");
-        let tls = match (cert, key) {
-            (Some(certificate_file), Some(private_key_file)) => Some(TlsFiles {
-                certificate_file,
-                private_key_file,
-            }),
-            (None, None) => None,
-            (Some(_), None) => {
-                self.error(
-                    node.key("tls_private_key_file"),
-                    "required when tls_certificate_file is set",
-                );
-                None
-            }
-            (None, Some(_)) => {
-                self.error(
-                    node.key("tls_certificate_file"),
-                    "required when tls_private_key_file is set",
-                );
-                None
-            }
-        };
+        let tls = self.listener_tls(node);
         let upstream_origin = self.upstream_origin(node);
         let corporate_proxy_url = self.proxy_url(node);
         let no_proxy = self.string_array(node, "no_proxy").unwrap_or_default();
@@ -572,6 +551,53 @@ impl Validator<'_> {
             corporate_proxy_url,
             no_proxy,
             egress,
+        }
+    }
+
+    /// `tls` and the certificate pair; absent, the mode follows the pair.
+    fn listener_tls(&mut self, node: &Node<'_>) -> ListenerTls {
+        let mode = self.enum_string(node, "tls", &["off", "identity", "certificate"]);
+        let cert = self.path(node, "tls_certificate_file");
+        let key = self.path(node, "tls_private_key_file");
+        let pair_named = cert.is_some() || key.is_some();
+        let files = match (cert, key) {
+            (Some(certificate_file), Some(private_key_file)) => Some(TlsFiles {
+                certificate_file,
+                private_key_file,
+            }),
+            (None, None) => None,
+            (Some(_), None) => {
+                self.error(
+                    node.key("tls_private_key_file"),
+                    "required when tls_certificate_file is set",
+                );
+                None
+            }
+            (None, Some(_)) => {
+                self.error(
+                    node.key("tls_certificate_file"),
+                    "required when tls_private_key_file is set",
+                );
+                None
+            }
+        };
+        match mode {
+            Some("off" | "identity") if pair_named => {
+                self.error(
+                    node.key("tls"),
+                    "must be \"certificate\" when tls_certificate_file or tls_private_key_file is set",
+                );
+                ListenerTls::Off
+            }
+            Some("identity") => ListenerTls::Identity,
+            Some("certificate") if !pair_named => {
+                self.error(
+                    node.key("tls"),
+                    "\"certificate\" needs tls_certificate_file and tls_private_key_file",
+                );
+                ListenerTls::Off
+            }
+            _ => files.map_or(ListenerTls::Off, ListenerTls::Certificate),
         }
     }
 

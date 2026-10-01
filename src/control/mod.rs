@@ -487,7 +487,7 @@ pub(super) fn member_errors(object: &Value, allowed: &[(&str, &str, bool)]) -> V
 /// The operations that carry a pooled credential or an authorisation
 /// code are refused off-loopback on a plaintext listener.
 pub(super) fn insecure_channel(server: &Server, peer: SocketAddr) -> bool {
-    !is_loopback_peer(peer) && server.config().config.data_plane.tls.is_none()
+    !is_loopback_peer(peer) && !server.config().config.data_plane.tls.is_on()
 }
 
 /// Start the browser flow and answer `202` with the login operation.
@@ -770,7 +770,7 @@ fn configuration_object(
         "loaded_at": rfc3339(*server.configuration.loaded_at.read().expect("configuration lock")),
         "effective": crate::config::effective_view(config),
         "secrets": {
-            "data_plane.tls_private_key_file": config.data_plane.tls.as_ref().map(|t| json!({ "set": true, "readable": t.private_key_file.is_file() })).unwrap_or(json!({ "set": false, "readable": null })),
+            "data_plane.tls_private_key_file": config.data_plane.tls.files().map(|t| json!({ "set": true, "readable": t.private_key_file.is_file() })).unwrap_or(json!({ "set": false, "readable": null })),
             "data_plane.corporate_proxy_url": { "set": config.data_plane.corporate_proxy_url.is_some(), "readable": null },
         },
         "last_reload": last_reload,
@@ -864,7 +864,8 @@ fn snapshot(server: &Server) -> Value {
             "build": { "commit": crate::server::COMMIT, "target": crate::server::TARGET },
             "started_at": rfc3339(server.started_at),
             "listen": config.data_plane.listen.to_string(),
-            "tls": config.data_plane.tls.is_some(),
+            "tls": config.data_plane.tls.is_on(),
+            "tls_pin": server.client_pin(),
             "control_api_versions": [API_VERSION],
             "telemetry_policy": config.data_plane.telemetry_policy,
             "upstream_origin_override": server.upstream.override_active().then(|| server.upstream.origin().to_string()),

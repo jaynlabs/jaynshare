@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
 use time::OffsetDateTime;
@@ -88,6 +88,8 @@ pub struct Server {
     /// the mode is off or the material is unusable. The rotate path
     /// is the only thing that replaces it while serving.
     mitm_ca: Mutex<Option<Arc<crate::mitm::ca::Ca>>>,
+    /// The server identity's pin, set once before the startup line.
+    identity: OnceLock<String>,
     /// The open-tunnel gauges and the counters since start.
     pub mitm: Arc<crate::mitm::counters::Counters>,
     carried: Mutex<State>,
@@ -137,6 +139,7 @@ impl Server {
             started_at,
             state_path,
             mitm_ca: Mutex::new(None),
+            identity: OnceLock::new(),
             mitm: Arc::new(crate::mitm::counters::Counters::default()),
             carried: Mutex::new(State {
                 accounts: Vec::new(),
@@ -191,6 +194,19 @@ impl Server {
     /// unusable. A tunnel that already holds one keeps it.
     pub fn mitm_ca(&self) -> Option<Arc<crate::mitm::ca::Ca>> {
         self.mitm_ca.lock().expect("mitm ca lock").clone()
+    }
+
+    pub fn set_identity(&self, pin: &str) {
+        let _ = self.identity.set(pin.to_string());
+    }
+
+    /// The pin a client holds for the base-URL listener: the identity's,
+    /// unless an operator certificate serves there instead.
+    pub fn client_pin(&self) -> Option<&str> {
+        match self.config().config.data_plane.tls {
+            crate::config::ListenerTls::Certificate(_) => None,
+            _ => self.identity.get().map(String::as_str),
+        }
     }
 
     /// A refresh takes the settings in force when it starts.

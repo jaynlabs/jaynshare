@@ -185,6 +185,13 @@ fn check_anchor(pem: &str) -> Result<String, String> {
 
 fn origins_from(body: &Value) -> Result<(String, Option<String>), Failure> {
     let effective = &body["configuration"]["effective"];
+    if effective["data_plane"]["tls"] == "identity" {
+        return Err(Failure::local(
+            3,
+            "cli_configuration_invalid",
+            "data_plane.tls is \"identity\", whose pin an enrollment bundle cannot carry",
+        ));
+    }
     let listen = effective["data_plane"]["listen"]
         .as_str()
         .unwrap_or_default();

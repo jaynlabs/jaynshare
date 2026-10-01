@@ -24,9 +24,8 @@ pub struct ClientInstallation {
     pub base_url: String,
     pub proxy: Option<String>,
     pub ca_fingerprint: Option<String>,
-    /// The base-URL listener's trust anchor's fingerprint,
-    /// present exactly when the base URL is `https`.
-    pub base_url_ca_fingerprint: Option<String>,
+    /// The server identity pin, which replaces the trust anchor when held.
+    pub server_identity: Option<String>,
     /// The client-side no-proxy members; the launcher adds
     /// loopback itself.
     pub no_proxy: Vec<String>,
@@ -38,19 +37,18 @@ pub const BASE_URL_CA_FILE: &str = "base-url-ca.pem";
 
 impl ClientInstallation {
     /// The trust anchor every installed client HTTP call adds for the
-    /// base-URL origin: `base-url-ca.pem` for an `https`
-    /// origin, nothing for `http`.
+    /// base-URL origin: `base-url-ca.pem` for an unpinned `https`
+    /// origin, nothing otherwise.
     pub fn base_url_ca(&self) -> Option<PathBuf> {
-        self.base_url
-            .starts_with("https://")
+        (self.server_identity.is_none() && self.base_url.starts_with("https://"))
             .then(|| self.directory.join(BASE_URL_CA_FILE))
     }
 }
 
 /// A missing installation file is named. An `https` base URL requires
-/// `base-url-ca.pem`. `ca.pem` is the launcher's to require: an enrollment
-/// from before base-URL mode was removed lacks it, while `status` and
-/// `ca-update` must still read the installation. Its
+/// `base-url-ca.pem` or a `server_identity` pin. `ca.pem` is the launcher's
+/// to require: an enrollment from before base-URL mode was removed lacks it,
+/// while `status` and `ca-update` must still read the installation. Its
 /// `mode` key, if any, is ignored.
 pub fn read_installation() -> Result<ClientInstallation, (i32, String)> {
     let directory = platform::client_directory();
@@ -89,7 +87,23 @@ pub fn read_installation() -> Result<ClientInstallation, (i32, String)> {
         .and_then(toml::Value::as_str)
         .map(String::from);
     let base_url = string("base_url")?;
-    if base_url.starts_with("https://") {
+    let server_identity = parsed
+        .get("server_identity")
+        .and_then(toml::Value::as_str)
+        .filter(|pin| !pin.is_empty())
+        .map(String::from);
+    if let Some(pin) = &server_identity
+        && !crate::identity::is_pin(pin)
+    {
+        return Err((
+            3,
+            format!(
+                "{}: server_identity {pin:?} is not a sha256/ pin",
+                toml_path.display()
+            ),
+        ));
+    }
+    if base_url.starts_with("https://") && server_identity.is_none() {
         let anchor = directory.join(BASE_URL_CA_FILE);
         if !anchor.is_file() {
             return Err((
@@ -101,11 +115,6 @@ pub fn read_installation() -> Result<ClientInstallation, (i32, String)> {
             ));
         }
     }
-    let base_url_ca_fingerprint = parsed
-        .get("base_url_ca_fingerprint")
-        .and_then(toml::Value::as_str)
-        .filter(|fp| !fp.is_empty())
-        .map(String::from);
     Ok(ClientInstallation {
         directory,
         client_id: string("client_id")?,
@@ -116,7 +125,7 @@ pub fn read_installation() -> Result<ClientInstallation, (i32, String)> {
             .and_then(toml::Value::as_str)
             .map(String::from),
         ca_fingerprint,
-        base_url_ca_fingerprint,
+        server_identity,
         no_proxy: parsed
             .get("no_proxy")
             .and_then(toml::Value::as_array)
@@ -178,6 +187,43 @@ pub fn client_toml(
     out
 }
 
+/// Set `client.toml` keys in place, every other line kept.
+pub fn set_toml(directory: &Path, entries: &[(&str, &str)]) -> Result<(), String> {
+    let path = directory.join("client.toml");
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut document: toml_edit::DocumentMut = text
+        .parse()
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    for (key, value) in entries {
+        document[key] = toml_edit::value(*value);
+    }
+    crate::state::write_private_atomic(&path, document.to_string().as_bytes())
+        .map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// The server's identity pin, kept by a plain-HTTP installation the first
+/// time a snapshot names one, so it follows its server onto TLS. An `https`
+/// installation already checks what it reaches, possibly a TLS front with
+/// a certificate of its own, and a held pin is never replaced.
+pub fn keep_identity(installation: &ClientInstallation, snapshot: &Value) {
+    if installation.server_identity.is_some() || !installation.base_url.starts_with("http://") {
+        return;
+    }
+    if let Some(pin) = snapshot["server"]["tls_pin"]
+        .as_str()
+        .filter(|pin| crate::identity::is_pin(pin))
+    {
+        let _ = set_toml(&installation.directory, &[("server_identity", pin)]);
+    }
+}
+
+fn failure_message(failure: crate::cli::Failure) -> String {
+    failure.error["message"]
+        .as_str()
+        .unwrap_or("no HTTP client")
+        .to_string()
+}
+
 /// Stage the executable and the non-secret client files under an
 /// owner-only directory, before the claim. Everything staged lands under the
 /// platform roots (`bin/`, `client/`); the caller removes it on rollback.
@@ -235,17 +281,29 @@ pub fn remove_staged() {
 // ------------------------------------------------------------------ the client's HTTP
 
 /// One client-side control request: the base-URL origin, the client
-/// secret as the bearer, the control envelope back. The extra trust
-/// anchors are the installation's `base-url-ca.pem` and the global
-/// `--tls-ca`, whichever are given. Failures are `(exit code, message)`
-/// pairs the verbs surface as-is.
+/// secret as the bearer, the control envelope back. Failures are `(exit code,
+/// message)` pairs the verbs surface as-is.
 pub struct ClientRequest {
     origin: String,
     http: Client<hyper_rustls::HttpsConnector<HttpConnector>, Full<Bytes>>,
     timeout: Duration,
+    /// Where a pinned installation still on `http` finds its server once
+    /// that serves TLS.
+    upgrade: Option<Upgrade>,
+}
+
+struct Upgrade {
+    origin: String,
+    directory: PathBuf,
+}
+
+enum NoResponse {
+    Timeout,
+    Failed(hyper_util::client::legacy::Error),
 }
 
 impl ClientRequest {
+    /// A request trusting the system store plus `anchors`.
     pub fn new(origin: &str, timeout: Duration, anchors: &[&Path]) -> Result<Self, String> {
         let plain = anchors.is_empty() && origin.starts_with("http://");
         let http = if plain {
@@ -255,13 +313,36 @@ impl ClientRequest {
         };
         Ok(Self {
             origin: origin.trim_end_matches('/').to_string(),
-            http: http.map_err(|f| {
-                f.error["message"]
-                    .as_str()
-                    .unwrap_or("no HTTP client")
-                    .to_string()
-            })?,
+            http: http.map_err(failure_message)?,
             timeout,
+            upgrade: None,
+        })
+    }
+
+    /// A request to the installation's server, checked against its pin when
+    /// it holds one, else against its `base-url-ca.pem` and `extra_anchor`.
+    /// A pinned `http` installation follows its server onto TLS: when the
+    /// plain exchange fails on an open connection, it retries over `https`
+    /// and, once the pin answers there, keeps the `https` base URL.
+    pub fn for_installation(
+        installation: &ClientInstallation,
+        timeout: Duration,
+        extra_anchor: Option<&Path>,
+    ) -> Result<Self, String> {
+        let Some(pin) = &installation.server_identity else {
+            let anchor = installation.base_url_ca();
+            let anchors: Vec<&Path> = anchor.as_deref().into_iter().chain(extra_anchor).collect();
+            return Self::new(&installation.base_url, timeout, &anchors);
+        };
+        let origin = installation.base_url.trim_end_matches('/');
+        Ok(Self {
+            origin: origin.to_string(),
+            http: crate::cli::http_client_pinned(pin).map_err(failure_message)?,
+            timeout,
+            upgrade: origin.strip_prefix("http://").map(|authority| Upgrade {
+                origin: format!("https://{authority}"),
+                directory: installation.directory.clone(),
+            }),
         })
     }
 
@@ -276,43 +357,69 @@ impl ClientRequest {
         body: Option<Bytes>,
         headers: &[(http::HeaderName, http::HeaderValue)],
     ) -> Result<http::Response<hyper::body::Incoming>, (i32, String)> {
-        let mut request = http::Request::builder()
-            .method(method)
-            .uri(format!("{}{path}", self.origin))
-            .header(ACCEPT, "application/json");
-        if body.is_some() {
-            request = request.header(CONTENT_TYPE, "application/json");
+        let request = |origin: &str| {
+            let mut request = http::Request::builder()
+                .method(method.clone())
+                .uri(format!("{origin}{path}"))
+                .header(ACCEPT, "application/json");
+            if body.is_some() {
+                request = request.header(CONTENT_TYPE, "application/json");
+            }
+            if let Some(secret) = secret {
+                let value = format!("Bearer {secret}");
+                let value = http::HeaderValue::from_str(&value)
+                    .map_err(|_| (2, "the client secret is not a header value".to_string()))?;
+                request = request.header(AUTHORIZATION, value);
+            }
+            let mut request = request
+                .body(Full::new(body.clone().unwrap_or_default()))
+                .map_err(|e| (1, e.to_string()))?;
+            for (name, value) in headers {
+                request.headers_mut().insert(name.clone(), value.clone());
+            }
+            Ok::<_, (i32, String)>(request)
+        };
+        let first = match self.round_trip(request(&self.origin)?).await {
+            Ok(response) => return Ok(response),
+            Err(why) => why,
+        };
+        let upgrade = match (&first, &self.upgrade) {
+            (NoResponse::Failed(e), Some(upgrade)) if !e.is_connect() => upgrade,
+            _ => return Err((4, self.failure(&self.origin, first))),
+        };
+        match self.round_trip(request(&upgrade.origin)?).await {
+            Ok(response) => {
+                let _ = set_toml(&upgrade.directory, &[("base_url", &upgrade.origin)]);
+                Ok(response)
+            }
+            Err(why) => Err((
+                4,
+                format!(
+                    "{}; {}",
+                    self.failure(&self.origin, first),
+                    self.failure(&upgrade.origin, why)
+                ),
+            )),
         }
-        if let Some(secret) = secret {
-            let value = format!("Bearer {secret}");
-            let value = http::HeaderValue::from_str(&value)
-                .map_err(|_| (2, "the client secret is not a header value".to_string()))?;
-            request = request.header(AUTHORIZATION, value);
+    }
+
+    async fn round_trip(
+        &self,
+        request: http::Request<Full<Bytes>>,
+    ) -> Result<http::Response<hyper::body::Incoming>, NoResponse> {
+        match tokio::time::timeout(self.timeout, self.http.request(request)).await {
+            Err(_) => Err(NoResponse::Timeout),
+            Ok(answer) => answer.map_err(NoResponse::Failed),
         }
-        let mut request = request
-            .body(Full::new(body.unwrap_or_default()))
-            .map_err(|e| (1, e.to_string()))?;
-        for (name, value) in headers {
-            request.headers_mut().insert(name.clone(), value.clone());
+    }
+
+    fn failure(&self, origin: &str, why: NoResponse) -> String {
+        match why {
+            NoResponse::Timeout => {
+                format!("{origin}: no response within {} s", self.timeout.as_secs())
+            }
+            NoResponse::Failed(e) => format!("{origin}: {}", crate::cli::error_chain(&e)),
         }
-        tokio::time::timeout(self.timeout, self.http.request(request))
-            .await
-            .map_err(|_| {
-                (
-                    4,
-                    format!(
-                        "{}: no response within {} s",
-                        self.origin,
-                        self.timeout.as_secs()
-                    ),
-                )
-            })?
-            .map_err(|e| {
-                (
-                    4,
-                    format!("{}: {}", self.origin, crate::cli::error_chain(&e)),
-                )
-            })
     }
 
     /// `Ok((status, body))` or `Err((4, message))` for anything that is no
@@ -324,42 +431,8 @@ impl ClientRequest {
         secret: Option<&str>,
         body: Option<&Value>,
     ) -> Result<(StatusCode, Value), (i32, String)> {
-        let mut request = http::Request::builder()
-            .method(method)
-            .uri(format!("{}{path}", self.origin))
-            .header(ACCEPT, "application/json");
-        if body.is_some() {
-            request = request.header(CONTENT_TYPE, "application/json");
-        }
-        if let Some(secret) = secret {
-            let value = format!("Bearer {secret}");
-            let value = http::HeaderValue::from_str(&value)
-                .map_err(|_| (2, "the client secret is not a header value".to_string()))?;
-            request = request.header(AUTHORIZATION, value);
-        }
-        let request = request
-            .body(Full::new(
-                body.map(|b| Bytes::from(b.to_string())).unwrap_or_default(),
-            ))
-            .map_err(|e| (1, e.to_string()))?;
-        let response = tokio::time::timeout(self.timeout, self.http.request(request))
-            .await
-            .map_err(|_| {
-                (
-                    4,
-                    format!(
-                        "{}: no response within {} s",
-                        self.origin,
-                        self.timeout.as_secs()
-                    ),
-                )
-            })?
-            .map_err(|e| {
-                (
-                    4,
-                    format!("{}: {}", self.origin, crate::cli::error_chain(&e)),
-                )
-            })?;
+        let body = body.map(|b| Bytes::from(b.to_string()));
+        let response = self.send(method, path, secret, body, &[]).await?;
         let status = response.status();
         let bytes = tokio::time::timeout(self.timeout, response.into_body().collect())
             .await
@@ -499,10 +572,8 @@ async fn client_read(
     path: &str,
     timeout: Duration,
 ) -> Result<Value, (i32, String)> {
-    let anchor = installation.base_url_ca();
-    let anchors: Vec<&Path> = anchor.as_deref().into_iter().collect();
     let request =
-        ClientRequest::new(&installation.base_url, timeout, &anchors).map_err(|e| (1, e))?;
+        ClientRequest::for_installation(installation, timeout, None).map_err(|e| (1, e))?;
     let (status, body) = request.call(Method::GET, path, Some(secret), None).await?;
     if status.is_success() {
         Ok(body)
@@ -511,8 +582,9 @@ async fn client_read(
     }
 }
 
-/// The client snapshot, with `session` when a session id is given.
-/// `Err` carries the exit code: 4 unreachable, 5 refused, 10 incompatible.
+/// The client snapshot, with `session` when a session id is given; the
+/// server's identity pin is kept from it. `Err` carries the exit code:
+/// 4 unreachable, 5 refused, 10 incompatible.
 pub async fn snapshot(
     installation: &ClientInstallation,
     secret: &str,
@@ -524,7 +596,9 @@ pub async fn snapshot(
         path.push_str("?session_id=");
         path.push_str(&percent_encode(session));
     }
-    client_read(installation, secret, &path, timeout).await
+    let snapshot = client_read(installation, secret, &path, timeout).await?;
+    keep_identity(installation, &snapshot);
+    Ok(snapshot)
 }
 
 /// The status-line snapshot adds only the two account rate-limit windows.
@@ -577,10 +651,8 @@ pub async fn resolve(
         "/control/v1/client/accounts/resolve?reference={}",
         percent_encode(reference)
     );
-    let anchor = installation.base_url_ca();
-    let anchors: Vec<&Path> = anchor.as_deref().into_iter().collect();
     let request =
-        ClientRequest::new(&installation.base_url, timeout, &anchors).map_err(|e| (1, e))?;
+        ClientRequest::for_installation(installation, timeout, None).map_err(|e| (1, e))?;
     let (status, body) = request.call(Method::GET, &path, Some(secret), None).await?;
     if status.is_success() {
         return CatalogueEntry::from_value(&body["account"])

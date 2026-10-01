@@ -2471,7 +2471,7 @@ async fn client_snapshot_and_catalogue_match_the_allow_lists() {
     assert_member_set(&body["client"], &["display_name", "id"]);
     assert_member_set(
         &body["server"],
-        &["available", "control_api_version", "version"],
+        &["available", "control_api_version", "tls_pin", "version"],
     );
     assert_member_set(
         &body["pool"],

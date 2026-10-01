@@ -128,6 +128,8 @@ pub(super) fn status(
             "version": VERSION,
             "available": !server.stopping(),
             "control_api_version": API_VERSION,
+            // The pin a client keeps, so turning TLS on later does not strand it.
+            "tls_pin": server.client_pin(),
         },
         "capabilities": capabilities,
         "ca_fingerprint": server.mitm_ca().map(|ca| ca.fingerprint()),

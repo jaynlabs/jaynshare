@@ -260,11 +260,12 @@ async fn fresh_state_directory_yields_the_three_trust_files() {
 
     // Exactly three files, and nothing that could hold the CA key.
     // The state document itself is written only once something mutates it,
-    // and this instance carries no account, so it may be absent.
+    // and this instance carries no account, so it may be absent. The server
+    // identity key is the listener's own, not the CA's.
     let mut names: Vec<String> = fs::read_dir(&state_dir)
         .expect("state dir")
         .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
-        .filter(|name| name != "state.json")
+        .filter(|name| name != "state.json" && name != "server-identity-key.pem")
         .collect();
     names.sort();
     assert_eq!(

@@ -31,6 +31,7 @@ mod dpl;
 mod fake_tools;
 mod faults;
 mod harness;
+mod idt;
 mod leaks;
 mod linux_fx;
 mod linuxbox;

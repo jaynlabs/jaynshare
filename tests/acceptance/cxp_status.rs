@@ -91,7 +91,7 @@ async fn status_shows_the_allow_listed_facts_only() {
             .expect("server")
             .keys()
             .collect::<Vec<_>>(),
-        ["version", "available", "control_api_version"],
+        ["version", "available", "control_api_version", "tls_pin"],
         "server's nested keys: {result}"
     );
     assert_eq!(

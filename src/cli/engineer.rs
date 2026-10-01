@@ -46,19 +46,13 @@ fn colour_wanted(cli: &Cli) -> bool {
     super::colour_wanted(cli)
 }
 
-/// The installation's `base-url-ca.pem` is trusted without
-/// `--tls-ca`; a global `--tls-ca` is added beside it.
+/// The installation's pin, or its `base-url-ca.pem` without `--tls-ca`;
+/// a global `--tls-ca` is added beside the anchor.
 fn request(installation: &ClientInstallation, cli: &Cli) -> Result<ClientRequest, Failure> {
-    let anchor = installation.base_url_ca();
-    let anchors: Vec<&Path> = anchor
-        .as_deref()
-        .into_iter()
-        .chain(cli.tls_ca.as_deref())
-        .collect();
-    ClientRequest::new(
-        &installation.base_url,
+    ClientRequest::for_installation(
+        installation,
         std::time::Duration::from_secs(cli.timeout),
-        &anchors,
+        cli.tls_ca.as_deref(),
     )
     .map_err(|e| local(1, "cli_internal", e))
 }
@@ -508,18 +502,9 @@ pub(super) async fn ca_update(cli: &Cli, from: &Path) -> Outcome {
     let new_fingerprint = manifest_fingerprint.to_string();
     crate::state::write_private_atomic(&installation.directory.join("ca.pem"), &members["ca.pem"])
         .map_err(|why| local(1, "cli_internal", format!("replacing ca.pem failed: {why}")))?;
-    let document = client::client_toml(
-        &installation.client_id,
-        &installation.display_name,
-        &installation.base_url,
-        installation.proxy.as_deref(),
-        Some(&new_fingerprint),
-        installation.base_url_ca_fingerprint.as_deref(),
-        &installation.no_proxy,
-    );
-    crate::state::write_private_atomic(
-        &installation.directory.join("client.toml"),
-        document.as_bytes(),
+    client::set_toml(
+        &installation.directory,
+        &[("ca_fingerprint", &new_fingerprint)],
     )
     .map_err(|why| {
         local(
@@ -580,6 +565,7 @@ pub(super) async fn status(cli: &Cli, args: &StatusArgs) -> Outcome {
         };
         return Err(local(code, slug, message));
     }
+    client::keep_identity(&installation, &body);
     let mut result = body;
     result["client"]["origins"] = json!({
         "base_url": installation.base_url,
