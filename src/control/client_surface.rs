@@ -148,7 +148,7 @@ pub(super) fn status(
     read(body)
 }
 
-fn rate_limits(account: &Account) -> Value {
+pub(super) fn rate_limits(account: &Account) -> Value {
     let utilisation = |name| {
         account
             .quota

@@ -211,7 +211,7 @@ impl ClientHome {
     /// starts its own session (`setsid`, through perl's POSIX module — the
     /// suite has no `unsafe`), so `/dev/tty` cannot be opened and a picker
     /// can never draw on the developer's terminal.
-    fn command(&self, extra: &[(&str, &str)]) -> Command {
+    pub(crate) fn command(&self, extra: &[(&str, &str)]) -> Command {
         let mut command = if cfg!(unix) {
             let mut perl = Command::new("/usr/bin/perl");
             perl.args([

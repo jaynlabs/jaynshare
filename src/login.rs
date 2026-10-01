@@ -1,4 +1,5 @@
-//! The server side of the browser login.
+//! The browser login: the server's flows, and the loopback callback a
+//! client catches for a flow it started.
 //!
 //! One started flow is one atomic account operation: the pool moves
 //! only when the exchange and the profile lookup have both succeeded, and the
@@ -24,7 +25,7 @@ use tokio::net::TcpListener;
 use uuid::Uuid;
 
 use crate::anthropic::{AUTHORIZE_URL, OAUTH_CLIENT_ID, OAUTH_SCOPES, OAUTH_SUCCESS_URL};
-use crate::control::{account_object, percent_decode};
+use crate::control::percent_decode;
 use crate::pool::{Account, Credential, OperationError, Source};
 use crate::server::{MutateError, Server};
 use crate::timestamp::rfc3339;
@@ -132,6 +133,7 @@ struct LoginSecret {
     verifier: String,
     redirect_uri: String,
     display_name: Option<String>,
+    owner: Option<String>,
 }
 
 impl LoginSecret {
@@ -146,6 +148,7 @@ impl LoginSecret {
             verifier,
             redirect_uri,
             display_name,
+            owner: None,
         }
     }
 }
@@ -174,9 +177,18 @@ fn url_encode(s: &str) -> String {
     out
 }
 
+/// The `state` parameter of an authorisation URL.
+pub(crate) fn state_of(url: &str) -> Option<String> {
+    let (_, query) = url.split_once('?')?;
+    query
+        .split('&')
+        .find_map(|pair| pair.strip_prefix("state="))
+        .map(percent_decode)
+}
+
 /// Attempt to open the authorisation URL; when no browser answers the
 /// attempt, the flow reports itself as manual (`manual_code_required`).
-fn open_browser(url: &str) -> bool {
+pub(crate) fn open_browser(url: &str) -> bool {
     let program = if cfg!(target_os = "macos") {
         "open"
     } else if cfg!(target_os = "linux") {
@@ -211,6 +223,15 @@ fn open_browser(url: &str) -> bool {
     }
 }
 
+/// Who starts a login, and so where its callback lands.
+pub enum Starter {
+    /// The server catches the callback and opens the browser itself.
+    Operator,
+    /// The client catches the callback on its loopback port and forwards it;
+    /// the account is the client's.
+    Client { id: String, port: u16 },
+}
+
 /// What a started flow looks like in the response.
 pub struct Started {
     pub id: Uuid,
@@ -239,6 +260,7 @@ struct Inner {
 #[derive(Clone)]
 struct Operation {
     expires_at: OffsetDateTime,
+    owner: Option<String>,
     inner: std::sync::Arc<Mutex<Inner>>,
 }
 
@@ -248,29 +270,35 @@ struct Operation {
 pub struct Logins(Mutex<HashMap<Uuid, Operation>>);
 
 impl Logins {
-    /// Start a flow — fresh state and PKCE, a loopback callback
-    /// listener, one browser-open attempt — and hand the URL back.
+    /// Start a flow — fresh state and PKCE, and for the operator a
+    /// loopback callback listener and one browser-open attempt — and hand the
+    /// URL back.
     pub async fn start(
         &self,
         server: std::sync::Arc<Server>,
+        starter: Starter,
         display_name: Option<String>,
     ) -> Result<Started, String> {
         self.sweep();
-        let listener = TcpListener::bind(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
-            .await
-            .map_err(|e| format!("cannot open the loopback callback listener: {e}"))?;
-        let port = listener
-            .local_addr()
-            .map_err(|e| format!("cannot read the callback listener's port: {e}"))?
-            .port();
+        let (listener, port, owner) = match starter {
+            Starter::Operator => {
+                let (listener, port) = callback_listener().await?;
+                (Some(listener), port, None)
+            }
+            Starter::Client { id, port } => (None, port, Some(id)),
+        };
         let redirect_uri = format!("http://localhost:{port}/callback");
-        let secret = LoginSecret::generate(display_name, redirect_uri);
+        let secret = LoginSecret {
+            owner: owner.clone(),
+            ..LoginSecret::generate(display_name, redirect_uri)
+        };
         let url = authorization_url(
             &challenge_of(&secret.verifier),
             &secret.redirect_uri,
             &secret.state,
         );
-        let manual_code_required = !open_browser(&url);
+        // A client opens the browser on its own machine.
+        let manual_code_required = listener.is_some() && !open_browser(&url);
         let expires_at = OffsetDateTime::now_utc() + TTL;
         let (events, rx) = tokio::sync::mpsc::unbounded_channel();
         let id = Uuid::new_v4();
@@ -278,6 +306,7 @@ impl Logins {
             id,
             Operation {
                 expires_at,
+                owner: owner.clone(),
                 inner: std::sync::Arc::new(Mutex::new(Inner {
                     state: OpState::Awaiting,
                     ended_at: None,
@@ -287,7 +316,7 @@ impl Logins {
                 })),
             },
         );
-        tracing::info!(event = "login_started", operation = %id, manual_code_required, "a browser login was started");
+        tracing::info!(event = "login_started", operation = %id, manual_code_required, owner = owner.as_deref().unwrap_or(""), "a browser login was started");
         tokio::spawn(drive(server, id, secret, listener, rx, expires_at));
         Ok(Started {
             id,
@@ -298,25 +327,38 @@ impl Logins {
     }
 
     /// The operation object — state, expiry, and on success the new
-    /// account; on failure the safe reason and retry action.
-    pub fn show(&self, server: &Server, id: Uuid) -> Option<Value> {
+    /// account as `project` shows it; on failure the safe reason and retry
+    /// action.
+    pub fn show(&self, id: Uuid, project: impl FnOnce(Uuid) -> Option<Value>) -> Option<Value> {
         let operation = self.0.lock().expect("login registry").get(&id)?.clone();
-        let inner = operation.inner.lock().expect("operation lock");
-        let error = (inner.state == OpState::Failed).then(|| {
-            json!({
-                "code": "login_failed",
-                "message": inner.reason.clone().unwrap_or_default(),
-                "target": id.to_string(),
-                "details": [{ "code": "retry", "message": "start a new login" }],
-            })
-        });
+        let (state, account, error) = {
+            let inner = operation.inner.lock().expect("operation lock");
+            let error = (inner.state == OpState::Failed).then(|| {
+                json!({
+                    "code": "login_failed",
+                    "message": inner.reason.clone().unwrap_or_default(),
+                    "target": id.to_string(),
+                    "details": [{ "code": "retry", "message": "start a new login" }],
+                })
+            });
+            (inner.state, inner.account, error)
+        };
         Some(json!({
             "operation_id": id,
-            "state": inner.state.as_str(),
+            "state": state.as_str(),
             "expires_at": rfc3339(operation.expires_at),
-            "account": inner.account.and_then(|h| account_object(server, h)).unwrap_or(Value::Null),
+            "account": account.and_then(project).unwrap_or(Value::Null),
             "error": error.unwrap_or(Value::Null),
         }))
+    }
+
+    /// Whether the client started this operation.
+    pub fn started_by(&self, id: Uuid, client: &str) -> bool {
+        self.0
+            .lock()
+            .expect("login registry")
+            .get(&id)
+            .is_some_and(|operation| operation.owner.as_deref() == Some(client))
     }
 
     /// Submit a pasted code; only an awaiting flow admits it.
@@ -388,7 +430,7 @@ async fn drive(
     server: std::sync::Arc<Server>,
     id: Uuid,
     secret: LoginSecret,
-    listener: TcpListener,
+    listener: Option<TcpListener>,
     mut rx: tokio::sync::mpsc::UnboundedReceiver<Event>,
     expires_at: OffsetDateTime,
 ) {
@@ -417,7 +459,7 @@ async fn drive(
                 }
                 None => break End::Failed { reason: "the login operation lost its channels".into() },
             },
-            accepted = listener.accept() => match accepted {
+            accepted = accept(listener.as_ref()) => match accepted {
                 Ok((stream, _)) => match answer_callback(stream, &secret.state).await {
                     Ok(Some(query)) => {
                         break match parse_paste(&query, &secret.state) {
@@ -467,6 +509,27 @@ enum End {
     Succeeded { account: Uuid },
 }
 
+async fn callback_listener() -> Result<(TcpListener, u16), String> {
+    let listener = TcpListener::bind(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
+        .await
+        .map_err(|e| format!("cannot open the loopback callback listener: {e}"))?;
+    let port = listener
+        .local_addr()
+        .map_err(|e| format!("cannot read the callback listener's port: {e}"))?
+        .port();
+    Ok((listener, port))
+}
+
+/// The server-side callback's next connection; a client's flow has none.
+async fn accept(
+    listener: Option<&TcpListener>,
+) -> std::io::Result<(tokio::net::TcpStream, std::net::SocketAddr)> {
+    match listener {
+        Some(listener) => listener.accept().await,
+        None => std::future::pending().await,
+    }
+}
+
 /// Exchanging, then the token family, then the profile, then the pool move, in
 /// that order; every failure is a safe reason and the pool stays as it was.
 async fn complete(
@@ -503,13 +566,16 @@ async fn complete(
         }
     };
     let name = secret.display_name.clone();
-    let account = Account::new(
-        // `pool.add` derives the name from the profile when none is given.
-        name.clone().unwrap_or_default(),
-        profile,
-        Source::Browser,
-        Credential::OAuth(tokens),
-    );
+    let account = Account {
+        owner: secret.owner.clone(),
+        ..Account::new(
+            // `pool.add` derives the name from the profile when none is given.
+            name.clone().unwrap_or_default(),
+            profile,
+            Source::Browser,
+            Credential::OAuth(tokens),
+        )
+    };
     match server.mutate_pool(|pool| pool.add(account, name)) {
         Ok(handle) => End::Succeeded { account: handle },
         Err(MutateError::Refused(OperationError::NameConflict(name))) => End::Failed {
@@ -522,6 +588,9 @@ async fn complete(
                 "this identity is already the account {existing:?}; rename it with the name operation"
             ),
         },
+        Err(MutateError::Refused(OperationError::NotOwner)) => End::Failed {
+            reason: "this identity is another owner's account; the pool is unchanged".into(),
+        },
         Err(MutateError::Refused(_)) => End::Failed {
             reason: "the account could not be added".into(),
         },
@@ -531,6 +600,26 @@ async fn complete(
             End::Failed {
                 reason: "the state file could not be written; the server is shutting down".into(),
             }
+        }
+    }
+}
+
+/// Serve the client's loopback callback until one request carries a code or
+/// a refusal; that request's query.
+pub(crate) async fn await_callback(
+    listener: &TcpListener,
+    expected_state: &str,
+) -> Result<String, String> {
+    loop {
+        let (stream, _) = listener
+            .accept()
+            .await
+            .map_err(|e| format!("the callback listener failed: {e}"))?;
+        // A broken browser connection or a stray request keeps the wait going.
+        if let Ok(Some(query)) = answer_callback(stream, expected_state).await
+            && parse_paste(&query, expected_state) != Paste::Other
+        {
+            return Ok(query);
         }
     }
 }
@@ -627,6 +716,13 @@ mod tests {
         assert_eq!(params["code_challenge"], "the-challenge");
         assert_eq!(params["code_challenge_method"], "S256");
         assert_eq!(params["state"], "the-state");
+    }
+
+    #[test]
+    fn the_state_comes_back_out_of_the_authorisation_url() {
+        let url = authorization_url("c", "http://localhost:1/callback", "a-b_c");
+        assert_eq!(state_of(&url).as_deref(), Some("a-b_c"));
+        assert_eq!(state_of("https://claude.ai/oauth/authorize"), None);
     }
 
     #[test]

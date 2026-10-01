@@ -652,6 +652,15 @@ pub(super) async fn probe(control: &Control, args: &ProbeArgs) -> Outcome {
     }
 }
 
+/// `state` or `state (reason)`.
+pub(super) fn health_cell(a: &Value) -> String {
+    let state = a["health"]["state"].as_str().unwrap_or("");
+    match a["health"]["reason"].as_str() {
+        Some(reason) => format!("{state} ({reason})"),
+        None => state.to_string(),
+    }
+}
+
 /// The account row: every fact the operator reads at a glance,
 /// each bucket as `name=state@reset` (unknown says so, never `0%`).
 pub(super) fn account_row(a: &Value) -> String {
@@ -659,10 +668,7 @@ pub(super) fn account_row(a: &Value) -> String {
         .as_array()
         .map(|b| b.iter().map(bucket_cell).collect::<Vec<_>>().join(" "))
         .unwrap_or_default();
-    let health = match a["health"]["reason"].as_str() {
-        Some(r) => format!("{} ({r})", a["health"]["state"].as_str().unwrap_or("")),
-        None => a["health"]["state"].as_str().unwrap_or("").to_string(),
-    };
+    let health = health_cell(a);
     let eligibility = match a["eligibility"]["reason"].as_str() {
         Some(r) => format!(
             "ineligible: {r} {}",
