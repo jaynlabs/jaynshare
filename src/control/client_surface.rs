@@ -141,6 +141,11 @@ pub(super) fn status(
         "wire_capture_enabled": server.capture.is_some(),
         "hold_hint_seconds": hold_hint_seconds,
     });
+    if let Some(offer) = super::client_kit::offer(server) {
+        for (name, value) in offer.members() {
+            body["client"][name] = value;
+        }
+    }
     if let Some(session) = session {
         body["session"] = session;
     }

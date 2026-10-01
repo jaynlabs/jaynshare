@@ -21,7 +21,7 @@ use crate::harness::{
 };
 
 /// what a client kit carries besides the release set.
-const KIT_MEMBERS: [&str; 8] = [
+pub(crate) const KIT_MEMBERS: [&str; 8] = [
     "README.txt",
     "install-macos.sh",
     "uninstall-macos.sh",
@@ -81,7 +81,7 @@ fn plant_release_key(home: &Path) -> (Vec<u8>, Vec<u8>) {
 
 /// The filler bytes each kit member carries (the payload member is the one
 /// `native_payload` names).
-fn kit_member_bytes(name: &str) -> Vec<u8> {
+pub(crate) fn kit_member_bytes(name: &str) -> Vec<u8> {
     format!("{name} of the acceptance client kit\n").into_bytes()
 }
 
@@ -136,7 +136,12 @@ fn write_kit_archive(path: &Path, all: &[(String, Vec<u8>)]) {
 
 /// A second valid kit whose members are given, signed as it is
 /// written (the release set binds these digests, so the kit verifies).
-fn write_kit_members(path: &Path, pkcs8: &[u8], public: &[u8], members: &[(String, Vec<u8>)]) {
+pub(crate) fn write_kit_members(
+    path: &Path,
+    pkcs8: &[u8],
+    public: &[u8],
+    members: &[(String, Vec<u8>)],
+) {
     let mut all = kit_release_set(pkcs8, public, members);
     all.extend(members.to_vec());
     write_kit_archive(path, &all);

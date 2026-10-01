@@ -785,6 +785,7 @@ impl Validator<'_> {
                 "advertised_base_url",
                 "advertised_proxy_url",
                 "base_url_ca_certificate_file",
+                "kit_file",
             ],
         );
         ClientSettings {
@@ -798,6 +799,9 @@ impl Validator<'_> {
             advertised_base_url: self.advertised_origin(node, "advertised_base_url"),
             advertised_proxy_url: self.advertised_origin(node, "advertised_proxy_url"),
             base_url_ca_certificate_file: self.path(node, "base_url_ca_certificate_file"),
+            kit_file: self.path(node, "kit_file").unwrap_or_else(|| {
+                Path::new(crate::deploy::native::CURRENT).join("client-kit.zip")
+            }),
         }
     }
 

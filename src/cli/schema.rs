@@ -519,14 +519,23 @@ fn result_of(path: &str) -> Option<Value> {
         "properties": {
             "control_api_version": json!({ "type": "integer" }),
             "captured_at": string(),
-            "client": object(&[
-                ("id", string()),
-                ("display_name", string()),
-                ("origins", object(&[
-                    ("base_url", string()),
-                    ("proxy", nullable_string()),
-                ])),
-            ]),
+            "client": {
+                "type": "object",
+                "required": ["id", "display_name", "origins"],
+                "additionalProperties": false,
+                "properties": {
+                    "id": string(),
+                    "display_name": string(),
+                    "origins": object(&[
+                        ("base_url", string()),
+                        ("proxy", nullable_string()),
+                    ]),
+                    // The client kit the server offers, when it offers one:
+                    // its version and each platform's payload digest.
+                    "version": string(),
+                    "sha256": { "type": "object", "additionalProperties": string() },
+                },
+            },
             "server": object(&[
                 ("version", string()),
                 ("available", json!({ "type": "boolean" })),

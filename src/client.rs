@@ -566,14 +566,22 @@ pub fn percent_encode(value: &str) -> String {
     out
 }
 
+/// A request to the installation's base-URL origin, trusting its pin or
+/// anchor.
+fn base_url_request(
+    installation: &ClientInstallation,
+    timeout: Duration,
+) -> Result<ClientRequest, (i32, String)> {
+    ClientRequest::for_installation(installation, timeout, None).map_err(|e| (1, e))
+}
+
 async fn client_read(
     installation: &ClientInstallation,
     secret: &str,
     path: &str,
     timeout: Duration,
 ) -> Result<Value, (i32, String)> {
-    let request =
-        ClientRequest::for_installation(installation, timeout, None).map_err(|e| (1, e))?;
+    let request = base_url_request(installation, timeout)?;
     let (status, body) = request.call(Method::GET, path, Some(secret), None).await?;
     if status.is_success() {
         Ok(body)
@@ -599,6 +607,60 @@ pub async fn snapshot(
     let snapshot = client_read(installation, secret, &path, timeout).await?;
     keep_identity(installation, &snapshot);
     Ok(snapshot)
+}
+
+/// How long the kit download may wait for its next bytes.
+const KIT_STALL: Duration = Duration::from_secs(30);
+
+/// The kit the server offers, written to `to` (owner-only).
+pub async fn download_kit(
+    installation: &ClientInstallation,
+    secret: &str,
+    to: &Path,
+) -> Result<(), (i32, String)> {
+    let origin = &installation.base_url;
+    let response = base_url_request(installation, KIT_STALL)?
+        .send(
+            Method::GET,
+            "/control/v1/client/kit",
+            Some(secret),
+            None,
+            &[],
+        )
+        .await?;
+    let status = response.status();
+    let mut body = response.into_body();
+    if !status.is_success() {
+        let bytes = tokio::time::timeout(KIT_STALL, body.collect())
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .map(|collected| collected.to_bytes())
+            .unwrap_or_default();
+        let value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        return Err(client_failure(status, &value));
+    }
+    let mut open = std::fs::OpenOptions::new();
+    open.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        open.mode(0o600);
+    }
+    let mut file = open
+        .open(to)
+        .map_err(|e| (1, format!("{}: {e}", to.display())))?;
+    while let Some(frame) = tokio::time::timeout(KIT_STALL, body.frame())
+        .await
+        .map_err(|_| (4, format!("{origin}: the client kit download stalled")))?
+    {
+        let frame = frame.map_err(|e| (4, format!("{origin}: {}", crate::cli::error_chain(&e))))?;
+        if let Some(data) = frame.data_ref() {
+            std::io::Write::write_all(&mut file, data)
+                .map_err(|e| (1, format!("{}: {e}", to.display())))?;
+        }
+    }
+    Ok(())
 }
 
 /// The status-line snapshot adds only the two account rate-limit windows.
@@ -651,8 +713,7 @@ pub async fn resolve(
         "/control/v1/client/accounts/resolve?reference={}",
         percent_encode(reference)
     );
-    let request =
-        ClientRequest::for_installation(installation, timeout, None).map_err(|e| (1, e))?;
+    let request = base_url_request(installation, timeout)?;
     let (status, body) = request.call(Method::GET, &path, Some(secret), None).await?;
     if status.is_success() {
         return CatalogueEntry::from_value(&body["account"])

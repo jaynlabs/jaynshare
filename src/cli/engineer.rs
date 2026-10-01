@@ -569,6 +569,9 @@ pub(super) async fn status(cli: &Cli, args: &StatusArgs) -> Outcome {
         return Err(local(code, slug, message));
     }
     client::keep_identity(&installation, &body);
+    if !args.line {
+        super::follow(&installation, &secret_value, &body).await;
+    }
     let mut result = body;
     result["client"]["origins"] = json!({
         "base_url": installation.base_url,

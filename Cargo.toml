@@ -23,7 +23,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 sha2 = "0.10"
 time = { version = "0.3", features = ["formatting", "parsing", "macros", "serde"] }
-tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "process", "signal", "time", "sync"] }
+tokio = { version = "1", features = ["rt-multi-thread", "fs", "net", "io-util", "macros", "process", "signal", "time", "sync"] }
 toml = "1"
 toml_edit = "0.25"
 tracing = { version = "0.1", default-features = false, features = ["std"] }

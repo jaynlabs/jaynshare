@@ -172,6 +172,9 @@ pub fn prepare(request: Request, launch: bool) -> Result<Prepared, Refusal> {
     let snapshot = runtime
         .block_on(client::snapshot(&installation, &secret, None, READ_TIMEOUT))
         .ok();
+    if launch && let Some(snapshot) = &snapshot {
+        runtime.block_on(crate::cli::follow(&installation, &secret, snapshot));
+    }
     // The hold hint; an unreadable snapshot leaves the deadline alone.
     let hold_hint = snapshot.and_then(|snapshot| snapshot["hold_hint_seconds"].as_u64());
 

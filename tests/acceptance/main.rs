@@ -31,6 +31,7 @@ mod dep_release;
 mod dpl;
 mod fake_tools;
 mod faults;
+mod follow;
 mod harness;
 mod idt;
 mod leaks;

@@ -51,6 +51,7 @@ pub(crate) use control::{
     error_chain, http_client, http_client_anchors, http_client_pinned, http_client_plain,
 };
 use help::Role;
+pub(crate) use update::follow;
 use verbs::{
     account_add, account_availability, account_list, account_login, account_remove, account_rename,
     account_replace, account_show, api, ca_export, ca_rotate, ca_show, client_issue, client_list,
