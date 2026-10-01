@@ -14,7 +14,7 @@ const LOGIN: &str = "/control/v1/client/accounts/login";
 /// drive it: the printed URL's callback answered on the client's own port.
 /// The browser's answer, then the exit code, standard output and standard
 /// error.
-async fn client_login(home: &ClientHome) -> (StatusCode, (i32, String, String)) {
+pub(crate) async fn client_login(home: &ClientHome) -> (StatusCode, (i32, String, String)) {
     let no_browser = home.root.join("no-browser-on-path").display().to_string();
     let mut child = home
         .command(&[("PATH", &no_browser)])

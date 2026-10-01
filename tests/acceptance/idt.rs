@@ -173,6 +173,58 @@ async fn a_server_whose_identity_is_not_the_pinned_one_is_refused() {
     assert!(stderr.contains("is not the pinned"), "{stderr}");
 }
 
+/// A client's own login carries a secret, so off loopback it is refused over
+/// plain HTTP and goes through once its server serves the identity TLS.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_remote_client_logs_in_over_the_identity_tls() {
+    let _leak_sweep = crate::leaks::LeakGuard::default();
+    if non_loopback_addr().is_none() {
+        eprintln!("skipping: the fixture host has no non-loopback address");
+        return;
+    }
+    let plain = Setup {
+        mitm: true,
+        wildcard: true,
+        ..Setup::default()
+    };
+    let mut instance = Instance::start_with("identity-remote-login", plain.clone()).await;
+    let machine = install_client(&instance).await;
+    let remote = non_loopback_dest(&instance).expect("checked above");
+    machine.set("base_url", &format!("\"http://{remote}\""));
+    let (code, _, stderr) = machine.jaynshare(&["status", "--json"], &[], None);
+    assert_eq!(code, 0, "the client learns the pin: {stderr}");
+    let no_browser = machine
+        .root
+        .join("no-browser-on-path")
+        .display()
+        .to_string();
+    let (code, stdout, stderr) =
+        machine.jaynshare(&["account", "login"], &[("PATH", &no_browser)], None);
+    assert_ne!(code, 0, "{stdout}{stderr}");
+    assert!(stderr.contains("insecure_channel"), "{stderr}");
+
+    instance.write_setup(&Setup {
+        data_plane: "tls = \"identity\"\n".into(),
+        ..plain
+    });
+    instance.restart();
+    let (browser, (code, stdout, stderr)) = crate::own::client_login(&machine).await;
+    assert_eq!(browser, StatusCode::FOUND);
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    let https = format!("https://{remote}");
+    assert_eq!(
+        client_toml(&machine)["base_url"].as_str(),
+        Some(https.as_str())
+    );
+    let (code, stdout, stderr) = machine.jaynshare(&["account", "list", "--json"], &[], None);
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    let envelope: serde_json::Value = serde_json::from_str(stdout.trim()).expect("envelope");
+    assert_eq!(
+        envelope["result"]["accounts"][0]["health"]["state"],
+        "ready"
+    );
+}
+
 /// An enrollment bundle cannot carry the pin, so packaging refuses before
 /// any client is issued.
 #[tokio::test(flavor = "multi_thread")]
