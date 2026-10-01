@@ -572,7 +572,8 @@ fn host_target() -> &'static str {
     }
 }
 
-/// `release fetch` (the explicit release-host contact): the four files come from the named mirror and nothing
+/// `release fetch` (the explicit release-host contact): the release set,
+/// the archive and the client kit come from the named mirror and nothing
 /// else is requested; a redirect is followed only within the mirror's host; a
 /// mirror that is not plain `https` is a usage error; a
 /// tampered archive is a release failure; a stopped host is unreachable.
@@ -670,7 +671,8 @@ async fn release_fetch_contacts_only_the_named_origin() {
     });
     let origin = format!("https://localhost:{}", addr.port());
 
-    // The happy leg: exactly the four files, from this origin only.
+    // The happy leg: the release set, this host's archive and the client
+    // kit, from this origin only.
     let out = root.join("out");
     let (code, stdout, stderr) = cli_raw(
         &[
@@ -695,7 +697,7 @@ async fn release_fetch_contacts_only_the_named_origin() {
             artifact_names(FIXTURE_VERSION)
                 .into_iter()
                 .filter(|(_, purpose, target)| {
-                    *purpose == "platform" && *target == Some(host_target())
+                    *purpose == "client-kit" || *target == Some(host_target())
                 })
                 .map(|(name, _, _)| name),
         )

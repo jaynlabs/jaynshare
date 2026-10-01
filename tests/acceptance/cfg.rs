@@ -109,6 +109,10 @@ fn minimal_document_is_every_default_and_bytes_unchanged() {
     assert_eq!(effective["data_plane"]["egress"]["mode"], "off");
     assert_eq!(effective["mitm"]["listen"], "127.0.0.1:17422");
     assert_eq!(effective["clients"]["enrollment_lifetime_seconds"], 86400);
+    assert_eq!(
+        effective["clients"]["kit_file"],
+        "/opt/jaynshare/current/client-kit.zip"
+    );
     assert_eq!(effective["logging"]["level"], "info");
     assert_eq!(effective["logging"]["max_bytes"], 10_485_760);
     assert_eq!(effective["logging"]["retained_files"], 5);

@@ -82,6 +82,7 @@ pub struct Server {
     pub probes: Probes,
     /// The egress guard and its state.
     pub egress: egress::Guard,
+    pub client_kit: crate::control::client_kit::KitCache,
     pub started_at: OffsetDateTime,
     pub state_path: PathBuf,
     /// The start-time verdict on the trust material, `None` when
@@ -134,6 +135,7 @@ impl Server {
             refreshes: Refreshes::default(),
             probes: Probes::new(probe_settings),
             egress: egress::Guard::default(),
+            client_kit: Default::default(),
             started_at,
             state_path,
             mitm_ca: Mutex::new(None),

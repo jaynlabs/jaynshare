@@ -4,6 +4,7 @@
 
 mod accounts;
 mod ca;
+pub(crate) mod client_kit;
 pub(crate) mod client_surface;
 mod clients;
 mod operator;
@@ -91,8 +92,12 @@ pub async fn handle(
             (["client", "accounts", "resolve"], &Method::GET) => {
                 client_surface::resolve(server, request.uri().query())
             }
+            (["client", "kit"], &Method::GET) => client_kit::download(server).await,
             (
-                ["client", "status"] | ["client", "accounts"] | ["client", "accounts", "resolve"],
+                ["client", "status"]
+                | ["client", "accounts"]
+                | ["client", "accounts", "resolve"]
+                | ["client", "kit"],
                 _,
             ) => method_not_allowed("GET"),
             _ => not_found(),

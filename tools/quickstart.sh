@@ -126,6 +126,9 @@ prepare_homes() {
         printf 'version = 1\n\n[data_plane]\nlisten = "%s"\n\n[mitm]\nenabled = true\nlisten = "%s"\n' \
             "$LISTEN" "$PROXY_LISTEN" >"$server_root/config.toml"
     fi
+    # The client follows the kit the server offers: this script's own.
+    grep -q '^kit_file' "$server_root/config.toml" ||
+        printf '\n[clients]\nkit_file = "%s"\n' "$KIT" >>"$server_root/config.toml"
 }
 
 # A throwaway release key replaces the embedded one in both homes, so the

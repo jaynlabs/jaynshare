@@ -168,6 +168,8 @@ pub struct ClientSettings {
     /// The base-URL listener's PEM trust anchor, packaged as
     /// `base-url-ca.pem` when the advertised base URL is `https`.
     pub base_url_ca_certificate_file: Option<PathBuf>,
+    /// The client kit the server offers its clients to follow.
+    pub kit_file: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize)]

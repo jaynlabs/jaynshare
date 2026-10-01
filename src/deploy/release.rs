@@ -55,6 +55,10 @@ fn archive_name(version: &str, target: &str) -> String {
     format!("jaynshare-{version}-{target}.{extension}")
 }
 
+fn client_kit_name(version: &str) -> String {
+    format!("jaynshare-{version}-client-kit.zip")
+}
+
 /// `--target`'s default: the target triple this machine runs, from
 /// the OS/ARCH pair the five targets cover.
 pub fn native_target() -> &'static str {
@@ -289,7 +293,7 @@ pub async fn fetch_client_kit(
             .unwrap_or_default()
             .to_string()
     })?;
-    let name = format!("jaynshare-{version}-client-kit.zip");
+    let name = client_kit_name(version);
     let bytes =
         download(&client, &origin, version, &name)
             .await
@@ -314,9 +318,9 @@ pub async fn fetch_client_kit(
 }
 
 /// `release fetch <version> --out <dir> [--target <rust-target>]
-/// [--release-origin <https-origin>]`: the four files of
-/// `version`'s release set plus the target's archive, from the official or a
-/// mirror origin, then verified.
+/// [--release-origin <https-origin>]`: `version`'s release set, the
+/// target's archive and the client kit, from the official or a mirror
+/// origin, then verified.
 pub async fn fetch(
     version: &str,
     out: &Path,
@@ -336,6 +340,7 @@ pub async fn fetch(
         .map(str::to_owned)
         .unwrap_or_else(|| native_target().to_owned());
     let archive = archive_name(version, &target);
+    let kit = client_kit_name(version);
     let client = match crate::cli::http_client(tls_ca) {
         Ok(client) => client,
         Err(failure) => {
@@ -374,6 +379,7 @@ pub async fn fetch(
         "release.json.minisig",
         "SHA256SUMS",
         &archive,
+        &kit,
     ] {
         match download(&client, &origin, version, name).await {
             Ok(bytes) => {
@@ -759,7 +765,7 @@ pub fn verify_manifest(release: &ReleaseDir, manifest: &ReleaseManifest) -> Vec<
         ));
         return checks;
     }
-    let client_kit = format!("jaynshare-{}-client-kit.zip", manifest.version);
+    let client_kit = client_kit_name(&manifest.version);
     for artifact in &manifest.artifacts {
         let expected = match artifact.purpose {
             Purpose::Platform => {

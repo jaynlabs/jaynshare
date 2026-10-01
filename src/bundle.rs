@@ -60,15 +60,26 @@ const KIT_ONLY_MEMBERS: [&str; 8] = [
     "payload/windows-x86_64/jaynshare.exe",
 ];
 
-/// The payload member this machine runs: `None` is an unsupported
-/// client platform.
+/// Each client platform, `<os>-<arch>`, and its payload member.
+pub const PAYLOADS: [(&str, &str); 3] = [
+    ("macos-x86_64", "payload/macos-x86_64/jaynshare"),
+    ("macos-aarch64", "payload/macos-aarch64/jaynshare"),
+    ("windows-x86_64", "payload/windows-x86_64/jaynshare.exe"),
+];
+
+/// This machine's client platform and payload member: `None` is an
+/// unsupported client platform.
+fn native() -> Option<(&'static str, &'static str)> {
+    let platform = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
+    PAYLOADS.into_iter().find(|(name, _)| *name == platform)
+}
+
+pub fn native_platform() -> Option<&'static str> {
+    native().map(|(platform, _)| platform)
+}
+
 pub fn native_payload() -> Option<&'static str> {
-    match (std::env::consts::OS, std::env::consts::ARCH) {
-        ("macos", "x86_64") => Some("payload/macos-x86_64/jaynshare"),
-        ("macos", "aarch64") => Some("payload/macos-aarch64/jaynshare"),
-        ("windows", "x86_64") => Some("payload/windows-x86_64/jaynshare.exe"),
-        _ => None,
-    }
+    native().map(|(_, member)| member)
 }
 
 /// The bundle ZIP's name.
