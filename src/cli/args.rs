@@ -648,25 +648,40 @@ pub(super) enum ServerVerb {
         from: Option<PathBuf>,
     },
     Install {
-        #[arg(long, value_name = "release-dir")]
-        from: PathBuf,
+        /// A release directory on this host instead of a download.
+        #[arg(long, value_name = "release-dir", conflicts_with_all = ["version", "binary", "release_origin"])]
+        from: Option<PathBuf>,
+        /// The published version to fetch; default: the newest.
+        #[arg(long, value_name = "semver", conflicts_with = "binary")]
+        version: Option<String>,
+        /// A clone's own build, installed with the official client kit of its version.
+        #[arg(long, value_name = "path")]
+        binary: Option<PathBuf>,
+        /// The client kit for --binary instead of the official one.
+        #[arg(long, value_name = "zip", requires = "binary")]
+        kit: Option<PathBuf>,
+        /// The data-plane address when install writes the configuration;
+        /// default: Tailscale's, else this host's only private one.
+        #[arg(long, value_name = "ip")]
+        listen: Option<std::net::IpAddr>,
+        /// A verified `https` mirror in place of the official origin; later
+        /// updates follow it.
+        #[arg(long, value_name = "https-origin")]
+        release_origin: Option<String>,
     },
     Update {
-        #[arg(
-            long,
-            value_name = "release-dir",
-            conflicts_with = "version",
-            required_unless_present = "version"
-        )]
+        #[arg(long, value_name = "release-dir", conflicts_with = "version")]
         from: Option<PathBuf>,
+        /// Default: the newest release of the origin the server was
+        /// installed from, or its clone build again.
         #[arg(long, value_name = "semver")]
         version: Option<String>,
         /// The explicit downgrade form.
         #[arg(long)]
         allow_downgrade: bool,
-        /// A verified `https` mirror in place of the official origin;
-        /// only with `--version`.
-        #[arg(long, value_name = "https-origin", requires = "version")]
+        /// A verified `https` mirror in place of the recorded or official
+        /// origin; later updates follow it.
+        #[arg(long, value_name = "https-origin", conflicts_with = "from")]
         release_origin: Option<String>,
     },
     Uninstall {

@@ -585,12 +585,13 @@ async fn the_snapshot_is_never_torn() {
 }
 
 /// The member set of the account object.
-const ACCOUNT_MEMBERS: [&str; 16] = [
+const ACCOUNT_MEMBERS: [&str; 17] = [
     "handle",
     "display_name",
     "kind",
     "source_class",
     "enabled",
+    "owner",
     "health",
     "profile",
     "credential",

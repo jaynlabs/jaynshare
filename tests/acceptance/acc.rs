@@ -3191,6 +3191,7 @@ fn assert_every_account_member(account: &Value, label: &str) {
         "kind",
         "source_class",
         "enabled",
+        "owner",
         "health",
         "profile",
         "credential",

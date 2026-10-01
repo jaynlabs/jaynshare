@@ -476,7 +476,7 @@ async fn two_streams_quiet_and_one_document() {
     // --json: one document, the envelope's members, nothing else on stdout.
     for (args, command, dual) in [
         (vec!["status"], "status", true),
-        (vec!["account", "list"], "account list", false),
+        (vec!["account", "list"], "account list", true),
         (vec!["switch", "FSUB"], "switch", false),
         (vec!["account", "show", "nobody"], "account show", false),
         (vec!["config", "validate"], "config validate", false),

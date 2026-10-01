@@ -100,21 +100,54 @@ pub(super) fn dispatch(cli: &Cli, verb: &Verb) -> Option<Outcome> {
             Some(finish(result, preflight_row))
         }
         Verb::Server {
-            verb: ServerVerb::Install { from },
-        } => {
-            eprintln!(
-                "{}",
-                server_plan(
-                    &format!("installing the native server from {}", from.display()),
+            verb:
+                ServerVerb::Install {
                     from,
-                    cli.config.as_deref(),
-                )
-            );
-            let record = firewall_record(cli.config.as_deref());
+                    version,
+                    binary,
+                    kit,
+                    listen,
+                    release_origin,
+                },
+        } => {
+            let source = match (from, binary) {
+                (Some(from), _) => {
+                    eprintln!(
+                        "{}",
+                        server_plan(
+                            &format!("installing the native server from {}", from.display()),
+                            from,
+                            cli.config.as_deref(),
+                        )
+                    );
+                    native::Source::Directory(from)
+                }
+                (None, Some(binary)) => {
+                    eprintln!(
+                        "installing the native server from the build {}",
+                        binary.display()
+                    );
+                    native::Source::Build {
+                        binary,
+                        kit: kit.as_deref(),
+                    }
+                }
+                (None, None) => {
+                    eprintln!(
+                        "installing the native server: {}",
+                        version.as_deref().unwrap_or("the newest release")
+                    );
+                    native::Source::Published(version.as_deref())
+                }
+            };
             let result = native::install(&native::InstallInputs {
-                from,
+                source,
                 config: cli.config.as_deref(),
-                firewall_record: record.as_deref(),
+                listen: *listen,
+                release_origin: release_origin.as_deref(),
+                tls_ca: cli.tls_ca.as_deref(),
+                ask: &interactive_confirm,
+                firewall_record: &|config| firewall_record(Some(config)),
             });
             Some(finish(result, manager_row))
         }
@@ -137,7 +170,7 @@ pub(super) fn dispatch(cli: &Cli, verb: &Verb) -> Option<Outcome> {
                     )
                 ),
                 (None, Some(version)) => eprintln!("updating the native server to {version}"),
-                (None, None) => {}
+                (None, None) => eprintln!("updating the native server from its origin"),
             }
             let record = firewall_record(Some(&native::service_config_path()));
             let result = native::update(&native::UpdateInputs {
