@@ -158,6 +158,25 @@ pub(super) static DOCS: &[VerbDoc] = &[
         ["jaynshare api GET /v1/models --client"]
     ),
     verb!(
+        "account login",
+        Engineer,
+        None,
+        "As the enrolled client: log in a Claude account of your own, or log it in again",
+        [4, 5, 8, 9, 10, 11],
+        [
+            "jaynshare account login",
+            "jaynshare account login --name <name>"
+        ]
+    ),
+    verb!(
+        "account list",
+        Engineer,
+        None,
+        "As the enrolled client: list the accounts this client added",
+        [4, 5, 10, 11],
+        ["jaynshare account list"]
+    ),
+    verb!(
         "statusline",
         Engineer,
         None,
@@ -639,19 +658,24 @@ pub(super) static DOCS: &[VerbDoc] = &[
         "server install",
         Deploy,
         None,
-        "Install a verified release as the native service",
-        [17, 18, 19, 20, 21],
-        ["jaynshare server install --from <release-dir>"]
+        "Install the newest verified release, or a clone's build, as the native service, writing a configuration when there is none; run again, it updates",
+        [3, 4, 8, 17, 18, 19, 20, 21],
+        [
+            "jaynshare server install",
+            "jaynshare server install --version <semver>",
+            "jaynshare server install --binary target/release/jaynshare"
+        ]
     ),
     verb!(
         "server update",
         Deploy,
         None,
-        "Update the native install from a release directory or by version (asks; --yes skips)",
-        [8, 17, 18, 19, 20, 21],
+        "Update the native install to its origin's newest release, a version or a release directory (asks; --yes skips)",
+        [4, 8, 17, 18, 19, 20, 21],
         [
-            "jaynshare server update --from <release-dir>",
-            "jaynshare server update --version <semver>"
+            "jaynshare server update",
+            "jaynshare server update --version <semver>",
+            "jaynshare server update --from <release-dir>"
         ]
     ),
     verb!(

@@ -169,7 +169,7 @@ fn write_kit(
 }
 
 /// The valid kit every happy path uses.
-fn good_kit(dir: &Path, pkcs8: &[u8], public: &[u8]) -> PathBuf {
+pub(crate) fn good_kit(dir: &Path, pkcs8: &[u8], public: &[u8]) -> PathBuf {
     let path = dir.join("client-kit.zip");
     write_kit(&path, pkcs8, public, |_| {});
     path

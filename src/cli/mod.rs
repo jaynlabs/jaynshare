@@ -10,6 +10,7 @@ mod alias;
 mod args;
 mod bundle;
 mod claude;
+mod client_accounts;
 mod control;
 mod deploy;
 mod edit;
@@ -261,6 +262,9 @@ pub fn main() -> i32 {
     let dual = match verb {
         Verb::Status(args) => Some(dual_role(&cli, args.operator, args.client)),
         Verb::Api(args) => Some(dual_role(&cli, args.operator, args.client)),
+        Verb::Account {
+            verb: AccountVerb::Login(_) | AccountVerb::List,
+        } => Some(dual_role(&cli, false, false)),
         _ => None,
     };
     // The deploy verbs are file-backed, with no control connection.
@@ -282,7 +286,7 @@ pub fn main() -> i32 {
             | Verb::Update { .. }
             | Verb::Uninstall
             | Verb::TrustCa { .. }
-    ) || matches!(verb, Verb::Status(_) | Verb::Api(_) if dual == Some(Role::Engineer));
+    ) || matches!(verb, Verb::Status(_) | Verb::Api(_) | Verb::Account { .. } if dual == Some(Role::Engineer));
     if engineer_direct {
         if let Some(refusal) = later_verb_refusal(&cli, verb, path, role, dual) {
             if matches!(verb, Verb::Status(args) if args.check) {
@@ -323,6 +327,12 @@ pub fn main() -> i32 {
                 Verb::TrustCa { verb } => {
                     trust_ca::trust_ca(&cli, matches!(verb, args::TrustCaVerb::Add)).await
                 }
+                Verb::Account {
+                    verb: AccountVerb::Login(args),
+                } => client_accounts::account_login(&cli, args).await,
+                Verb::Account {
+                    verb: AccountVerb::List,
+                } => client_accounts::account_list(&cli).await,
                 _ => unreachable!("engineer_direct"),
             }
         });
@@ -518,7 +528,8 @@ fn later_verb_refusal(
         }
         Role::Engineer if matches!(verb, Verb::Enrol { .. }) => None,
         Role::Engineer
-            if matches!(verb, Verb::Status(_) | Verb::Api(_)) && dual == Some(Role::Engineer) =>
+            if matches!(verb, Verb::Status(_) | Verb::Api(_) | Verb::Account { .. })
+                && dual == Some(Role::Engineer) =>
         {
             engineer_context().err()
         }

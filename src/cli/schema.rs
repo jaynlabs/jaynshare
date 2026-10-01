@@ -53,6 +53,11 @@ fn reference(name: &str) -> Value {
     json!({ "$ref": format!("#/$defs/{name}") })
 }
 
+/// The operator's account object, or a client's view of its own.
+fn any_account() -> Value {
+    json!({ "oneOf": [reference("account"), reference("owned_account")] })
+}
+
 /// A read carries `control_api_version`, `captured_at` and its payload.
 fn read(member: &str, payload: Value) -> Value {
     object(&[
@@ -89,6 +94,35 @@ fn defs() -> Value {
         ("observed_at", nullable_string()),
         ("observed_source", nullable_string()),
     ]);
+    let health = object(&[
+        (
+            "state",
+            json!({ "enum": ["ready", "refreshing", "refresh_wait", "errored"] }),
+        ),
+        ("reason", nullable_string()),
+        ("since", nullable_string()),
+    ]);
+    let profile = object(&[
+        ("email", nullable_string()),
+        ("account_uuid", nullable_string()),
+        ("organization_uuid", nullable_string()),
+        ("organization_name", nullable_string()),
+    ]);
+    // A client's view of an account it owns.
+    let owned_account = object(&[
+        ("handle", string()),
+        ("display_name", string()),
+        ("selectable", json!({ "type": "boolean" })),
+        (
+            "rate_limits",
+            object(&[
+                ("five_hour", nullable_number()),
+                ("weekly", nullable_number()),
+            ]),
+        ),
+        ("profile", profile.clone()),
+        ("health", health.clone()),
+    ]);
     let account = object(&[
         ("handle", string()),
         ("display_name", string()),
@@ -98,26 +132,9 @@ fn defs() -> Value {
             json!({ "enum": ["api-key-entry", "portable-json", "explicit-file", "managed-store", "browser"] }),
         ),
         ("enabled", json!({ "type": "boolean" })),
-        (
-            "health",
-            object(&[
-                (
-                    "state",
-                    json!({ "enum": ["ready", "refreshing", "refresh_wait", "errored"] }),
-                ),
-                ("reason", nullable_string()),
-                ("since", nullable_string()),
-            ]),
-        ),
-        (
-            "profile",
-            object(&[
-                ("email", nullable_string()),
-                ("account_uuid", nullable_string()),
-                ("organization_uuid", nullable_string()),
-                ("organization_name", nullable_string()),
-            ]),
-        ),
+        ("owner", nullable_string()),
+        ("health", health.clone()),
+        ("profile", profile.clone()),
         (
             "credential",
             object(&[
@@ -320,7 +337,7 @@ fn defs() -> Value {
             json!({ "enum": ["awaiting_authorization", "exchanging", "succeeded", "failed", "cancelled"] }),
         ),
         ("expires_at", time.clone()),
-        ("account", nullable(reference("account"))),
+        ("account", nullable(any_account())),
         ("error", nullable(reference("error"))),
     ]);
     let error = object(&[
@@ -422,6 +439,7 @@ fn defs() -> Value {
         "audit_record": audit_record,
         "status_snapshot": snapshot,
         "operation": operation,
+        "owned_account": owned_account,
         "edit_result": object(&[
             ("path", string()),
             ("digest_before", string()),
@@ -580,7 +598,7 @@ fn result_of(path: &str) -> Option<Value> {
         "schema" => open_object(),
         "serve" => json!({ "type": "null" }),
         "status" => json!({ "oneOf": [status_read, client_status] }),
-        "account list" => read("accounts", array(reference("account"))),
+        "account list" => read("accounts", array(any_account())),
         "account show" => read("account", reference("account")),
         "account add" | "account replace" | "account rename" | "account enable"
         | "account disable" => account_mutation,
@@ -756,7 +774,7 @@ pub(super) fn of_verb(path: &str) -> Option<Value> {
         "result",
         "error",
     ];
-    if matches!(path, "status" | "api") {
+    if matches!(path, "status" | "api" | "account list" | "account login") {
         properties["role"] = json!({ "enum": ["operator", "client"] });
         required.push("role");
     }

@@ -20,7 +20,7 @@ fn local(code: i32, slug: &str, message: impl Into<String>) -> Failure {
 }
 
 /// A `(exit code, message)` from the client's HTTP layer as a `Failure`.
-fn client_failure_pair((code, message): (i32, String)) -> Failure {
+pub(super) fn client_failure_pair((code, message): (i32, String)) -> Failure {
     let slug = match code {
         4 => "cli_unreachable",
         5 => "cli_refused",
@@ -33,11 +33,11 @@ fn client_failure_pair((code, message): (i32, String)) -> Failure {
     local(code, slug, message)
 }
 
-fn installation() -> Result<ClientInstallation, Failure> {
+pub(super) fn installation() -> Result<ClientInstallation, Failure> {
     client::read_installation().map_err(client_failure_pair)
 }
 
-fn secret(installation: &ClientInstallation) -> Result<String, Failure> {
+pub(super) fn secret(installation: &ClientInstallation) -> Result<String, Failure> {
     client::read_secret(installation).map_err(client_failure_pair)
 }
 
@@ -48,7 +48,10 @@ fn colour_wanted(cli: &Cli) -> bool {
 
 /// The installation's `base-url-ca.pem` is trusted without
 /// `--tls-ca`; a global `--tls-ca` is added beside it.
-fn request(installation: &ClientInstallation, cli: &Cli) -> Result<ClientRequest, Failure> {
+pub(super) fn request(
+    installation: &ClientInstallation,
+    cli: &Cli,
+) -> Result<ClientRequest, Failure> {
     let anchor = installation.base_url_ca();
     let anchors: Vec<&Path> = anchor
         .as_deref()

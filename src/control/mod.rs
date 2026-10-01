@@ -4,6 +4,7 @@
 
 mod accounts;
 mod ca;
+mod client_accounts;
 pub(crate) mod client_kit;
 pub(crate) mod client_surface;
 mod clients;
@@ -27,16 +28,15 @@ use crate::audit::Principal;
 use crate::data_plane::envelope::json_response;
 use crate::data_plane::principal::is_loopback_peer;
 use crate::data_plane::relay::ResponseBody;
-use crate::login::Refused;
+use crate::login::{Refused, Started, Starter};
 use crate::pool::Account;
 use crate::pool::selection::{self as sel, RequestFacts};
 use crate::server::{Server, VERSION};
 use crate::state;
 use crate::timestamp::rfc3339;
-pub(crate) use accounts::account_object;
 use accounts::{
-    add_account, disable_account, enable_account, remove_account, rename_account, replace_account,
-    resolve,
+    account_object, add_account, disable_account, enable_account, remove_account, rename_account,
+    replace_account, resolve,
 };
 use selection::{clear_route_preference, set_route_preference, switch_default};
 
@@ -79,10 +79,12 @@ pub async fn handle(
         // Byte-identical with a data-plane refusal.
         return unauthenticated_refusal(peer);
     };
-    // The client surface declares the **client** class, and an
-    // operator reads it too. It is matched
-    // before the operator-only gate below, and it is read-only: a client has
-    // no mutation at all, so every other method is 405.
+    // The client surface declares the **client** class, and an operator
+    // reads it too, except a client's own accounts and logins. It is matched
+    // before the operator-only gate below.
+    if let ["client", "accounts", "owned" | "login" | "operations", ..] = segments[2..] {
+        return client_accounts::route(server, peer, principal, &segments[4..], request).await;
+    }
     if segments[2..].first() == Some(&"client") {
         return match (&segments[2..], &method) {
             (["client", "status"], &Method::GET) => {
@@ -222,7 +224,7 @@ pub async fn handle(
         (["quota", "probe"], &Method::POST) => {
             probe::handle(server, peer, principal, request).await
         }
-        (["operations", id], &Method::GET) => operation_show(server, id),
+        (["operations", id], &Method::GET) => operation_show(server, principal, id),
         (["operations", id, "code"], &Method::POST) => {
             operation_code(server, peer, principal, id, request).await
         }
@@ -478,6 +480,7 @@ pub(super) fn member_errors(object: &Value, allowed: &[(&str, &str, bool)]) -> V
                 let ok = match *kind {
                     "string" => v.is_string(),
                     "object" => v.is_object(),
+                    "integer" => v.is_u64() || v.is_i64(),
                     _ => true,
                 };
                 if !ok {
@@ -519,12 +522,15 @@ async fn login_start(
             details,
         );
     }
-    let display_name = body["display_name"]
-        .as_str()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(String::from);
-    match server.logins.start(Arc::clone(server), display_name).await {
+    match server
+        .logins
+        .start(
+            Arc::clone(server),
+            Starter::Operator,
+            login_display_name(&body),
+        )
+        .await
+    {
         Ok(started) => {
             mutation_line(
                 server,
@@ -534,16 +540,7 @@ async fn login_start(
                 &started.id.to_string(),
                 "started",
             );
-            base(
-                StatusCode::ACCEPTED,
-                json!({
-                    "operation_id": started.id,
-                    "state": "awaiting_authorization",
-                    "authorization_url": started.url,
-                    "expires_at": rfc3339(started.expires_at),
-                    "manual_code_required": started.manual_code_required,
-                }),
-            )
+            login_started(&started)
         }
         Err(message) => error(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -555,26 +552,70 @@ async fn login_start(
     }
 }
 
-/// The read of one login operation; the read is not secret-bearing.
-fn operation_show(server: &Arc<Server>, id: &str) -> Response<ResponseBody> {
+/// A login's `display_name` member, trimmed; blank is none.
+fn login_display_name(body: &Value) -> Option<String> {
+    body["display_name"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+}
+
+/// The `202` that answers a started login.
+fn login_started(started: &Started) -> Response<ResponseBody> {
+    base(
+        StatusCode::ACCEPTED,
+        json!({
+            "operation_id": started.id,
+            "state": "awaiting_authorization",
+            "authorization_url": started.url,
+            "expires_at": rfc3339(started.expires_at),
+            "manual_code_required": started.manual_code_required,
+        }),
+    )
+}
+
+/// The operation an id names, if the caller may reach it: an operator
+/// reaches every one, a client only those it started.
+fn reachable_operation(
+    server: &Server,
+    principal: &Principal,
+    id: &str,
+) -> Result<Uuid, Box<Response<ResponseBody>>> {
     let Ok(id) = id.parse::<Uuid>() else {
-        return error(
+        return Err(Box::new(error(
             StatusCode::BAD_REQUEST,
             "invalid_request",
             "an operation path segment is its id, a UUID",
-            Some((*id).to_string()),
-            vec![],
-        );
-    };
-    match server.logins.show(server, id) {
-        Some(operation) => read(json!({ "operation": operation })),
-        None => error(
-            StatusCode::NOT_FOUND,
-            "not_found",
-            "no login operation has this id",
             Some(id.to_string()),
             vec![],
-        ),
+        )));
+    };
+    match principal.client_id() {
+        Some(client) if !server.logins.started_by(id, client) => {
+            Err(Box::new(operation_unknown(id)))
+        }
+        _ => Ok(id),
+    }
+}
+
+/// The read of one login operation; the read is not secret-bearing.
+fn operation_show(server: &Arc<Server>, principal: &Principal, id: &str) -> Response<ResponseBody> {
+    let id = match reachable_operation(server, principal, id) {
+        Ok(id) => id,
+        Err(refusal) => return *refusal,
+    };
+    let operation = match principal.client_id() {
+        Some(client) => server.logins.show(id, |handle| {
+            client_accounts::owned_account(server, client, handle)
+        }),
+        None => server
+            .logins
+            .show(id, |handle| account_object(server, handle)),
+    };
+    match operation {
+        Some(operation) => read(json!({ "operation": operation })),
+        None => operation_unknown(id),
     }
 }
 
@@ -603,14 +644,9 @@ async fn operation_code(
             details,
         );
     }
-    let Ok(id) = id.parse::<Uuid>() else {
-        return error(
-            StatusCode::BAD_REQUEST,
-            "invalid_request",
-            "an operation path segment is its id, a UUID",
-            Some((*id).to_string()),
-            vec![],
-        );
+    let id = match reachable_operation(server, principal, id) {
+        Ok(id) => id,
+        Err(refusal) => return *refusal,
     };
     match server
         .logins
@@ -653,14 +689,9 @@ async fn operation_cancel(
     {
         return refusal;
     }
-    let Ok(id) = id.parse::<Uuid>() else {
-        return error(
-            StatusCode::BAD_REQUEST,
-            "invalid_request",
-            "an operation path segment is its id, a UUID",
-            Some((*id).to_string()),
-            vec![],
-        );
+    let id = match reachable_operation(server, principal, id) {
+        Ok(id) => id,
+        Err(refusal) => return *refusal,
     };
     match server.logins.cancel(id) {
         Ok(()) => {

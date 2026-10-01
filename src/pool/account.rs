@@ -152,6 +152,8 @@ pub struct Account {
     pub errored: Option<Errored>,
     pub credential: Credential,
     pub quota: Vec<Bucket>,
+    /// The client that added the account; `None` for the operator's.
+    pub owner: Option<String>,
 }
 
 impl Account {
@@ -171,6 +173,7 @@ impl Account {
             errored: None,
             credential,
             quota,
+            owner: None,
         }
     }
 
@@ -254,6 +257,7 @@ impl Account {
             errored,
             credential,
             quota,
+            owner: record.owner,
         };
         account.ensure_expected_buckets();
         Ok(account)
@@ -302,6 +306,9 @@ struct Record {
     refresh_not_before: Option<Option<OffsetDateTime>>,
     #[serde(default)]
     quota: Option<Value>,
+    // Absent when null, so a 2.0.x rollback still reads the state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    owner: Option<String>,
 }
 
 impl From<&Account> for Record {
@@ -351,6 +358,7 @@ impl From<&Account> for Record {
             last_refresh_success_at,
             refresh_not_before,
             quota: Some(serde_json::to_value(&a.quota).expect("buckets serialize")),
+            owner: a.owner.clone(),
         }
     }
 }
@@ -461,6 +469,24 @@ mod tests {
             Account::from_record(&v).unwrap().credential,
             oauth().credential
         );
+    }
+
+    #[test]
+    fn a_record_without_an_owner_is_the_operator_s() {
+        let v = oauth().to_record();
+        assert!(v.get("owner").is_none());
+        assert_eq!(Account::from_record(&v).unwrap().owner, None);
+    }
+
+    #[test]
+    fn an_owned_record_round_trips() {
+        let owned = Account {
+            owner: Some("mac-1".into()),
+            ..oauth()
+        };
+        let v = owned.to_record();
+        assert_eq!(v["owner"], "mac-1");
+        assert_eq!(Account::from_record(&v).unwrap(), owned);
     }
 
     #[test]

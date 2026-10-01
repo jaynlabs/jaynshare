@@ -51,6 +51,14 @@ impl Principal {
     pub fn is_operator(&self) -> bool {
         matches!(self.kind, PrincipalKind::Loopback | PrincipalKind::Operator)
     }
+
+    /// The enrolled client's id; `None` for an operator.
+    pub fn client_id(&self) -> Option<&str> {
+        match self.kind {
+            PrincipalKind::Client => self.id.as_deref(),
+            PrincipalKind::Loopback | PrincipalKind::Operator => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
