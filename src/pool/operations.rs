@@ -27,6 +27,8 @@ pub enum OperationError {
     },
     /// The credential's identity contradicts the named account.
     IdentityMismatch,
+    /// A client's add landed on an identity it does not own.
+    NotOwner,
     /// The entries the operation would leave unresolvable or ambiguous.
     ReferenceConflict(Vec<ReferenceConflict>),
 }
@@ -83,8 +85,9 @@ fn install(account: &mut Account, mut credential: Credential, source: Source) {
 }
 
 impl Pool {
-    /// Same identity replaces the credential in place; otherwise a
-    /// different name refuses the add and a taken name conflicts.
+    /// Same identity replaces the credential in place, unless a client adds
+    /// one it does not own; otherwise a different name refuses the add and a
+    /// taken name conflicts.
     pub fn add(
         &mut self,
         mut account: Account,
@@ -92,6 +95,9 @@ impl Pool {
     ) -> Result<Uuid, OperationError> {
         if let Some(existing) = self.same_identity_of(&account) {
             let handle = existing.handle;
+            if account.owner.is_some() && account.owner != existing.owner {
+                return Err(OperationError::NotOwner);
+            }
             if let Some(name) = &operator_name
                 && fold(name) != fold(&existing.display_name)
             {
@@ -442,6 +448,35 @@ mod tests {
             Ok(handle)
         );
         assert_eq!(pool.get(handle).unwrap().display_name, "Explicit");
+    }
+
+    #[test]
+    fn a_client_re_adds_only_an_identity_it_owns() {
+        let mut pool = Pool::default();
+        let (mine, theirs) = (Uuid::new_v4(), Uuid::new_v4());
+        let owned_by = |owner: &str, id| Account {
+            owner: Some(owner.into()),
+            ..oauth("a@x.io", Some("One"), id)
+        };
+        let handle = pool.add(owned_by("mac-1", mine), None).unwrap();
+        pool.add(oauth("b@x.io", Some("One"), theirs), None)
+            .unwrap();
+
+        assert_eq!(pool.add(owned_by("mac-1", mine), None), Ok(handle));
+        assert_eq!(
+            pool.add(owned_by("mac-2", mine), None),
+            Err(OperationError::NotOwner)
+        );
+        assert_eq!(
+            pool.add(owned_by("mac-1", theirs), None),
+            Err(OperationError::NotOwner)
+        );
+        // The operator re-adds any identity, and the owner stays.
+        assert_eq!(
+            pool.add(oauth("a@x.io", Some("One"), mine), None),
+            Ok(handle)
+        );
+        assert_eq!(pool.get(handle).unwrap().owner.as_deref(), Some("mac-1"));
     }
 
     #[test]

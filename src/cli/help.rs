@@ -158,6 +158,25 @@ pub(super) static DOCS: &[VerbDoc] = &[
         ["jaynshare api GET /v1/models --client"]
     ),
     verb!(
+        "account login",
+        Engineer,
+        None,
+        "As the enrolled client: log in a Claude account of your own, or log it in again",
+        [4, 5, 8, 9, 10, 11],
+        [
+            "jaynshare account login",
+            "jaynshare account login --name <name>"
+        ]
+    ),
+    verb!(
+        "account list",
+        Engineer,
+        None,
+        "As the enrolled client: list the accounts this client added",
+        [4, 5, 10, 11],
+        ["jaynshare account list"]
+    ),
+    verb!(
         "statusline",
         Engineer,
         None,
