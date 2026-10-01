@@ -24,6 +24,7 @@ mod cxp_run;
 mod cxp_settings;
 mod cxp_status;
 mod dep_client;
+mod dep_install;
 mod dep_native;
 mod dep_net;
 mod dep_release;

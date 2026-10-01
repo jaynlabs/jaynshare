@@ -99,10 +99,117 @@ pub fn assigned(ip: IpAddr) -> Result<Option<String>, String> {
     Ok(None)
 }
 
+/// A generated configuration's listener address, as [`detect_listen`] found it.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Detected {
+    /// The address and how it was chosen.
+    One(IpAddr, String),
+    /// No single answer: the closed-list addresses this host carries, by interface.
+    Choose(Vec<(String, IpAddr)>),
+}
+
+/// This host's Tailscale IPv4 address when `tailscale ip -4` names one, else
+/// its only private IPv4 address.
+pub fn detect_listen() -> Detected {
+    let interfaces: Vec<(String, IpAddr)> = if_addrs::get_if_addrs()
+        .map(|addrs| {
+            addrs
+                .into_iter()
+                .map(|i| (i.name.clone(), i.ip()))
+                .collect()
+        })
+        .unwrap_or_default();
+    choose_listen(tailscale_ipv4(), &interfaces)
+}
+
+/// `tailscale ip -4`'s address, when the tool runs and names one.
+fn tailscale_ipv4() -> Option<IpAddr> {
+    let output = std::process::Command::new("tailscale")
+        .args(["ip", "-4"])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()
+        .filter(|output| output.status.success())?;
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .next()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+/// The pure half of [`detect_listen`]: only non-loopback addresses on the
+/// closed list count, and only IPv4 ones are picked without asking.
+fn choose_listen(tailscale: Option<IpAddr>, interfaces: &[(String, IpAddr)]) -> Detected {
+    let usable = |ip: IpAddr| classify(ip).passes() && classify(ip) != AddressClass::Loopback;
+    if let Some(ip) = tailscale.filter(|ip| usable(*ip)) {
+        return Detected::One(ip, "this host's Tailscale address".to_owned());
+    }
+    let candidates: Vec<(String, IpAddr)> = interfaces
+        .iter()
+        .filter(|(_, ip)| usable(*ip))
+        .cloned()
+        .collect();
+    let ipv4: Vec<&(String, IpAddr)> = candidates.iter().filter(|(_, ip)| ip.is_ipv4()).collect();
+    match ipv4.as_slice() {
+        [(name, ip)] => Detected::One(
+            *ip,
+            format!("this host's only private IPv4 address, on {name}"),
+        ),
+        _ => Detected::Choose(candidates),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4};
+
+    fn interface(name: &str, ip: &str) -> (String, IpAddr) {
+        (name.to_owned(), ip.parse().unwrap())
+    }
+
+    #[test]
+    fn tailscale_wins_over_the_interfaces() {
+        let interfaces = [interface("eth0", "192.168.1.5")];
+        let tailscale = "100.101.102.103".parse().ok();
+        assert_eq!(
+            choose_listen(tailscale, &interfaces),
+            Detected::One(tailscale.unwrap(), "this host's Tailscale address".into())
+        );
+    }
+
+    #[test]
+    fn the_only_private_ipv4_address_is_picked_beside_loopback_public_and_ipv6() {
+        let interfaces = [
+            interface("lo", "127.0.0.1"),
+            interface("eth0", "203.0.113.7"),
+            interface("eth1", "10.0.0.4"),
+            interface("eth1", "fd00::4"),
+        ];
+        assert!(matches!(
+            choose_listen(None, &interfaces),
+            Detected::One(ip, how) if ip == interfaces[2].1 && how.ends_with("on eth1")
+        ));
+    }
+
+    #[test]
+    fn two_private_addresses_or_none_leave_the_choice() {
+        let two = [
+            interface("eth0", "192.168.1.5"),
+            interface("docker0", "172.17.0.1"),
+            interface("eth0", "fd00::5"),
+        ];
+        assert_eq!(choose_listen(None, &two), Detected::Choose(two.to_vec()));
+        let public_only = [interface("eth0", "203.0.113.7")];
+        assert_eq!(choose_listen(None, &public_only), Detected::Choose(vec![]));
+        // A loopback answer from tailscale is no answer.
+        assert_eq!(
+            choose_listen("127.0.0.1".parse().ok(), &public_only),
+            Detected::Choose(vec![])
+        );
+    }
 
     fn class4(s: &str) -> AddressClass {
         classify(IpAddr::V4(s.parse::<Ipv4Addr>().unwrap()))

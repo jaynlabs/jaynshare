@@ -639,19 +639,24 @@ pub(super) static DOCS: &[VerbDoc] = &[
         "server install",
         Deploy,
         None,
-        "Install a verified release as the native service",
-        [17, 18, 19, 20, 21],
-        ["jaynshare server install --from <release-dir>"]
+        "Install the newest verified release, or a clone's build, as the native service, writing a configuration when there is none; run again, it updates",
+        [3, 4, 8, 17, 18, 19, 20, 21],
+        [
+            "jaynshare server install",
+            "jaynshare server install --version <semver>",
+            "jaynshare server install --binary target/release/jaynshare"
+        ]
     ),
     verb!(
         "server update",
         Deploy,
         None,
-        "Update the native install from a release directory or by version (asks; --yes skips)",
-        [8, 17, 18, 19, 20, 21],
+        "Update the native install to its origin's newest release, a version or a release directory (asks; --yes skips)",
+        [4, 8, 17, 18, 19, 20, 21],
         [
-            "jaynshare server update --from <release-dir>",
-            "jaynshare server update --version <semver>"
+            "jaynshare server update",
+            "jaynshare server update --version <semver>",
+            "jaynshare server update --from <release-dir>"
         ]
     ),
     verb!(
