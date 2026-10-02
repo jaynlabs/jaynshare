@@ -98,7 +98,9 @@ pub(crate) fn linux_binary() -> Result<PathBuf, String> {
             if let Some(given) = std::env::var_os("JAYNSHARE_LINUX_BIN") {
                 let given = PathBuf::from(given);
                 return if given.is_file() {
-                    Ok(given)
+                    given.canonicalize().map_err(|error| {
+                        format!("JAYNSHARE_LINUX_BIN: {}: {error}", given.display())
+                    })
                 } else {
                     Err(format!("JAYNSHARE_LINUX_BIN: {} is not a file", given.display()))
                 };
