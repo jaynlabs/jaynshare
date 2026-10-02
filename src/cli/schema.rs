@@ -264,6 +264,14 @@ fn defs() -> Value {
                         ("fingerprint", nullable_string()),
                         ("not_after", nullable_string()),
                         ("state", nullable_string()),
+                        (
+                            "next",
+                            nullable(object(&[
+                                ("fingerprint", string()),
+                                ("not_after", string()),
+                                ("switch_at", string()),
+                            ])),
+                        ),
                     ]),
                 ),
                 (
@@ -454,16 +462,6 @@ fn defs() -> Value {
             ("fingerprint", nullable_string()),
             ("not_after", nullable_string()),
         ]),
-        "package_result": {
-            "type": "object",
-            "required": ["archive", "code_file", "manifest"],
-            "additionalProperties": false,
-            "properties": {
-                "archive": string(),
-                "code_file": nullable_string(),
-                "manifest": open_object(),
-            },
-        },
         "deploy_result": object(&[
             ("operation", string()),
             ("version", nullable_string()),
@@ -479,11 +477,6 @@ fn defs() -> Value {
             ("origins", object(&[("base_url", string()), ("proxy", nullable_string())])),
             ("ca_fingerprint", nullable_string()),
             ("files", array(string())),
-        ]),
-        "ca_update_result": object(&[
-            ("previous_fingerprint", nullable_string()),
-            ("fingerprint", string()),
-            ("directory", string()),
         ]),
         "path_entry": object(&[
             ("path", string()),
@@ -545,6 +538,7 @@ fn result_of(path: &str) -> Option<Value> {
             ]),
             "capabilities": array(string()),
             "ca_fingerprint": nullable_string(),
+            "ca_next_fingerprint": nullable_string(),
             "pool": object(&[
                 ("accounts_configured", json!({ "type": "integer" })),
                 ("accounts_selectable", json!({ "type": "integer" })),
@@ -689,7 +683,6 @@ fn result_of(path: &str) -> Option<Value> {
                 json!({ "oneOf": [string(), object(&[("base64", string())])] }),
             ),
         ]),
-        "ca update-bundle" => json!({ "oneOf": [reference("package_result"), open_object()] }),
         // The invite travels inside `result` with `--json`, or into
         // `--disclose-to`'s file, named by `disclosure_file`.
         "client invite" | "client reissue" => json!({ "oneOf": [
@@ -734,7 +727,6 @@ fn result_of(path: &str) -> Option<Value> {
         p if p.starts_with("release ") || p.starts_with("server ") || p.starts_with("service ") => {
             reference("deploy_result")
         }
-        "ca-update" => reference("ca_update_result"),
         "join" => object(&[
             ("client_id", string()),
             ("display_name", string()),

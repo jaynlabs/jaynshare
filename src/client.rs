@@ -49,10 +49,8 @@ impl ClientInstallation {
 }
 
 /// A missing installation file is named, and so is a missing
-/// `base-url-ca.pem` that `client.toml` records. `ca.pem` is the launcher's
-/// to require: an enrollment from before base-URL mode was removed lacks it,
-/// while `status` and `ca-update` must still read the installation. Its
-/// `mode` key, if any, is ignored.
+/// `base-url-ca.pem` that `client.toml` records. A missing `ca.pem` is
+/// fetched by the launcher and `status`. Its `mode` key, if any, is ignored.
 pub fn read_installation() -> Result<ClientInstallation, (i32, String)> {
     let directory = platform::client_directory();
     let toml_path = directory.join("client.toml");
@@ -542,7 +540,7 @@ fn base_url_request(
     ClientRequest::for_installation(installation, timeout, None).map_err(|e| (1, e))
 }
 
-async fn client_read(
+pub(crate) async fn client_read(
     installation: &ClientInstallation,
     secret: &str,
     path: &str,

@@ -99,14 +99,6 @@ pub(super) static DOCS: &[VerbDoc] = &[
         ]
     ),
     verb!(
-        "ca-update",
-        Engineer,
-        None,
-        "Apply a CA update bundle after the pool's CA was rotated",
-        [11, 12, 17, 21],
-        ["jaynshare ca-update --from <ca-update.zip>"]
-    ),
-    verb!(
         "trust-ca add",
         Engineer,
         None,
@@ -493,17 +485,9 @@ pub(super) static DOCS: &[VerbDoc] = &[
         "ca rotate",
         Operator,
         None,
-        "Rotate the CA (asks; --yes skips): every client then needs the update bundle",
+        "Stage the next CA, presented after a week; --now replaces it at once (asks; --yes skips)",
         [3, 4, 5, 8, 10, 21],
-        ["jaynshare ca rotate"]
-    ),
-    verb!(
-        "ca update-bundle",
-        Operator,
-        None,
-        "Write the CA update bundle clients apply after a rotation",
-        [3, 4, 5, 8, 10],
-        ["jaynshare ca update-bundle --out <dir>"]
+        ["jaynshare ca rotate", "jaynshare ca rotate --now"]
     ),
     verb!(
         "config paths",

@@ -2335,6 +2335,7 @@ async fn the_ca_read_answers_operator_and_client_without_key_material() {
                 "fingerprint": null,
                 "not_after": null,
                 "state": null,
+                "next": null,
             }),
             "{who}"
         );
@@ -2457,6 +2458,7 @@ async fn client_snapshot_and_catalogue_match_the_allow_lists() {
         &body,
         &[
             "ca_fingerprint",
+            "ca_next_fingerprint",
             "capabilities",
             "captured_at",
             "client",

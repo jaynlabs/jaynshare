@@ -774,20 +774,24 @@ pub(super) fn time_or_null(t: Option<OffsetDateTime>) -> Value {
     t.map_or(Value::Null, |t| json!(rfc3339(t)))
 }
 
-/// The CA's fingerprint, expiry and state. With the mode
+/// The CA's fingerprint, expiry and state, and the staged CA. With the mode
 /// off every member is `null`; with it on and the material unusable
 /// the state says so and the rest stays unknown.
 fn mitm_ca_object(server: &Server, enabled: bool) -> Value {
     if !enabled {
-        return json!({ "fingerprint": null, "not_after": null, "state": null });
+        return json!({ "fingerprint": null, "not_after": null, "state": null, "next": null });
     }
-    match server.mitm_ca() {
+    let authorities = server.mitm_authorities().clone();
+    match &authorities.current {
         Some(ca) => json!({
             "fingerprint": ca.fingerprint(),
             "not_after": rfc3339(ca.not_after()),
             "state": ca.expiry_state(OffsetDateTime::now_utc()),
+            "next": ca::next_object(&authorities),
         }),
-        None => json!({ "fingerprint": null, "not_after": null, "state": "unusable" }),
+        None => {
+            json!({ "fingerprint": null, "not_after": null, "state": "unusable", "next": null })
+        }
     }
 }
 

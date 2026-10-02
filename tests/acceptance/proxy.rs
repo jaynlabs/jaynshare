@@ -3939,8 +3939,8 @@ async fn absolute_form_is_sent_to_the_corporate_proxy() {
     );
 }
 
-/// `ca rotate` while the proxy
-/// listener serves, and the next intercepted handshake presents the new
+/// A staged CA leaves the presented leaf alone; `ca rotate --now` while the
+/// proxy listener serves, and the next intercepted handshake presents the new
 /// leaf: made with the new CA file as the only trust anchor, it succeeds
 /// and the probe host reports the new fingerprint, while the tunnel opened
 /// before the rotation keeps serving on the leaf it negotiated. The
@@ -3974,8 +3974,25 @@ async fn a_rotated_ca_is_live_on_the_listener() {
         "the leaf in force at start"
     );
 
-    // Rotate while the listener serves.
+    // A staged CA: new handshakes still present the current leaf.
     let envelope = instance.cli_json(&["ca", "rotate", "--yes"], None);
+    assert_eq!(envelope["ok"], true, "staged: {envelope}");
+    let mut staged_tunnel = intercept(
+        proxy,
+        "probe.jaynshare.invalid:443",
+        None,
+        &ca,
+        Offer::alpn(&["http/1.1"]),
+    )
+    .await
+    .expect("the current CA still validates the leaf");
+    let answer = staged_tunnel
+        .send(staged_tunnel.request(Method::GET, "probe.jaynshare.invalid", "/", ""))
+        .await;
+    assert_eq!(answer.json()["ca_fingerprint"], old, "{}", answer.text());
+
+    // Rotate now while the listener serves.
+    let envelope = instance.cli_json(&["ca", "rotate", "--now", "--yes"], None);
     assert_eq!(envelope["ok"], true, "the rotation applied: {envelope}");
     let new = envelope["result"]["fingerprint"]
         .as_str()
@@ -3987,8 +4004,7 @@ async fn a_rotated_ca_is_live_on_the_listener() {
     // The tunnel established before the rotation keeps the leaf it
     // negotiated until it closes, so it still serves — under the
     // old trust anchor, which this client is still holding. What it reports
-    // is the CA now in force, which is how a client learns it needs the
-    // bundle.
+    // is the CA now in force, which is how a client learns it changed.
     let answer = tunnel
         .send(tunnel.request(Method::GET, "probe.jaynshare.invalid", "/", ""))
         .await;

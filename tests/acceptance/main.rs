@@ -12,6 +12,7 @@
 
 mod acc;
 mod acp;
+mod ca_follow;
 mod cfg;
 mod cli;
 mod client_fx;

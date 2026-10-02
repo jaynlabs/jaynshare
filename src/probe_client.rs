@@ -180,7 +180,7 @@ pub enum Outcome {
     /// Only the plain-HTTP form answered.
     CaNotTrusted,
     /// Both answered; `matches` compares the probe's fingerprint with
-    /// `client.toml`'s (a mismatch means a CA update is needed).
+    /// `client.toml`'s.
     Healthy { fingerprint: String, matches: bool },
 }
 
@@ -300,7 +300,7 @@ pub fn failure(probe: &Probe) -> Option<(i32, &'static str, String)> {
         Outcome::CaNotTrusted => Some((
             12,
             "cli_ca_untrusted",
-            "the proxy answers, but the TLS form failed: the CA in ca.pem is not the CA the server presents; install the CA update with `jaynshare ca-update --from <ca-update.zip>`"
+            "the proxy answers, but the TLS form failed: the CA in ca.pem is not the CA the server presents"
                 .to_owned(),
         )),
         Outcome::Healthy {
@@ -310,8 +310,7 @@ pub fn failure(probe: &Probe) -> Option<(i32, &'static str, String)> {
             12,
             "cli_ca_mismatch",
             format!(
-                "the server presents CA {fingerprint} but this installation trusts client.toml's; \
-                 a CA update is needed: `jaynshare ca-update --from <ca-update.zip>`"
+                "the server presents CA {fingerprint}, not the one client.toml records"
             ),
         )),
         Outcome::Healthy { matches: true, .. } => None,
