@@ -4,7 +4,7 @@
 //! (see `linuxbox`), which skips explicitly without a Docker daemon.
 
 use crate::linuxbox::{BOX_BIN, LinuxBox};
-use crate::release_fx::{FIXTURE_VERSION, ReleaseKey};
+use crate::release_fx::{FIXTURE_VERSION, ReleaseKey, serve_release};
 
 const SERVICE_CFG: &str = "/var/lib/jaynshare/.config/jaynshare/config.toml";
 
@@ -32,6 +32,58 @@ fn owner_and_mode(linux: &LinuxBox, path: &str) -> String {
     let (code, stat, stderr) = linux.sh(&format!("stat -c '%U %a' '{path}'"));
     assert_eq!(code, 0, "stat {path}: {stderr}");
     stat.trim().to_owned()
+}
+
+/// The published shell bootstrap discovers the local origin's latest
+/// release, checks its archive, and hands that same origin to server install.
+#[tokio::test(flavor = "multi_thread")]
+async fn bootstrap_installs_from_a_local_release_origin() {
+    let _leak_sweep = crate::leaks::LeakGuard::default();
+    let Some(linux) = LinuxBox::start("bootstrap-install") else {
+        return;
+    };
+    let key = ReleaseKey::generate();
+    linux.plant_key(&key);
+    linux.set_ruleset(DROP_INPUT);
+    let _inside = linux.release(&key, FIXTURE_VERSION);
+    let served = linux.root.join(format!("release-{FIXTURE_VERSION}"));
+    let (origin, ca) = serve_release(&served, "host.docker.internal", FIXTURE_VERSION).await;
+    linux.put(&ca, "/root/release-ca.pem");
+
+    let (code, _, stderr) = linux.sh(
+        "command -v curl >/dev/null || { apt-get update >/dev/null && apt-get install -y curl >/dev/null; }",
+    );
+    assert_eq!(code, 0, "install curl: {stderr}");
+    let script_url = format!("{origin}/v{FIXTURE_VERSION}/install.sh");
+    let (code, _, stderr) = linux.exec(&[
+        "curl",
+        "--cacert",
+        "/root/release-ca.pem",
+        "-fsSL",
+        "-o",
+        "/root/install.sh",
+        &script_url,
+    ]);
+    assert_eq!(code, 0, "fetch install.sh: {stderr}");
+    let (code, stdout, stderr) = linux.exec(&[
+        "sh",
+        "/root/install.sh",
+        "--release-origin",
+        &origin,
+        "--tls-ca",
+        "/root/release-ca.pem",
+    ]);
+    assert_eq!(code, 0, "bootstrap: {stdout}\n{stderr}");
+    assert_eq!(
+        current(&linux),
+        format!("/opt/jaynshare/releases/{FIXTURE_VERSION}")
+    );
+    assert_eq!(
+        linux.read("/opt/jaynshare/origin.json"),
+        Some(format!(r#"{{"mirror":"{origin}"}}"#).into_bytes())
+    );
+    let (code, _, stderr) = linux.cli(&["--config", SERVICE_CFG, "status", "--check"]);
+    assert_eq!(code, 0, "status: {stderr}");
 }
 
 /// `server install` with no `--config` writes a configuration on the box's

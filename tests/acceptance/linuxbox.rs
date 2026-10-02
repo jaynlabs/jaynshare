@@ -158,6 +158,8 @@ impl LinuxBox {
             platform,
             "--label",
             "jaynshare-acceptance=linuxbox",
+            "--add-host",
+            "host.docker.internal:host-gateway",
             "--cap-add",
             "SYS_TIME",
             "-v",
