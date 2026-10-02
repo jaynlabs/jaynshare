@@ -144,9 +144,9 @@ pub fn prepare(request: Request, launch: bool) -> Result<Prepared, Refusal> {
     };
 
     // The installation is the client installation's files, and only those.
-    let installation = client::read_installation().map_err(installation_refusal)?;
+    let mut installation = client::read_installation().map_err(installation_refusal)?;
     let secret = client::read_secret(&installation).map_err(installation_refusal)?;
-    require_mitm(&installation)?;
+    require_proxy(&installation)?;
 
     // No pooled environment is ever built without Claude Code.
     let claude = if launch {
@@ -161,17 +161,20 @@ pub fn prepare(request: Request, launch: bool) -> Result<Prepared, Refusal> {
         .enable_all()
         .build()
         .expect("runtime");
-    let origin = installation.proxy.clone().unwrap_or_default();
-    runtime
-        .block_on(crate::probe_client::launch_check(
-            &installation,
-            &secret,
-            REACHABLE_WITHIN,
-        ))
-        .map_err(|code| check_refusal(&origin, code, ""))?;
+    runtime.block_on(reachable(&mut installation, &secret))?;
     let snapshot = runtime
         .block_on(client::snapshot(&installation, &secret, None, READ_TIMEOUT))
         .ok();
+    if let Some(snapshot) = &snapshot {
+        runtime.block_on(crate::client_ca::follow(
+            &mut installation,
+            &secret,
+            snapshot,
+        ));
+        if launch {
+            runtime.block_on(crate::cli::follow(&installation, &secret, snapshot));
+        }
+    }
     // The hold hint; an unreadable snapshot leaves the deadline alone.
     let hold_hint = snapshot.and_then(|snapshot| snapshot["hold_hint_seconds"].as_u64());
 
@@ -207,10 +210,8 @@ pub fn prepare(request: Request, launch: bool) -> Result<Prepared, Refusal> {
     })
 }
 
-/// Every launch is MITM mode, so the enrollment must name a proxy
-/// origin and hold the CA it presents. An enrollment made before base-URL
-/// mode was removed may lack `ca.pem`; the operator's CA update installs it.
-fn require_mitm(installation: &ClientInstallation) -> Result<(), Refusal> {
+/// Every launch is MITM mode, so the enrollment must name a proxy origin.
+fn require_proxy(installation: &ClientInstallation) -> Result<(), Refusal> {
     if installation.proxy.as_deref().is_none_or(str::is_empty) {
         return Err(Refusal::new(
             14,
@@ -218,18 +219,41 @@ fn require_mitm(installation: &ClientInstallation) -> Result<(), Refusal> {
             "this enrollment has no proxy origin; the server must enable MITM mode and the machine be enrolled again",
         ));
     }
+    Ok(())
+}
+
+/// The launch check. A missing `ca.pem`, or one the proxy's handshake fails,
+/// is fetched from the server first, once.
+async fn reachable(installation: &mut ClientInstallation, secret: &str) -> Result<(), Refusal> {
+    let origin = installation.proxy.clone().unwrap_or_default();
     let ca = installation.directory.join("ca.pem");
     if !ca.is_file() {
-        return Err(Refusal::new(
-            14,
-            "cli_transport_unavailable",
-            format!(
-                "this enrollment has no CA certificate ({} is missing); ask the operator for `ca update-bundle` and run `jaynshare ca-update --from <ca-update.zip>",
-                ca.display()
-            ),
-        ));
+        crate::client_ca::refresh(installation, secret)
+            .await
+            .map_err(|why| {
+                Refusal::new(
+                    14,
+                    "cli_transport_unavailable",
+                    format!(
+                        "this enrollment has no CA certificate ({} is missing), and the server's could not be fetched: {why}",
+                        ca.display()
+                    ),
+                )
+            })?;
     }
-    Ok(())
+    let checked = match crate::probe_client::launch_check(installation, secret, REACHABLE_WITHIN)
+        .await
+    {
+        Err(12) => match crate::client_ca::refresh(installation, secret).await {
+            Ok(true) => crate::probe_client::launch_check(installation, secret, REACHABLE_WITHIN)
+                .await
+                .map_err(|code| (code, String::new())),
+            Ok(false) => Err((12, String::new())),
+            Err(why) => Err((12, why)),
+        },
+        other => other.map_err(|code| (code, String::new())),
+    };
+    checked.map_err(|(code, why)| check_refusal(&origin, code, &why))
 }
 
 /// A failed check names the origin and the `--direct` way out, and keeps

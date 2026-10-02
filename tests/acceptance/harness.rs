@@ -1249,9 +1249,9 @@ pub(crate) fn api_fixture(
         &config,
         &format!(
             "version = 1\n\n[data_plane]\nlisten = \"{addr}\"\n\n\
-             [storage]\nstate_file = \"{}\"\n\n[logging]\ndirectory = \"{}\"\n",
-            root.join("state/state.json").display(),
-            root.join("log").display(),
+             [storage]\nstate_file = {}\n\n[logging]\ndirectory = {}\n",
+            toml_path(&root.join("state/state.json")),
+            toml_path(&root.join("log")),
         ),
     );
     let stdout = root.join("api.stdout");
@@ -1301,8 +1301,8 @@ fn config_document(setup: &Setup, port: u16, mitm_port: u16, origin: &str, root:
         .join(", ");
     let capture = if setup.capture {
         format!(
-            "\n[diagnostics]\nwire_capture_directory = \"{}\"\n",
-            root.join("cap").display()
+            "\n[diagnostics]\nwire_capture_directory = {}\n",
+            toml_path(&root.join("cap"))
         )
     } else {
         String::new()
@@ -1342,18 +1342,23 @@ fn config_document(setup: &Setup, port: u16, mitm_port: u16, origin: &str, root:
          [selection]\n\
          blocked_models = [{blocked}]\n{}\n\
          [storage]\n\
-         state_file = \"{}\"\n\n\
+         state_file = {}\n\n\
          [logging]\n\
-         directory = \"{}\"\n\
+         directory = {}\n\
          level = \"debug\"\n{}{audit}{capture}{egress}{clients}{mitm}",
         setup.telemetry_policy,
         setup.data_plane,
         setup.quota,
         setup.selection,
-        root.join("state/state.json").display(),
-        root.join("log").display(),
+        toml_path(&root.join("state/state.json")),
+        toml_path(&root.join("log")),
         setup.logging,
     )
+}
+
+/// `path` as a TOML string: a Windows path's backslashes are escaped.
+pub(crate) fn toml_path(path: &Path) -> String {
+    toml::Value::String(path.display().to_string()).to_string()
 }
 
 impl Instance {
@@ -1494,7 +1499,7 @@ impl Instance {
             .env("PATH", self.root.join("no-browser-on-path"))
             // The managed store the server reads is this root's
             // home, never the developer's.
-            .env("HOME", self.root.join("home"));
+            .envs(platform_home(&self.root.join("home")));
         for (name, value) in &self.server_env {
             command.env(name, value);
         }
@@ -1853,11 +1858,11 @@ impl Instance {
             // The developer's editor never opens on a fixture file.
             .env_remove("VISUAL")
             .env_remove("EDITOR")
-            // The platform paths resolve under `$HOME`, so an
-            // inherited one puts the developer's own client directory under a
-            // verb that writes it — `secret set` did exactly that. The
-            // scenario's own home is the floor; `isolated_env` still overrides.
-            .env("HOME", self.root.join("home"))
+            // An inherited home puts the developer's own client directory
+            // under a verb that writes it — `secret set` did exactly that.
+            // The scenario's own home is the floor; `isolated_env` still
+            // overrides.
+            .envs(platform_home(&self.root.join("home")))
             .envs(env.iter().copied())
             .stdin(if stdin.is_some() {
                 Stdio::piped()
@@ -2172,7 +2177,9 @@ pub(crate) async fn try_send(
     let driver = tokio::spawn(async move {
         let _ = connection.await;
     });
-    let answer = async {
+    // Bounded: a request the server never answers fails its scenario instead
+    // of hanging the run. The longest awaited answer is about 50 s.
+    let answer = tokio::time::timeout(Duration::from_secs(120), async {
         let response = sender
             .send_request(request)
             .await
@@ -2194,8 +2201,9 @@ pub(crate) async fn try_send(
             headers: parts.headers,
             frames,
         })
-    }
-    .await;
+    })
+    .await
+    .expect("an answer or a closed connection within 120 s");
     driver.abort();
     answer
 }
@@ -2680,19 +2688,21 @@ fn claim_scenario_root(scenario: &str) -> PathBuf {
         "two scenarios claim the root `target/acceptance/{scenario}`; \
          give each one its own name"
     );
+    // Joined part by part, so a Windows path has only native separators.
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("target/acceptance")
+        .join("target")
+        .join("acceptance")
         .join(scenario);
     let _ = fs::remove_dir_all(&root);
     private_dir(&root);
     root
 }
 
-/// The environment that isolates a CLI run from the developer's machine:
-/// a scratch home (so the platform paths resolve under it) and no
-/// `JAYNSHARE_CONFIG` unless the scenario sets one.
-pub(crate) fn isolated_env(home: &Path) -> Vec<(String, String)> {
-    vec![
+/// Every variable the platform paths resolve from, pointed under `home`:
+/// an inherited `XDG_CONFIG_HOME` or `APPDATA` would otherwise send a
+/// server or a CLI run to the developer's own directories.
+pub(crate) fn platform_home(home: &Path) -> Vec<(String, String)> {
+    let mut env = vec![
         ("HOME".into(), home.display().to_string()),
         (
             "XDG_CONFIG_HOME".into(),
@@ -2702,7 +2712,23 @@ pub(crate) fn isolated_env(home: &Path) -> Vec<(String, String)> {
             "XDG_STATE_HOME".into(),
             home.join(".local/state").display().to_string(),
         ),
-    ]
+    ];
+    if cfg!(windows) {
+        env.extend(crate::profile_fx::windows_profile(home));
+    }
+    env
+}
+
+/// The environment that isolates a CLI run from the developer's machine:
+/// a scratch home (so the platform paths resolve under it, the Windows
+/// profile included), the fake Windows `Path` editor, and no
+/// `JAYNSHARE_CONFIG` unless the scenario sets one.
+pub(crate) fn isolated_env(home: &Path) -> Vec<(String, String)> {
+    let mut env = platform_home(home);
+    if cfg!(windows) {
+        env.extend(crate::profile_fx::path_editor(home).env());
+    }
+    env
 }
 
 /// One CLI invocation with exactly these arguments and environment (no
@@ -2765,20 +2791,31 @@ pub(crate) fn cli_pty_answers(
     env: &[(String, String)],
     answers: &[(&str, &str)],
 ) -> (i32, String) {
+    let bin = binary().display().to_string();
+    let argv = [&[bin.as_str()], args].concat();
+    pty_answers(scenario, &argv, env, answers)
+}
+
+/// The same for any program: `argv[0]` runs with the rest as arguments.
+pub(crate) fn pty_answers(
+    scenario: &str,
+    argv: &[&str],
+    env: &[(String, String)],
+    answers: &[(&str, &str)],
+) -> (i32, String) {
     let root = scratch(scenario);
     let transcript = root.join("transcript");
     let mut command = Command::new("script");
-    let bin = binary().display().to_string();
     if cfg!(target_os = "macos") {
         command
-            .args(["-q", "-F", &transcript.display().to_string(), &bin])
-            .args(args);
+            .args(["-q", "-F", &transcript.display().to_string()])
+            .args(argv);
     } else {
         // util-linux `script -c` runs the line under a shell; `exec` leaves
-        // the binary alone in the terminal's foreground group, as on macOS,
+        // the program alone in the terminal's foreground group, as on macOS,
         // so a Ctrl-C reaches only it.
-        let mut line = format!("exec {}", shell_quote(&bin));
-        for arg in args {
+        let mut line = String::from("exec");
+        for arg in argv {
             line.push(' ');
             line.push_str(&shell_quote(arg));
         }

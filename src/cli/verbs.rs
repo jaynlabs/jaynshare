@@ -652,6 +652,15 @@ pub(super) async fn probe(control: &Control, args: &ProbeArgs) -> Outcome {
     }
 }
 
+/// `state` or `state (reason)`.
+pub(super) fn health_cell(a: &Value) -> String {
+    let state = a["health"]["state"].as_str().unwrap_or("");
+    match a["health"]["reason"].as_str() {
+        Some(reason) => format!("{state} ({reason})"),
+        None => state.to_string(),
+    }
+}
+
 /// The account row: every fact the operator reads at a glance,
 /// each bucket as `name=state@reset` (unknown says so, never `0%`).
 pub(super) fn account_row(a: &Value) -> String {
@@ -659,10 +668,7 @@ pub(super) fn account_row(a: &Value) -> String {
         .as_array()
         .map(|b| b.iter().map(bucket_cell).collect::<Vec<_>>().join(" "))
         .unwrap_or_default();
-    let health = match a["health"]["reason"].as_str() {
-        Some(r) => format!("{} ({r})", a["health"]["state"].as_str().unwrap_or("")),
-        None => a["health"]["state"].as_str().unwrap_or("").to_string(),
-    };
+    let health = health_cell(a);
     let eligibility = match a["eligibility"]["reason"].as_str() {
         Some(r) => format!(
             "ineligible: {r} {}",
@@ -1372,67 +1378,6 @@ pub(super) async fn client_show(control: &Control, id: &str) -> Outcome {
     Ok((body.clone(), client_show_row(&body["client"])))
 }
 
-/// `client issue <id> --name <display-name>`: one code, disclosed once.
-pub(super) async fn client_issue(
-    control: &Control,
-    cli: &Cli,
-    id: &str,
-    name: &str,
-    disclose_to: Option<&Path>,
-) -> Outcome {
-    super::bundle::validate_client_id(id)?;
-    super::bundle::validate_display_name(name)?;
-    let body = control
-        .expect(
-            Method::POST,
-            "/control/v1/clients",
-            Some(&json!({ "id": id, "display_name": name.trim() })),
-        )
-        .await?;
-    let code = disclosed_value(&body, "enrollment_code")?;
-    let entry = client_show_row(&body["client"]);
-    let expiry = body["expires_at"].as_str().unwrap_or_default().to_string();
-    disclose(
-        cli,
-        disclose_to,
-        "enrollment_code",
-        &format!("enrollment code (disclose once; expires {expiry})"),
-        code,
-        &entry,
-        body,
-    )
-}
-
-/// `client reissue <id>` without `--kit/--out`: a new pending
-/// generation, its code disclosed once; the old code dies.
-pub(super) async fn client_reissue(
-    control: &Control,
-    cli: &Cli,
-    id: &str,
-    disclose_to: Option<&Path>,
-) -> Outcome {
-    super::bundle::validate_client_id(id)?;
-    let body = control
-        .expect(
-            Method::POST,
-            &format!("/control/v1/clients/{id}/reissue"),
-            Some(&json!({})),
-        )
-        .await?;
-    let code = disclosed_value(&body, "enrollment_code")?;
-    let entry = client_show_row(&body["client"]);
-    let expiry = body["expires_at"].as_str().unwrap_or_default().to_string();
-    disclose(
-        cli,
-        disclose_to,
-        "enrollment_code",
-        &format!("enrollment code (disclose once; expires {expiry})"),
-        code,
-        &entry,
-        body,
-    )
-}
-
 /// `client rotate <id>`: one new secret, the old dead on the next request
 /// — reminded on standard error beside the disclosure.
 pub(super) async fn client_rotate(
@@ -1747,15 +1692,15 @@ pub(super) async fn api_response(
     ))
 }
 
-/// Rotate the MITM certificate authority. Every enrolled
-/// client needs the CA-update bundle afterwards, so the confirmation
-/// says so before the old CA stops being the one clients trust.
-pub(super) async fn ca_rotate(control: &Control, cli: &Cli) -> Outcome {
-    if !cli.yes
-        && !confirm(
-            "rotate the MITM CA? every enrolled client needs the CA-update bundle before its next launch [y/N] ",
-        )?
-    {
+/// `ca rotate`: stage the next CA, which clients fetch on their next launch
+/// and the proxy presents after the overlap; `--now` replaces it at once.
+pub(super) async fn ca_rotate(control: &Control, cli: &Cli, now: bool) -> Outcome {
+    let prompt = if now {
+        "replace the MITM CA now? Claude Code sessions already running lose the pool until restarted [y/N] "
+    } else {
+        "stage the next MITM CA? clients fetch it on their next launch, and the proxy presents it after a week [y/N] "
+    };
+    if !cli.yes && !confirm(prompt)? {
         return Err(Failure::local(
             21,
             "cli_confirmation_required",
@@ -1763,33 +1708,51 @@ pub(super) async fn ca_rotate(control: &Control, cli: &Cli) -> Outcome {
         ));
     }
     let result = control
-        .expect(Method::POST, "/control/v1/mitm/ca/rotate", Some(&json!({})))
+        .expect(
+            Method::POST,
+            "/control/v1/mitm/ca/rotate",
+            Some(&json!({ "now": now })),
+        )
         .await?;
-    let line = format!(
-        "rotated the CA; previous fingerprint {}, new fingerprint {} valid until {}",
-        result["previous_fingerprint"].as_str().unwrap_or("(none)"),
-        result["fingerprint"].as_str().unwrap_or(""),
-        result["not_after"].as_str().unwrap_or(""),
-    );
-    // After the fingerprints, the reminder on standard error — in
-    // `--json` mode too, where standard output is the envelope alone.
-    eprintln!(
-        "every enrolled client needs the CA-update bundle before its next MITM launch: ca update-bundle --out <dir>"
-    );
+    let text = |value: &Value| value.as_str().unwrap_or("").to_string();
+    let next = &result["next"];
+    let line = if next.is_null() {
+        format!(
+            "rotated the CA; previous fingerprint {}, new fingerprint {} valid until {}; clients fetch it on their next launch",
+            result["previous_fingerprint"].as_str().unwrap_or("(none)"),
+            text(&result["fingerprint"]),
+            text(&result["not_after"]),
+        )
+    } else {
+        format!(
+            "staged CA {} valid until {}; clients fetch it on their next launch, and the proxy presents it from {}",
+            text(&next["fingerprint"]),
+            text(&next["not_after"]),
+            text(&next["switch_at"]),
+        )
+    };
     Ok((result, line))
 }
 
-/// `ca show`: the CA's fingerprint, expiry and state, without the
-/// PEM; all `null` while MITM has never been enabled.
+/// `ca show`: the CA's fingerprint, expiry and state, and the staged CA,
+/// without the PEMs; all `null` while MITM has never been enabled.
 pub(super) async fn ca_show(control: &Control) -> Outcome {
     let body = control.expect(Method::GET, "/control/v1/ca", None).await?;
     let ca = &body["ca"];
+    let next = &ca["next"];
     let result = json!({
         "fingerprint": ca["fingerprint"],
         "not_after": ca["not_after"],
         "state": ca["state"],
+        "next": if next.is_null() { Value::Null } else {
+            json!({
+                "fingerprint": next["fingerprint"],
+                "not_after": next["not_after"],
+                "switch_at": next["switch_at"],
+            })
+        },
     });
-    let line = match ca["fingerprint"].as_str() {
+    let mut line = match ca["fingerprint"].as_str() {
         Some(fingerprint) => format!(
             "CA {fingerprint}, valid until {} ({})",
             ca["not_after"].as_str().unwrap_or(""),
@@ -1797,6 +1760,12 @@ pub(super) async fn ca_show(control: &Control) -> Outcome {
         ),
         None => "MITM mode was never enabled: no CA".to_string(),
     };
+    if let Some(fingerprint) = next["fingerprint"].as_str() {
+        line.push_str(&format!(
+            "; next CA {fingerprint} from {}",
+            next["switch_at"].as_str().unwrap_or("")
+        ));
+    }
     Ok((result, line))
 }
 

@@ -17,6 +17,7 @@ use time::OffsetDateTime;
 
 use crate::audit::Principal;
 use crate::data_plane::relay::ResponseBody;
+use crate::mitm::ca::Ca;
 use crate::pool::quota::{SESSION, WEEKLY};
 use crate::pool::{Account, Resolve, SessionKey, selection};
 use crate::server::{Server, VERSION};
@@ -119,6 +120,8 @@ pub(super) fn status(
     } else {
         0
     });
+    let authorities = server.mitm_authorities().clone();
+    let fingerprint = |ca: &Option<Arc<Ca>>| ca.as_ref().map(|ca| ca.fingerprint());
     let mut body = json!({
         "client": {
             "id": principal.id,
@@ -128,9 +131,13 @@ pub(super) fn status(
             "version": VERSION,
             "available": !server.stopping(),
             "control_api_version": API_VERSION,
+            // The pin a client keeps, so turning TLS on later does not strand it.
+            "tls_pin": server.client_pin(),
         },
         "capabilities": capabilities,
-        "ca_fingerprint": server.mitm_ca().map(|ca| ca.fingerprint()),
+        // A client trusts both while a rotation is staged.
+        "ca_fingerprint": fingerprint(&authorities.current),
+        "ca_next_fingerprint": fingerprint(&authorities.next),
         "pool": {
             "accounts_configured": accounts_configured,
             "accounts_selectable": accounts_selectable,
@@ -139,6 +146,11 @@ pub(super) fn status(
         "wire_capture_enabled": server.capture.is_some(),
         "hold_hint_seconds": hold_hint_seconds,
     });
+    if let Some(offer) = super::client_kit::offer(server) {
+        for (name, value) in offer.members() {
+            body["client"][name] = value;
+        }
+    }
     if let Some(session) = session {
         body["session"] = session;
     }
@@ -148,7 +160,7 @@ pub(super) fn status(
     read(body)
 }
 
-fn rate_limits(account: &Account) -> Value {
+pub(super) fn rate_limits(account: &Account) -> Value {
     let utilisation = |name| {
         account
             .quota

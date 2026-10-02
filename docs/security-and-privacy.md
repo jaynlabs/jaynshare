@@ -37,8 +37,8 @@ systemd unit. See
 
 | Actor | Access and influence |
 | --- | --- |
-| Server operator | Can access provider credentials and all traffic the server handles, change the deployed binary or configuration, turn on wire capture, issue and revoke clients, and change routing. Must be fully trusted. |
-| Enrolled client A | Sends and receives its own traffic. Can see the pool metadata listed below and can pick an eligible account for its own session. Cannot use its credential to read client B's prompts, responses or sessions, or to call the operator surface. |
+| Server operator | Can access provider credentials and all traffic the server handles, change the deployed binary or configuration, turn on wire capture, invite and revoke clients, and change routing. Must be fully trusted. |
+| Enrolled client A | Sends and receives its own traffic. Can see the pool metadata listed below, can pick an eligible account for its own session, and can log in the Claude accounts it owns. Cannot use its credential to read client B's prompts, responses or sessions, to log in client B's accounts, or to call the operator surface. |
 | Other account owners | Do not receive request bodies through Jaynshare, but their provider account may carry another participant's request. That usage falls under that account's provider terms and settings. |
 | Anthropic | Receives the content routed to it under the selected account. Its own terms, retention and privacy controls apply. |
 | Network peer without a Jaynshare credential | Is refused by the proxy and the control surface. Network exposure should still be restricted with network policy and host firewall rules. |
@@ -46,8 +46,10 @@ systemd unit. See
 An enrolled client's status read is an explicit allow-list. It exposes each
 account's display name and its five-hour and weekly utilisation, how many
 accounts are configured and selectable, how many sessions are known and
-active, the server version, the CA fingerprint, whether wire capture is on,
-and, for the client's own session, the account that last served it. It does
+active, the server version and identity pin, the CA fingerprint and that of a
+staged next CA, the version and digests of the client the server offers,
+whether wire capture is on, and, for the client's own session, the account
+that last served it. It does
 **not** expose provider credentials, per-account identity or routes, the
 configuration, other clients, other clients' sessions, or any request or
 response body.
@@ -73,13 +75,40 @@ refuses anything else. A private address does not encrypt anything:
   `CONNECT` request, which crosses the private network in clear. The request
   content inside the tunnel is protected by the TLS session under the pool's
   CA.
-- The base-URL listener carries the client's status reads, authenticated by
-  the client secret. Over plain HTTP the secret and everything the listener
-  answers cross the private network in clear; configure TLS on it
-  (`data_plane.tls_certificate_file` and `data_plane.tls_private_key_file`).
+- The base-URL listener carries the join, the client's status reads and its
+  kit downloads, authenticated by the client secret. It serves TLS on the
+  server's identity, which clients pin, or on an operator certificate. Only
+  a configuration kept from 2.0 can still leave it on plain HTTP, where the
+  secret and everything the listener answers cross the private network in
+  clear; no machine can join such a server.
 
 Put the server on a network only its participants can reach, such as a
 tailnet, and filter ingress to the listener ports.
+
+## What a client pins
+
+The invite carries two pins, and the join keeps both:
+
+- **The server's identity:** `sha256/` and the digest of the key the server
+  generated at its first start, which its base-URL certificate presents. The
+  client checks that key on every connection instead of a name or a CA, so
+  another host on the network is refused, even with a certificate the system
+  trusts. A server on an operator certificate has no pin; its clients check
+  that certificate against the system store or the CA file given at the join.
+- **The release signing key:** the key the server's client kit is signed
+  with, kept as the client's `release.pub`. The join installs a client only
+  from a kit signed by it, and so does every later update when the client
+  follows its server's version. A compromised server can still read and alter
+  traffic, but it cannot make its clients run an executable that key did not
+  sign.
+
+The invite is therefore the root of trust: it travels once, through a private
+channel, and the join that spends it refuses any server and any kit other than
+the ones it names. Before it, `install.sh` and `install.ps1` download the first
+executable over HTTPS from the release host and check it only against that
+host's `SHA256SUMS`. That executable runs the join, which then installs the
+client from the server's signed kit, or keeps the bootstrap's own executable
+when the server offers no kit.
 
 ## Data handling and storage
 
@@ -89,8 +118,9 @@ tailnet, and filter ingress to the listener ports.
 - **Provider credentials:** OAuth tokens and API keys live in the server's state
   file, written with mode `0600` under the dedicated service account. Clients
   receive neither the credentials nor the configuration.
-- **Client credentials:** each enrolled client gets its own secret, disclosed
-  once. The server keeps only a SHA-256 digest of it. Client secrets and the
+- **Client credentials:** each client receives its own secret when it joins,
+  with an invite that works once and expires. The server keeps only a SHA-256
+  digest of the secret. Client secrets and the
   optional remote-operator secret are separate and can be rotated or revoked
   independently.
 - **Audit log:** one record per exchange with metadata only: time, duration,
@@ -115,8 +145,9 @@ security audit is claimed.
 
 ## MITM scope
 
-The pool's CA is handed only to the Claude Code process that `jaynshare
-claude` launches, through `NODE_EXTRA_CA_CERTS`. It enters the operating
+The pool's CA reaches clients over the pinned channel, the next one too while
+a rotation is staged. It is handed only to the Claude Code process that
+`jaynshare claude` launches, through `NODE_EXTRA_CA_CERTS`. It enters the operating
 system's trust store only if the engineer runs `jaynshare trust-ca add`, which
 always asks first. The server terminates TLS only for `api.anthropic.com` and
 its own credential-free probe host; any other `CONNECT` target is relayed as
@@ -124,10 +155,10 @@ an opaque tunnel, and a target that points back at the server itself is
 refused.
 
 That narrow scope limits the effect of trusting the CA. It does not stop a
-malicious server from changing traffic for the intercepted host, or a tampered
-client kit from changing the client configuration. Releases and kits are
-signed; verify what you install (`jaynshare release verify`), and install only
-from a source you trust.
+malicious server from changing traffic for the intercepted host. Releases and
+kits are signed, and clients accept only kits signed by their pinned key;
+verify what you install on the server (`jaynshare release verify`), and install
+only from a source you trust.
 
 ## Safer deployment checklist
 
@@ -135,14 +166,17 @@ from a source you trust.
    controlled by an operator every participant trusts.
 2. Bind to a private address, restrict which people and devices can reach it,
    and never expose the listeners to the public internet.
-3. Configure TLS on the base-URL listener.
-4. Give every person and device its own client. Never share the
-   remote-operator secret; revoke the client and remove its network access
-   when someone leaves.
+3. Keep the base-URL listener on TLS, the server identity's or your own
+   certificate, and back up the identity key with the server's state.
+4. Give every person and device its own client, and send each invite through
+   a private channel; invite with `--no-account` whoever should not add
+   accounts. Never share the remote-operator secret; revoke the client and
+   remove its network access when someone leaves.
 5. Keep wire capture off. Define a retention and access policy for the audit
    log, and tell participants what is kept.
 6. Update deliberately, from verified releases; rerun `jaynshare server
-   preflight` after each change to the host.
+   preflight` after each change to the host. `server auto-update` installs
+   every signed release unattended: leave it off if you review releases first.
 7. Do not route material whose owner has not approved disclosure to the server
    operator, the serving account, and Anthropic. Keep unrelated production
    secrets out of prompts and repositories.

@@ -1,15 +1,18 @@
-//! The deploy verbs: file-backed on the machine that runs them, no
-//! control connection, the behaviour in `crate::deploy`. Each prints what it
-//! is about to do on standard error first, and its `--json` result is the
-//! deploy object.
+//! The deploy verbs: file-backed on the machine that runs them, the
+//! behaviour in `crate::deploy`; only a fresh install's invite goes through
+//! the server it installed. Each prints what it is about to do on standard
+//! error first, and its `--json` result is the deploy object.
 
-use serde_json::json;
+use std::time::Duration;
 
-use super::args::{ReleaseVerb, ServerVerb, ServiceVerb, Verb};
-use super::{Cli, Failure, Outcome};
-use crate::deploy::native;
+use serde_json::{Value, json};
+
+use super::args::{InviteArgs, InviteTerms, ReleaseVerb, ServerVerb, ServiceVerb, Switch, Verb};
+use super::control::Control;
+use super::{Cli, Failure, Outcome, invite};
 use crate::deploy::result::DeployResult;
 use crate::deploy::systemd::{self, ServiceOp};
+use crate::deploy::{auto_update, native};
 
 /// The deploy verbs this build carries; `None` for one whose behaviour has
 /// not landed (its help still names the milestone, so the caller refused it
@@ -95,28 +98,71 @@ pub(super) fn dispatch(cli: &Cli, verb: &Verb) -> Option<Outcome> {
             let result = crate::deploy::preflight::run(&crate::deploy::preflight::Inputs {
                 from: from.as_deref(),
                 config: cli.config.as_deref(),
-                firewall_record: record.as_deref(),
+                unknown_firewall: crate::deploy::preflight::UnknownFirewall::recorded(
+                    record.as_deref(),
+                ),
             });
             Some(finish(result, preflight_row))
         }
         Verb::Server {
-            verb: ServerVerb::Install { from },
-        } => {
-            eprintln!(
-                "{}",
-                server_plan(
-                    &format!("installing the native server from {}", from.display()),
+            verb:
+                ServerVerb::Install {
                     from,
-                    cli.config.as_deref(),
-                )
-            );
-            let record = firewall_record(cli.config.as_deref());
+                    version,
+                    binary,
+                    kit,
+                    listen,
+                    release_origin,
+                },
+        } => {
+            let source = match (from, binary) {
+                (Some(from), _) => {
+                    eprintln!(
+                        "{}",
+                        server_plan(
+                            &format!("installing the native server from {}", from.display()),
+                            from,
+                            cli.config.as_deref(),
+                        )
+                    );
+                    native::Source::Directory(from)
+                }
+                (None, Some(binary)) => {
+                    eprintln!(
+                        "installing the native server from the build {}",
+                        binary.display()
+                    );
+                    native::Source::Build {
+                        binary,
+                        kit: kit.as_deref(),
+                    }
+                }
+                (None, None) => {
+                    eprintln!(
+                        "installing the native server: {}",
+                        version.as_deref().unwrap_or("the newest release")
+                    );
+                    native::Source::Published(version.as_deref())
+                }
+            };
+            let fresh = std::fs::symlink_metadata(native::CURRENT).is_err();
             let result = native::install(&native::InstallInputs {
-                from,
+                source,
                 config: cli.config.as_deref(),
-                firewall_record: record.as_deref(),
+                listen: *listen,
+                release_origin: release_origin.as_deref(),
+                tls_ca: cli.tls_ca.as_deref(),
+                ask: &interactive_confirm,
+                firewall_record: &|config| firewall_record(Some(config)),
             });
-            Some(finish(result, manager_row))
+            Some(finish(result, manager_row).map(|(mut installed, text)| {
+                installed["invite"] = Value::Null;
+                if fresh {
+                    invite_installer(cli, installed, text)
+                } else {
+                    (installed, text)
+                }
+            }))
         }
         Verb::Server {
             verb:
@@ -137,9 +183,8 @@ pub(super) fn dispatch(cli: &Cli, verb: &Verb) -> Option<Outcome> {
                     )
                 ),
                 (None, Some(version)) => eprintln!("updating the native server to {version}"),
-                (None, None) => {}
+                (None, None) => eprintln!("updating the native server from its origin"),
             }
-            let record = firewall_record(Some(&native::service_config_path()));
             let result = native::update(&native::UpdateInputs {
                 from: from.as_deref(),
                 version: version.as_deref(),
@@ -148,7 +193,6 @@ pub(super) fn dispatch(cli: &Cli, verb: &Verb) -> Option<Outcome> {
                 allow_downgrade: *allow_downgrade,
                 yes: cli.yes,
                 confirm: &interactive_confirm,
-                firewall_record: record.as_deref(),
             });
             Some(finish(result, manager_row))
         }
@@ -169,6 +213,21 @@ pub(super) fn dispatch(cli: &Cli, verb: &Verb) -> Option<Outcome> {
         } => {
             eprintln!("pruning native releases, keeping the newest {keep}");
             Some(finish(native::prune(*keep), manager_row))
+        }
+        Verb::Server {
+            verb: ServerVerb::AutoUpdate { switch },
+        } => {
+            let result = match switch {
+                Switch::On => {
+                    eprintln!("turning the nightly server update on");
+                    auto_update::on()
+                }
+                Switch::Off => {
+                    eprintln!("turning the nightly server update off");
+                    auto_update::off()
+                }
+            };
+            Some(finish(result, manager_row))
         }
         Verb::Service { verb } => {
             let op = match verb {
@@ -208,6 +267,57 @@ pub(super) fn dispatch(cli: &Cli, verb: &Verb) -> Option<Outcome> {
         }
         _ => None,
     }
+}
+
+/// A fresh install's last step: `client invite` for the user who ran it,
+/// through the installed server. The install stands without it, so a
+/// refusal is a warning.
+fn invite_installer(cli: &Cli, mut installed: Value, text: String) -> (Value, String) {
+    match installer_invite(cli) {
+        Ok((invite, human)) => {
+            installed["invite"] = invite;
+            (installed, format!("{text}\n\n{human}"))
+        }
+        Err(why) => {
+            eprintln!("warning: no invite was issued: {why}");
+            (installed, text)
+        }
+    }
+}
+
+fn installer_invite(cli: &Cli) -> Result<(Value, String), String> {
+    let config = native::service_config_path();
+    let operator = format!("jaynshare --config {}", config.display());
+    let id = invite::installer_client_id().ok_or_else(|| {
+        format!("neither SUDO_USER nor USER names a client; run `{operator} client invite <id>`")
+    })?;
+    let message = |failure: Failure| {
+        failure.error["message"]
+            .as_str()
+            .unwrap_or("the invite failed")
+            .to_owned()
+    };
+    let control = Control::loopback(config, Duration::from_secs(cli.timeout)).map_err(message)?;
+    let args = InviteArgs {
+        id: id.clone(),
+        name: None,
+        terms: InviteTerms {
+            expires: None,
+            no_account: false,
+            disclose_to: None,
+        },
+    };
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime")
+        .block_on(invite::client_invite(&control, cli, &args))
+        .map_err(|failure| match failure.error["code"].as_str() {
+            Some("conflict") => format!(
+                "the client {id} already exists and was left as it is; `{operator} client reissue {id}` invites it again"
+            ),
+            _ => message(failure),
+        })
 }
 
 /// Where the host firewall cannot be inspected, an operator on a

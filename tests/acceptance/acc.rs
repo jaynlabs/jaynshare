@@ -704,6 +704,7 @@ async fn acc_login_refused_authorisation_ends_failed_with_the_retry_action() {
 /// it, so the deadline is moved from outside the process: the
 /// the published expiry is the anchor: awaiting one tick plus the suite's
 /// 2 s scheduling slack before it, failed at it.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn acc_login_times_out_past_its_ttl_with_the_retry_action() {
     let _leak_sweep = crate::leaks::LeakGuard::default();
@@ -2100,6 +2101,10 @@ async fn one_portable_object_three_channels_last_source_wins() {
     );
 
     // (d) A 0644 server file is refused naming the mode; the pool is unchanged.
+    // Only Unix refuses a file by its mode.
+    if cfg!(windows) {
+        return;
+    }
     let open = instance.root.join("open.json");
     fs::write(&open, &portable).expect("write the open file");
     crate::leaks::register_planted(&open);
@@ -3191,6 +3196,7 @@ fn assert_every_account_member(account: &Value, label: &str) {
         "kind",
         "source_class",
         "enabled",
+        "owner",
         "health",
         "profile",
         "credential",

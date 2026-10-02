@@ -1,7 +1,9 @@
 #!/bin/sh
 # LinuxBox's fake systemctl: records every call and
 # keeps unit state under /run/fake-systemd; `start` runs the unit's real
-# ExecStart as its User= with its WorkingDirectory=, UMask= and Environment=.
+# ExecStart as its User= with its WorkingDirectory=, UMask= and Environment=,
+# waiting for it when Type=oneshot. A started timer is active until stopped
+# and never fires; a scenario starts its service instead.
 #
 # A scenario scripts one failure with `touch /run/fake-systemd/fail/<step>`
 # (one-shot: the file is removed when it fires):
@@ -48,6 +50,7 @@ start_unit() {
     return 5
   fi
   if running "$unit"; then return 0; fi
+  case "$unit" in *.timer) touch "$state/armed-$unit"; return 0 ;; esac
   if fires start; then
     echo failed > "$state/result-$unit"
     echo "Job for $unit failed because the control process exited with error code." >&2
@@ -62,19 +65,29 @@ start_unit() {
   : "${user:=root}" "${group:=$user}" "${dir:=/}" "${mask:=0022}"
   # systemd sets these for a User= service from its passwd entry.
   home=$(getent passwd "$user" | cut -d: -f6)
-  (
-    cd "$dir" || exit 200
-    umask "$mask"
-    # ExecStart's words, with systemd's double-quote grouping.
-    eval "set -- $exec_start"
-    # shellcheck disable=SC2086
-    exec env -i PATH=/usr/local/bin:/usr/bin:/bin HOME="${home:-/}" USER="$user" LOGNAME="$user" $envs \
-      setpriv --reuid="$user" --regid="$group" --clear-groups -- "$@" \
-      >> "$state/journal-$unit" 2>&1 < /dev/null
-  ) &
-  echo $! > "$state/active/$unit"
   rm -f "$state/result-$unit" "$state/stopped-$unit"
+  if [ "$(key "$unit" Type)" = oneshot ]; then
+    ( run_unit ) && return 0
+    echo failed > "$state/result-$unit"
+    echo "Job for $unit failed because the control process exited with error code." >&2
+    return 1
+  fi
+  ( run_unit ) &
+  echo $! > "$state/active/$unit"
   return 0
+}
+
+# start_unit's command, from the variables it set; run in a subshell, which
+# it replaces.
+run_unit() {
+  cd "$dir" || exit 200
+  umask "$mask"
+  # ExecStart's words, with systemd's double-quote grouping.
+  eval "set -- $exec_start"
+  # shellcheck disable=SC2086
+  exec env -i PATH=/usr/local/bin:/usr/bin:/bin HOME="${home:-/}" USER="$user" LOGNAME="$user" $envs \
+    setpriv --reuid="$user" --regid="$group" --clear-groups -- "$@" \
+    >> "$state/journal-$unit" 2>&1 < /dev/null
 }
 
 stop_unit() {
@@ -86,14 +99,14 @@ stop_unit() {
     while kill -0 "$pid" 2>/dev/null && [ $i -lt 300 ]; do sleep 0.1; i=$((i + 1)); done
     kill -KILL "$pid" 2>/dev/null
   fi
-  rm -f "$state/active/$unit"
+  rm -f "$state/active/$unit" "$state/armed-$unit"
   touch "$state/stopped-$unit"
 }
 
 # ActiveState / SubState from what the fake knows.
 active_state() {
   unit=$1
-  if running "$unit"; then echo active; return; fi
+  if running "$unit" || [ -e "$state/armed-$unit" ]; then echo active; return; fi
   if [ -e "$state/result-$unit" ]; then echo failed; return; fi
   if [ -e "$state/active/$unit" ] && [ ! -e "$state/stopped-$unit" ]; then
     # It was started and its process is gone without a stop.
@@ -113,7 +126,7 @@ case "$verb" in
       echo "Failed to reload daemon: Access denied" >&2; exit 1
     fi
     rm -f "$state/units/"*
-    for f in /etc/systemd/system/*.service; do
+    for f in /etc/systemd/system/*.service /etc/systemd/system/*.timer; do
       [ -f "$f" ] && cp "$f" "$state/units/"
     done
     exit 0 ;;

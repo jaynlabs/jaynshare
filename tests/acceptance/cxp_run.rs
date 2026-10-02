@@ -15,9 +15,9 @@ use std::time::Duration;
 use std::time::Instant;
 
 /// No launch points Claude Code at the base URL: Claude Code trusts
-/// only the proxy's CA, replacing an inherited anchor, while an `https` base
-/// URL still needs the `base-url-ca.pem` for the launcher's own calls,
-/// and without it the enrollment is incomplete.
+/// only the proxy's CA, replacing an inherited anchor, while an unpinned
+/// `https` base URL trusts the `base-url-ca.pem` for the launcher's own
+/// calls, and without it the system store alone.
 #[tokio::test(flavor = "multi_thread")]
 async fn claude_code_never_gets_the_base_url() {
     let _leak_sweep = crate::leaks::LeakGuard::default();
@@ -53,9 +53,11 @@ async fn claude_code_never_gets_the_base_url() {
     // An `https` base URL is the launcher's own origin (snapshot,
     // catalogue); it trusts the `base-url-ca.pem` there, and Claude
     // Code still gets only the proxy's CA. A TLS front with the test pair
-    // stands before the plain listener.
+    // stands before the plain listener. An enrollment there carries no
+    // pin, so the one the plain launch above learned goes.
     let https = tls_front(instance.addr, &instance.root.join("tls-front")).await;
     machine.set("base_url", &format!("{https:?}"));
+    machine.set("server_identity", "\"\"");
     let anchor = machine.client_dir.join("base-url-ca.pem");
     std::fs::copy(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -74,13 +76,11 @@ async fn claude_code_never_gets_the_base_url() {
         "base-url-ca.pem is the launcher's anchor, not Claude Code's"
     );
 
-    // Without the anchor the https enrollment is
-    // incomplete, and the refusal names the missing file.
+    // Without the anchor only the system store is trusted, which does not
+    // know the front's CA.
     std::fs::remove_file(&anchor).expect("move the anchor aside");
-    let (code, _, stderr) =
-        machine.jaynshare(&["claude", "--auto", "--", "-p", "hello"], &[], None);
-    assert_eq!(code, 11, "{stderr}");
-    assert!(stderr.contains("base-url-ca.pem"), "{stderr}");
+    let (code, _, stderr) = machine.jaynshare(&["status", "--client"], &[], None);
+    assert_eq!(code, 4, "{stderr}");
 }
 
 /// Two intent flags in one launch are refused by
@@ -156,19 +156,22 @@ async fn run_exit_rows_before_the_replacement() {
     );
     assert!(machine.claude_ran().is_none(), "nothing ran");
 
-    // 14: the installation has no `ca.pem`, which every launch needs.
+    // 14: the installation has no `ca.pem`, which every launch needs, and
+    // the server to fetch it from does not answer.
     let ca = machine.client_dir.join("ca.pem");
-    let aside = machine.client_dir.join("ca.pem.aside");
-    fs::rename(&ca, &aside).expect("move ca.pem aside");
+    let served = fs::read(&ca).expect("ca.pem");
+    fs::remove_file(&ca).expect("remove ca.pem");
+    machine.set("base_url", "\"http://127.0.0.1:1\"");
     let (code, _, stderr) = machine.jaynshare(&["claude", "--auto"], &[], None);
     assert_eq!(code, 14, "{stderr}");
     assert!(stderr.starts_with("cli_transport_unavailable:"), "{stderr}");
-    assert!(
-        stderr.contains("ca-update"),
-        "names the way to install it: {stderr}"
-    );
+    assert!(stderr.contains("could not be fetched"), "{stderr}");
     assert!(machine.claude_ran().is_none(), "nothing ran");
-    fs::rename(&aside, &ca).expect("put ca.pem back");
+    machine.set("base_url", &format!("{:?}", machine.base_url));
+    let (code, _, stderr) = machine.jaynshare(&["claude", "--auto"], &[], None);
+    assert_eq!(code, 0, "the server's CA is fetched: {stderr}");
+    assert!(machine.claude_ran().is_some(), "Claude Code was launched");
+    assert_eq!(fs::read(&ca).expect("ca.pem"), served);
 
     // 4: the proxy the launch check goes through is unreachable.
     machine.set("proxy_url", "\"http://127.0.0.1:1\"");
@@ -293,7 +296,7 @@ async fn no_claude_on_the_path_refuses() {
 }
 
 /// Each missing file is named
-/// with the installer to re-run, and the secret never appears; restoring the
+/// with the join to run, and the secret never appears; restoring the
 /// file launches again. Without `ca.pem` the launch is impossible
 /// (exit 14) and the refusal names the file and the CA update that installs
 /// it.
@@ -314,8 +317,8 @@ async fn each_missing_client_file_is_named() {
         );
         assert!(stderr.contains(name), "the missing file is named: {stderr}");
         assert!(
-            stderr.contains("install"),
-            "the installer is named: {stderr}"
+            stderr.contains("jaynshare join"),
+            "the join is named: {stderr}"
         );
         assert!(
             !stderr.contains(&machine.client.secret),
@@ -343,26 +346,13 @@ async fn each_missing_client_file_is_named() {
         );
     }
 
+    // `ca.pem` is the server's to hand out: the launch fetches it.
     let ca = machine.client_dir.join("ca.pem");
     let bytes = std::fs::read(&ca).expect("ca.pem");
     std::fs::remove_file(&ca).expect("ca.pem");
     let (code, _, stderr) = machine.jaynshare(&["claude", "--auto"], &[], None);
-    assert_eq!(code, 14, ", without ca.pem: {stderr}");
-    assert!(
-        stderr.starts_with("cli_transport_unavailable:") && stderr.contains("ca.pem"),
-        "the missing file is named: {stderr}"
-    );
-    assert!(
-        stderr.contains("ca-update --from"),
-        "the CA update is named: {stderr}"
-    );
-    assert!(
-        machine.claude_ran().is_none(),
-        "Claude Code never started without ca.pem"
-    );
-    std::fs::write(&ca, &bytes).expect("ca.pem");
-    let (code, _, stderr) = machine.jaynshare(&["claude", "--auto"], &[], None);
-    assert_eq!(code, 0, "restored ca.pem: {stderr}");
+    assert_eq!(code, 0, "without ca.pem: {stderr}");
+    assert_eq!(std::fs::read(&ca).expect("ca.pem"), bytes);
     assert!(machine.claude_ran().is_some(), "launched again");
 }
 
@@ -479,14 +469,17 @@ async fn an_unreachable_listener_refuses_and_names_direct() {
     );
 
     // 6. The CA failure keeps its class: a `ca.pem` the proxy's leaf does not
-    // chain to is exit 12, not "unreachable".
+    // chain to, with no server to fetch the right one from, is exit 12, not
+    // "unreachable".
     mitm_machine.set("proxy_url", &format!("{:?}", mitm_machine.proxy));
     let ca = mitm_machine.client_dir.join("ca.pem");
     let pool_ca = fs::read(&ca).expect("ca.pem");
     let foreign = rcgen::generate_simple_self_signed(vec!["not-the-pool.invalid".into()])
         .expect("a foreign CA");
     fs::write(&ca, foreign.cert.pem()).expect("ca.pem");
+    mitm_machine.set("base_url", "\"http://127.0.0.1:1\"");
     let (code, _, stderr) = mitm_machine.jaynshare(&["claude", "--auto"], &[], None);
+    mitm_machine.set("base_url", &format!("{:?}", mitm_machine.base_url));
     assert_eq!(code, 12, "the CA failure stays distinct: {stderr}");
     assert!(
         stderr.starts_with("cli_ca_untrusted:") && stderr.contains(&mitm_machine.proxy),
@@ -1040,9 +1033,11 @@ async fn the_secret_is_in_no_argument_vector_or_message() {
     let ca = machine.client_dir.join("ca.pem");
     let aside = machine.client_dir.join("ca.pem.aside");
     fs::rename(&ca, &aside).expect("move ca.pem aside");
+    machine.set("base_url", "\"http://127.0.0.1:1\"");
     let (exit, stdout, stderr) = machine.jaynshare(&["claude", "--auto"], &[], None);
-    assert_eq!(exit, 14, "no ca.pem: {stderr}");
+    assert_eq!(exit, 14, "no ca.pem to fetch: {stderr}");
     assert!(!leaks(&stdout) && !leaks(&stderr));
+    machine.set("base_url", &format!("{:?}", machine.base_url));
     fs::rename(&aside, &ca).expect("put ca.pem back");
 
     machine.set("proxy_url", "\"http://127.0.0.1:1\"");
@@ -1076,17 +1071,20 @@ async fn env_prints_the_launch_environment_quoted_for_each_shell() {
         );
     }
 
-    // On a terminal without `--show`: refused, the secret not printed.
-    let (code, transcript) = machine.pty(&["env", "--auto", "--shell", "sh"], &[], &[]);
-    assert_eq!(code, 2, "the terminal is refused: {transcript}");
-    assert!(
-        transcript.contains("--show"),
-        "the refusal names --show: {transcript}"
-    );
-    assert!(
-        !transcript.contains(machine.client.secret.as_str()),
-        "the secret never reaches the terminal"
-    );
+    // On a terminal without `--show`: refused, the secret not printed. The
+    // terminal is a Unix pseudo-terminal.
+    if cfg!(unix) {
+        let (code, transcript) = machine.pty(&["env", "--auto", "--shell", "sh"], &[], &[]);
+        assert_eq!(code, 2, "the terminal is refused: {transcript}");
+        assert!(
+            transcript.contains("--show"),
+            "the refusal names --show: {transcript}"
+        );
+        assert!(
+            !transcript.contains(machine.client.secret.as_str()),
+            "the secret never reaches the terminal"
+        );
+    }
 
     // `env --json` is a usage error (refused before the verb runs).
     let (code, _, _) = machine.jaynshare(&["env", "--auto", "--json"], &[], None);
@@ -1105,56 +1103,62 @@ async fn env_prints_the_launch_environment_quoted_for_each_shell() {
         stdout.lines().any(|l| l == "unset ANTHROPIC_API_KEY"),
         "the API key is removed: {stdout}"
     );
-    let round = std::process::Command::new("/bin/sh")
-        .arg("-c")
-        .arg(r#"eval "$1"; printf "%s" "$NODE_EXTRA_CA_CERTS""#)
-        .arg("sh")
-        .arg(&stdout)
-        .output()
-        .expect("sh runs");
-    assert!(
-        round.status.success(),
-        "{}",
-        String::from_utf8_lossy(&round.stderr)
-    );
-    assert_eq!(
-        String::from_utf8_lossy(&round.stdout),
-        ca,
-        "evaluating the lines gives the value"
-    );
+    if cfg!(unix) {
+        let round = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(r#"eval "$1"; printf "%s" "$NODE_EXTRA_CA_CERTS""#)
+            .arg("sh")
+            .arg(&stdout)
+            .output()
+            .expect("sh runs");
+        assert!(
+            round.status.success(),
+            "{}",
+            String::from_utf8_lossy(&round.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&round.stdout),
+            ca,
+            "evaluating the lines gives the value"
+        );
+    }
 
     // A `'` in a no-proxy member survives quoting.
     machine.set("no_proxy", "[\"it's.example\"]");
     let odd = "localhost,127.0.0.1,::1,it's.example";
     let (code, stdout, stderr) = machine.jaynshare(&["env", "--auto", "--shell", "sh"], &[], None);
     assert_eq!(code, 0, "{stderr}");
-    let round = std::process::Command::new("/bin/sh")
-        .arg("-c")
-        .arg(r#"eval "$1"; printf "%s" "$NO_PROXY""#)
-        .arg("sh")
-        .arg(&stdout)
-        .output()
-        .expect("sh runs");
-    assert!(
-        round.status.success(),
-        "{}",
-        String::from_utf8_lossy(&round.stderr)
-    );
-    assert_eq!(
-        String::from_utf8_lossy(&round.stdout),
-        odd,
-        "the apostrophe survives"
-    );
+    if cfg!(unix) {
+        let round = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(r#"eval "$1"; printf "%s" "$NO_PROXY""#)
+            .arg("sh")
+            .arg(&stdout)
+            .output()
+            .expect("sh runs");
+        assert!(
+            round.status.success(),
+            "{}",
+            String::from_utf8_lossy(&round.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&round.stdout),
+            odd,
+            "the apostrophe survives"
+        );
+    }
     machine.set("no_proxy", "[]");
 
-    // Each named shell gets its own spelling.
+    // Each named shell gets its own spelling. Fish's single quotes still
+    // escape a backslash.
     let (code, fish_out, stderr) =
         machine.jaynshare(&["env", "--auto", "--shell", "fish"], &[], None);
     assert_eq!(code, 0, "{stderr}");
+    let fish_ca = ca.replace('\\', r"\\");
     assert!(
         fish_out
             .lines()
-            .any(|l| l == format!("set -gx NODE_EXTRA_CA_CERTS '{ca}'")),
+            .any(|l| l == format!("set -gx NODE_EXTRA_CA_CERTS '{fish_ca}'")),
         "fish's set line: {fish_out}"
     );
     let (code, ps_out, stderr) =
@@ -1215,6 +1219,7 @@ async fn env_prints_the_launch_environment_quoted_for_each_shell() {
 /// line per shell that makes `claude` run `jaynshare claude`, quoting the
 /// executable's absolute path when it is off the search path, and writes
 /// nothing; without a installation it is the refusal.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn alias_prints_one_line_per_shell_and_writes_nothing() {
     let _leak_sweep = crate::leaks::LeakGuard::default();
@@ -1407,30 +1412,13 @@ async fn every_launch_is_mitm_mode() {
     assert_eq!(code, 2, "{stderr}");
     assert!(stdout.is_empty(), "nothing printed: {stdout}");
 
-    // An enrollment from before the change: a recorded base-URL mode and no CA.
+    // An enrollment from before the change: a recorded base-URL mode and no
+    // CA. The launch fetches the CA, and the recorded mode is ignored: a
+    // MITM launch.
     let toml = machine.client_dir.join("client.toml");
     let text = fs::read_to_string(&toml).expect("client.toml");
     fs::write(&toml, format!("{text}mode = \"base-url\"\n")).expect("client.toml");
-    let ca = machine.client_dir.join("ca.pem");
-    let bytes = fs::read(&ca).expect("ca.pem");
-    fs::remove_file(&ca).expect("ca.pem");
-    let (code, _, stderr) = machine.jaynshare(&["claude", "--auto"], &[], None);
-    assert_eq!(code, 14, "{stderr}");
-    assert!(
-        stderr.starts_with("cli_transport_unavailable:"),
-        "the slug on stderr: {stderr}"
-    );
-    assert!(
-        stderr.contains("ca.pem") && stderr.contains("ca-update --from"),
-        "names the file and the CA update: {stderr}"
-    );
-    assert!(
-        machine.claude_ran().is_none(),
-        "refused before Claude Code started"
-    );
-
-    // With the CA installed the recorded mode is ignored: a MITM launch.
-    fs::write(&ca, &bytes).expect("ca.pem");
+    fs::remove_file(machine.client_dir.join("ca.pem")).expect("ca.pem");
     let (code, _, stderr) = machine.jaynshare(&["claude", "--auto"], &[], None);
     assert_eq!(code, 0, "{stderr}");
     let seen = machine.claude_ran().expect("Claude Code was launched");
@@ -1515,9 +1503,9 @@ async fn windows_paths_profile_prerequisites_and_no_fallback() {
     assert!(machine.claude_ran().is_none());
 
     // No fallback to the engineer's own login when the pool is unreachable.
-    let base = Instance::start_client("windows-paths-profile-base").await;
+    let mut base = Instance::start_client("windows-paths-profile-base").await;
     let machine = install_client(&base).await;
-    machine.set("base_url", "\"http://127.0.0.1:1\"");
+    base.stop();
     let (code, _, stderr) = machine.jaynshare(&["claude", "--auto"], &[], None);
     assert_eq!(code, 4, "{stderr}");
     assert!(stderr.contains("--direct"), "{stderr}");

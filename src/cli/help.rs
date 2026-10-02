@@ -80,34 +80,23 @@ pub(super) static DOCS: &[VerbDoc] = &[
         ["jaynshare alias", "jaynshare alias --shell powershell"]
     ),
     verb!(
-        "enrol",
+        "join",
         Engineer,
         None,
-        "Claim an enrollment bundle and install this client (also spelt `enroll`)",
-        [12, 14, 17, 21],
-        [
-            "jaynshare enrol --bundle <extracted-dir>",
-            "jaynshare enrol --bundle <extracted-dir> --trust-os-store"
-        ]
+        "Join a pool with the operator's invite, install its client and add your Claude account",
+        [4, 5, 8, 10, 14, 17, 18],
+        ["jaynshare join <invite>"]
     ),
     verb!(
         "update",
         Engineer,
         None,
-        "Apply a client kit or bundle update to this installation",
+        "Apply a client kit to this installation",
         [11, 17, 20],
         [
             "jaynshare update --from <client-kit.zip>",
             "jaynshare update"
         ]
-    ),
-    verb!(
-        "ca-update",
-        Engineer,
-        None,
-        "Apply a CA update bundle after the pool's CA was rotated",
-        [11, 12, 17, 21],
-        ["jaynshare ca-update --from <ca-update.zip>"]
     ),
     verb!(
         "trust-ca add",
@@ -156,6 +145,25 @@ pub(super) static DOCS: &[VerbDoc] = &[
         "As the enrolled client: send one request through the proxy (--client)",
         [4, 11],
         ["jaynshare api GET /v1/models --client"]
+    ),
+    verb!(
+        "account login",
+        Engineer,
+        None,
+        "As the enrolled client: log in a Claude account of your own, or log it in again",
+        [4, 5, 8, 9, 10, 11],
+        [
+            "jaynshare account login",
+            "jaynshare account login --name <name>"
+        ]
+    ),
+    verb!(
+        "account list",
+        Engineer,
+        None,
+        "As the enrolled client: list the accounts this client added",
+        [4, 5, 10, 11],
+        ["jaynshare account list"]
     ),
     verb!(
         "statusline",
@@ -396,38 +404,22 @@ pub(super) static DOCS: &[VerbDoc] = &[
         ["jaynshare client show <id>"]
     ),
     verb!(
-        "client issue",
+        "client invite",
         Operator,
         None,
-        "Issue a client id and disclose its enrollment code once",
-        [3, 4, 5, 8, 9, 10],
+        "Invite a machine: a client id and its single-use invite, disclosed once",
+        [3, 4, 5, 8, 9, 10, 14, 17],
         [
-            "jaynshare client issue <id> --name <display-name>",
-            "jaynshare client issue <id> --name <display-name> --disclose-to <path>"
+            "jaynshare client invite <id>",
+            "jaynshare client invite <id> --name <display-name> --expires 1h --no-account"
         ]
-    ),
-    verb!(
-        "client bundle",
-        Operator,
-        None,
-        "Package an enrollment bundle for an already-issued pending entry",
-        [3, 4, 5, 6, 8, 10, 17],
-        ["jaynshare client bundle <id> --kit <client-kit.zip> --out <dir>"]
-    ),
-    verb!(
-        "client enrol",
-        Operator,
-        None,
-        "Issue and package in one transaction (also spelt `enroll`)",
-        [3, 4, 5, 8, 9, 10, 17],
-        ["jaynshare client enrol <id> --name <display-name> --kit <client-kit.zip> --out <dir>"]
     ),
     verb!(
         "client reissue",
         Operator,
         None,
-        "Replace a lost or expired code; repack when --kit and --out are given",
-        [3, 4, 5, 6, 8, 10, 17],
+        "Replace a lost or expired invite; the previous one stops working",
+        [3, 4, 5, 6, 8, 10, 14, 17],
         ["jaynshare client reissue <id>"]
     ),
     verb!(
@@ -493,17 +485,9 @@ pub(super) static DOCS: &[VerbDoc] = &[
         "ca rotate",
         Operator,
         None,
-        "Rotate the CA (asks; --yes skips): every client then needs the update bundle",
+        "Stage the next CA, presented after a week; --now replaces it at once (asks; --yes skips)",
         [3, 4, 5, 8, 10, 21],
-        ["jaynshare ca rotate"]
-    ),
-    verb!(
-        "ca update-bundle",
-        Operator,
-        None,
-        "Write the CA update bundle clients apply after a rotation",
-        [3, 4, 5, 8, 10],
-        ["jaynshare ca update-bundle --out <dir>"]
+        ["jaynshare ca rotate", "jaynshare ca rotate --now"]
     ),
     verb!(
         "config paths",
@@ -639,19 +623,24 @@ pub(super) static DOCS: &[VerbDoc] = &[
         "server install",
         Deploy,
         None,
-        "Install a verified release as the native service",
-        [17, 18, 19, 20, 21],
-        ["jaynshare server install --from <release-dir>"]
+        "Install the newest verified release, or a clone's build, as the native service, writing a configuration when there is none and ending with an invite for you; run again, it updates",
+        [3, 4, 8, 17, 18, 19, 20, 21],
+        [
+            "jaynshare server install",
+            "jaynshare server install --version <semver>",
+            "jaynshare server install --binary target/release/jaynshare"
+        ]
     ),
     verb!(
         "server update",
         Deploy,
         None,
-        "Update the native install from a release directory or by version (asks; --yes skips)",
-        [8, 17, 18, 19, 20, 21],
+        "Update the native install to its origin's newest release, a version or a release directory (asks; --yes skips)",
+        [4, 8, 17, 18, 19, 20, 21],
         [
-            "jaynshare server update --from <release-dir>",
-            "jaynshare server update --version <semver>"
+            "jaynshare server update",
+            "jaynshare server update --version <semver>",
+            "jaynshare server update --from <release-dir>"
         ]
     ),
     verb!(
@@ -672,6 +661,17 @@ pub(super) static DOCS: &[VerbDoc] = &[
         "Remove old releases, keeping the last --keep",
         [],
         ["jaynshare server prune --keep 2"]
+    ),
+    verb!(
+        "server auto-update",
+        Deploy,
+        None,
+        "Update the native install from its release origin every night; clients follow on their next launch",
+        [8, 18, 19],
+        [
+            "jaynshare server auto-update on",
+            "jaynshare server auto-update off"
+        ]
     ),
     verb!(
         "service install",
@@ -1016,7 +1016,7 @@ mod tests {
         for doc in DOCS {
             assert!(help.contains(doc.path), "{} missing from help", doc.path);
         }
-        // The kept product words, and only `enrol`/`enroll` as a pair.
+        // The kept product words.
         for word in [
             "status", "switch", "claude", "env", "probe", "route", "client", "service", "api",
             "alias",

@@ -58,7 +58,8 @@ pub(crate) struct FakeTools {
 }
 
 impl FakeTools {
-    /// Places one copy of the fake per tool name under `root/fake-tools/`.
+    /// Places one copy of the fake per tool name under `root/fake-tools/`,
+    /// unless one is already there.
     pub(crate) fn new(root: &Path, tools: &[&str]) -> Self {
         let dir = root.join("fake-tools");
         let bin = dir.join("bin");
@@ -69,7 +70,9 @@ impl FakeTools {
             } else {
                 (*tool).to_string()
             };
-            fs::copy(fake_tool_binary(), bin.join(name)).expect("place a fake tool");
+            if !bin.join(&name).exists() {
+                fs::copy(fake_tool_binary(), bin.join(name)).expect("place a fake tool");
+            }
             fs::create_dir_all(dir.join(tool)).expect("rule directory");
         }
         Self {
@@ -80,15 +83,18 @@ impl FakeTools {
     }
 
     /// `PATH` with the fakes first, then the system directories, and
-    /// `FAKE_TOOL_DIR`.
+    /// `FAKE_TOOL_DIR`. On Windows that is `System32` alone, which keeps the
+    /// real `powershell` out of reach (see `profile_fx`).
     pub(crate) fn env(&self) -> Vec<(String, String)> {
-        let separator = if cfg!(windows) { ";" } else { ":" };
-        let system = std::env::var("PATH").unwrap_or_default();
+        let path = if cfg!(windows) {
+            let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+            format!("{};{system_root}\\System32", self.bin.display())
+        } else {
+            let system = std::env::var("PATH").unwrap_or_default();
+            format!("{}:{system}", self.bin.display())
+        };
         vec![
-            (
-                "PATH".into(),
-                format!("{}{separator}{system}", self.bin.display()),
-            ),
+            ("PATH".into(), path),
             ("FAKE_TOOL_DIR".into(), self.dir.display().to_string()),
         ]
     }

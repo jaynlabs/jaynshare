@@ -94,6 +94,9 @@ version = 1
 # with ingress filtered to that network. The client proxy listens on the
 # same address, port 17422.
 listen = "127.0.0.1:17421"
+# TLS on the server's own identity key, which clients pin: no certificate
+# to manage, and moving the address never breaks them.
+tls = "identity"
 
 # Optional keys with their defaults; uncomment to override.
 # [data_plane]
@@ -1230,6 +1233,7 @@ mod tests {
         let config = config::parse(TEMPLATE.as_bytes(), Path::new(".")).expect("template parses");
         assert_eq!(config.data_plane.listen.to_string(), "127.0.0.1:17421");
         assert!(config.mitm.enabled, "clients enrol only with MITM on");
+        assert_eq!(config.data_plane.tls, config::ListenerTls::Identity);
         assert_eq!(config.data_plane.telemetry_policy, TelemetryPolicy::Forward);
         assert!(config.selection.priorities.is_empty());
         assert!(config.selection.routes.is_empty());
@@ -1246,6 +1250,7 @@ mod tests {
         assert_eq!(result["path"], out.display().to_string());
         assert!(line.contains("server install"));
         assert_eq!(std::fs::read(&out).expect("bytes"), TEMPLATE.as_bytes());
+        #[cfg(unix)]
         assert_eq!(state::mode_summary(&out), Some("0600".into()));
 
         let refusal = new(&out).unwrap_err().error;

@@ -52,19 +52,19 @@ fn spawn(scenario: &str, faults: Option<std::sync::Arc<crate::faults::Faults>>) 
              enabled = true\n\
              listen = \"127.0.0.1:{mitm_port}\"\n\n\
              [storage]\n\
-             state_file = \"{}\"\n\n\
+             state_file = {}\n\n\
              [logging]\n\
-             directory = \"{}\"\n\
+             directory = {}\n\
              level = \"debug\"\n",
-            root.join("state/state.json").display(),
-            root.join("log").display(),
+            crate::harness::toml_path(&root.join("state/state.json")),
+            crate::harness::toml_path(&root.join("log")),
         ),
     );
     let mut command = Command::new(binary());
     command
         .args(["--config", &config.display().to_string(), "serve"])
         .env("PATH", root.join("no-browser-on-path"))
-        .env("HOME", root.join("home"))
+        .envs(crate::harness::platform_home(&root.join("home")))
         .stdout(Stdio::from(
             fs::File::create(root.join("stdout.txt")).expect("stdout file"),
         ))
@@ -147,7 +147,7 @@ impl MitmInstance {
         command
             .args(["--config", &self.config.display().to_string(), "serve"])
             .env("PATH", self.root.join("no-browser-on-path"))
-            .env("HOME", self.root.join("home"))
+            .envs(crate::harness::platform_home(&self.root.join("home")))
             .stdout(Stdio::from(
                 fs::File::create(self.root.join("stdout.txt")).expect("stdout file"),
             ))
@@ -260,11 +260,12 @@ async fn fresh_state_directory_yields_the_three_trust_files() {
 
     // Exactly three files, and nothing that could hold the CA key.
     // The state document itself is written only once something mutates it,
-    // and this instance carries no account, so it may be absent.
+    // and this instance carries no account, so it may be absent. The server
+    // identity key is the listener's own, not the CA's.
     let mut names: Vec<String> = fs::read_dir(&state_dir)
         .expect("state dir")
         .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
-        .filter(|name| name != "state.json")
+        .filter(|name| name != "state.json" && name != "server-identity-key.pem")
         .collect();
     names.sort();
     assert_eq!(
@@ -394,6 +395,7 @@ async fn deleted_leaf_key_is_unusable_never_regenerated() {
 /// inside the 30-day window, start logs the expiry warning and `status`
 /// shows `expiring`; outside the window nothing is warned. The once-a-day
 /// repetition and the real client's reaction are checked by hand.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn expiry_warning_thirty_days_out() {
     let _leak_sweep = crate::leaks::LeakGuard::default();
@@ -429,7 +431,42 @@ async fn expiry_warning_thirty_days_out() {
     );
 }
 
-/// `ca rotate` replaces all
+/// `ca rotate` stages the next CA in its own private file beside the
+/// current material, and it stays staged across a restart.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_staged_ca_survives_a_restart() {
+    let _leak_sweep = crate::leaks::LeakGuard::default();
+    let mut instance = spawn("staged-survives-restart", None);
+    let current = ca_fingerprint(&instance.state_dir());
+    let envelope = instance.cli_json(&["ca", "rotate", "--yes"]);
+    assert_eq!(envelope["ok"], true, "{envelope}");
+    let next = envelope["result"]["next"].clone();
+    assert_eq!(
+        ca_fingerprint(&instance.state_dir()),
+        current,
+        "the current files stay"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let staged =
+            fs::metadata(instance.state_dir().join("mitm-ca-next.pem")).expect("the staged file");
+        assert_eq!(staged.permissions().mode() & 0o777, 0o600, "it holds a key");
+    }
+    instance.restart();
+    let status = instance.status();
+    assert_eq!(
+        status["mitm"]["ca"]["fingerprint"],
+        json!(current),
+        "{status}"
+    );
+    assert_eq!(
+        status["mitm"]["ca"]["next"], next,
+        "still staged, same switch: {status}"
+    );
+}
+
+/// `ca rotate --now` replaces all
 /// three files, logs one line carrying the old and the new fingerprint, and
 /// `status` shows the new one. The open-tunnel-keeps-its-leaf and
 /// new-handshake halves ride with the proxy listener scenarios.
@@ -442,7 +479,7 @@ async fn rotate_replaces_the_material_and_logs_both_fingerprints() {
         .map(|name| fs::read_to_string(instance.state_dir().join(name)).expect("old file"))
         .to_vec();
 
-    let envelope = instance.cli_json(&["ca", "rotate", "--yes"]);
+    let envelope = instance.cli_json(&["ca", "rotate", "--now", "--yes"]);
     assert_eq!(envelope["ok"], true, "the rotation applied: {envelope}");
 
     let rotated = instance

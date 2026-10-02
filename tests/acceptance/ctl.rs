@@ -585,12 +585,13 @@ async fn the_snapshot_is_never_torn() {
 }
 
 /// The member set of the account object.
-const ACCOUNT_MEMBERS: [&str; 16] = [
+const ACCOUNT_MEMBERS: [&str; 17] = [
     "handle",
     "display_name",
     "kind",
     "source_class",
     "enabled",
+    "owner",
     "health",
     "profile",
     "credential",
@@ -1388,6 +1389,7 @@ async fn removal_reference_conflict_and_the_enable_path() {
 /// The login operation over the raw control surface: poll to success, cancel,
 /// A state mismatch, the expiry, and no code, state or verifier in any
 /// response, log or audit record.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn the_login_operation_lifecycle() {
     let _leak_sweep = crate::leaks::LeakGuard::default();
@@ -1806,6 +1808,7 @@ async fn the_snapshot_sections_and_the_account_reads_agree() {
         "started_at",
         "listen",
         "tls",
+        "tls_pin",
         "control_api_versions",
         "telemetry_policy",
         "upstream_origin_override",
@@ -1970,6 +1973,7 @@ async fn client_status_with_and_without_a_session() {
         members,
         [
             "ca_fingerprint",
+            "ca_next_fingerprint",
             "capabilities",
             "captured_at",
             "client",
@@ -2274,6 +2278,7 @@ const CLIENT_ALLOW: &[&str] = &[
     "active",
     "available",
     "ca_fingerprint",
+    "ca_next_fingerprint",
     "capabilities",
     "captured_at",
     "client",
@@ -2291,6 +2296,7 @@ const CLIENT_ALLOW: &[&str] = &[
     "session",
     "serving_account_display_name",
     "sessions",
+    "tls_pin",
     "version",
     "five_hour",
     "weekly",
@@ -2407,6 +2413,7 @@ async fn operator_only_members_never_reach_the_client_projection() {
         top,
         [
             "ca_fingerprint",
+            "ca_next_fingerprint",
             "capabilities",
             "captured_at",
             "client",
@@ -2426,7 +2433,10 @@ async fn operator_only_members_never_reach_the_client_projection() {
         .map(String::as_str)
         .collect();
     server.sort_unstable();
-    assert_eq!(server, ["available", "control_api_version", "version"]);
+    assert_eq!(
+        server,
+        ["available", "control_api_version", "tls_pin", "version"]
+    );
     let mut keys = Vec::new();
     collect_object_keys(&body, &mut keys);
     for key in &keys {
@@ -3106,21 +3116,19 @@ async fn no_endpoint_re_shows_a_code_or_secret() {
     assert!(!after.to_string().contains("jsc2_"), "{}", after);
 }
 
-/// `POST /control/v1/mitm/ca/rotate` is `409 mitm_disabled`
-/// while the mode is off; with the mode on it answers 200 with the old and
-/// the new fingerprint and the new expiry, returns no key material, the
-/// read shows the new fingerprint afterwards, and one mutation line lands.
+/// `POST /control/v1/mitm/ca/rotate` is `409 mitm_disabled` while the mode
+/// is off. With it on, a rotation stages the next CA a week out and keeps
+/// presenting the current one, a second one is `409 rotation_pending`, and
+/// `now` replaces the CA at once and drops the staged one. No answer carries
+/// key material, and each rotation logs one mutation line.
 #[tokio::test(flavor = "multi_thread")]
-async fn ca_rotate_is_409_off_and_a_new_fingerprint_on() {
+async fn ca_rotate_is_409_off_stages_by_default_and_replaces_now() {
     let _leak_sweep = crate::leaks::LeakGuard::default();
-    // With MITM off there is no certificate authority to rotate.
     let instance_a = Instance::start("ca-rotate-409-off-a").await;
     let answer = ctl_post(instance_a.addr, "/control/v1/mitm/ca/rotate", json!({})).await;
     assert_eq!(answer.status, StatusCode::CONFLICT, "{}", answer.text());
     assert_error(&answer.json(), "mitm_disabled");
 
-    // With the mode on, the rotation is a 200 naming both
-    // fingerprints, and no key material is anywhere in the response.
     let instance_b = Instance::start_with(
         "ca-rotate-409-off-b",
         Setup {
@@ -3131,46 +3139,78 @@ async fn ca_rotate_is_409_off_and_a_new_fingerprint_on() {
     .await;
     let before =
         ctl_get(instance_b.addr, "/control/v1/ca").await.json()["ca"]["fingerprint"].clone();
+    let staged_at = time::OffsetDateTime::now_utc();
     let answer = ctl_post(instance_b.addr, "/control/v1/mitm/ca/rotate", json!({})).await;
     assert_eq!(answer.status, StatusCode::OK, "{}", answer.text());
-    let body = answer.json();
-    assert_version(&body);
-    assert_eq!(body["previous_fingerprint"], before, "{body}");
-    assert_ne!(body["fingerprint"], before, "{body}");
+    let staged = answer.json();
+    assert_version(&staged);
+    assert_eq!(staged["previous_fingerprint"], before, "{staged}");
+    assert_eq!(staged["fingerprint"], before, "still presented: {staged}");
+    let next = &staged["next"];
     assert!(
-        body["not_after"]
-            .as_str()
-            .is_some_and(|t| time::OffsetDateTime::parse(
-                t,
-                &time::format_description::well_known::Rfc3339
-            )
-            .is_ok()),
-        "an RFC 3339 expiry: {body}"
+        next["fingerprint"].is_string() && next["fingerprint"] != before,
+        "{staged}"
+    );
+    let switch_at = time::OffsetDateTime::parse(
+        next["switch_at"].as_str().expect("the switch time"),
+        &time::format_description::well_known::Rfc3339,
+    )
+    .expect("RFC 3339");
+    let overlap = switch_at - staged_at;
+    assert!(
+        overlap > time::Duration::days(7) - time::Duration::minutes(1)
+            && overlap <= time::Duration::days(7),
+        "a week out: {staged}"
     );
     let text = answer.text();
-    assert!(
-        !text.contains("PRIVATE KEY") && !text.contains("-----BEGIN"),
-        "no key material in the response: {text}"
+    assert!(!text.contains("-----BEGIN"), "no key material: {text}");
+
+    let read = ctl_get(instance_b.addr, "/control/v1/ca").await.json();
+    assert_eq!(read["ca"]["fingerprint"], before, "{read}");
+    assert_eq!(
+        read["ca"]["next"]["fingerprint"], next["fingerprint"],
+        "{read}"
     );
+    assert!(!read.to_string().contains("PRIVATE KEY"), "{read}");
 
-    // The read now shows the new fingerprint.
-    let after =
-        ctl_get(instance_b.addr, "/control/v1/ca").await.json()["ca"]["fingerprint"].clone();
-    assert_eq!(after, body["fingerprint"], "the read shows the new CA");
+    let again = ctl_post(instance_b.addr, "/control/v1/mitm/ca/rotate", json!({})).await;
+    assert_eq!(again.status, StatusCode::CONFLICT, "{}", again.text());
+    assert_error(&again.json(), "rotation_pending");
+    let wrong = ctl_post(
+        instance_b.addr,
+        "/control/v1/mitm/ca/rotate",
+        json!({ "now": "yes" }),
+    )
+    .await;
+    assert_eq!(wrong.status, StatusCode::BAD_REQUEST, "{}", wrong.text());
 
-    // One operator mutation logged, naming the rotate.
+    let answer = ctl_post(
+        instance_b.addr,
+        "/control/v1/mitm/ca/rotate",
+        json!({ "now": true }),
+    )
+    .await;
+    assert_eq!(answer.status, StatusCode::OK, "{}", answer.text());
+    let rotated = answer.json();
+    assert_eq!(rotated["previous_fingerprint"], before, "{rotated}");
+    assert!(
+        rotated["fingerprint"] != before && rotated["fingerprint"] != next["fingerprint"],
+        "a new CA, not the staged one: {rotated}"
+    );
+    assert_eq!(rotated["next"], Value::Null, "{rotated}");
+    let read = ctl_get(instance_b.addr, "/control/v1/ca").await.json();
+    assert_eq!(read["ca"]["fingerprint"], rotated["fingerprint"], "{read}");
+    assert_eq!(read["ca"]["next"], Value::Null, "{read}");
+
     let mutations = instance_b.events("control_mutation");
-    assert_eq!(mutations.len(), 1, "{mutations:?}");
-    let line = &mutations[0]["fields"];
-    assert!(
-        line["operation"].as_str().is_some_and(|o| o.contains("ca")),
-        "the operation names the rotate: {line}"
-    );
-    assert!(
-        !line["target"].as_str().unwrap_or_default().is_empty()
-            && !line["outcome"].as_str().unwrap_or_default().is_empty(),
-        "target and outcome are non-empty: {line}"
-    );
+    let outcomes: Vec<&str> = mutations
+        .iter()
+        .map(|line| {
+            assert_eq!(line["fields"]["operation"], "ca_rotate", "{line}");
+            line["fields"]["outcome"].as_str().unwrap_or_default()
+        })
+        .collect();
+    assert_eq!(outcomes, ["staged", "rotated"], "{mutations:?}");
 }
 
 /// The snapshot's `mitm` section: with the mode off, the
@@ -3211,7 +3251,7 @@ async fn mitm_section_is_null_when_off_and_present_when_on() {
             .map(|k| k.as_str())
             .collect();
         ca.sort_unstable();
-        assert_eq!(ca, ["fingerprint", "not_after", "state"]);
+        assert_eq!(ca, ["fingerprint", "next", "not_after", "state"]);
         let mut tunnels: Vec<&str> = mitm["tunnels"]
             .as_object()
             .unwrap()
@@ -3246,7 +3286,7 @@ async fn mitm_section_is_null_when_off_and_present_when_on() {
     // With the mode off every absent fact is null, never omitted,
     // and every count is zero.
     assert_eq!(mitm_a["enabled"], false, "{mitm_a}");
-    for member in ["fingerprint", "not_after", "state"] {
+    for member in ["fingerprint", "next", "not_after", "state"] {
         assert_eq!(mitm_a["ca"][member], Value::Null, "{mitm_a}");
     }
     for member in ["intercepted", "tunnelled"] {

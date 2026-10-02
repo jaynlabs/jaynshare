@@ -4,6 +4,8 @@
 
 mod accounts;
 mod ca;
+mod client_accounts;
+pub(crate) mod client_kit;
 pub(crate) mod client_surface;
 mod clients;
 mod operator;
@@ -26,16 +28,15 @@ use crate::audit::Principal;
 use crate::data_plane::envelope::json_response;
 use crate::data_plane::principal::is_loopback_peer;
 use crate::data_plane::relay::ResponseBody;
-use crate::login::Refused;
+use crate::login::{Refused, Started, Starter};
 use crate::pool::Account;
 use crate::pool::selection::{self as sel, RequestFacts};
 use crate::server::{Server, VERSION};
 use crate::state;
 use crate::timestamp::rfc3339;
-pub(crate) use accounts::account_object;
 use accounts::{
-    add_account, disable_account, enable_account, remove_account, rename_account, replace_account,
-    resolve,
+    account_object, add_account, disable_account, enable_account, remove_account, rename_account,
+    replace_account, resolve,
 };
 use selection::{clear_route_preference, set_route_preference, switch_default};
 
@@ -78,10 +79,12 @@ pub async fn handle(
         // Byte-identical with a data-plane refusal.
         return unauthenticated_refusal(peer);
     };
-    // The client surface declares the **client** class, and an
-    // operator reads it too. It is matched
-    // before the operator-only gate below, and it is read-only: a client has
-    // no mutation at all, so every other method is 405.
+    // The client surface declares the **client** class, and an operator
+    // reads it too, except a client's own accounts and logins. It is matched
+    // before the operator-only gate below.
+    if let ["client", "accounts", "owned" | "login" | "operations", ..] = segments[2..] {
+        return client_accounts::route(server, peer, principal, &segments[4..], request).await;
+    }
     if segments[2..].first() == Some(&"client") {
         return match (&segments[2..], &method) {
             (["client", "status"], &Method::GET) => {
@@ -91,8 +94,12 @@ pub async fn handle(
             (["client", "accounts", "resolve"], &Method::GET) => {
                 client_surface::resolve(server, request.uri().query())
             }
+            (["client", "kit"], &Method::GET) => client_kit::download(server).await,
             (
-                ["client", "status"] | ["client", "accounts"] | ["client", "accounts", "resolve"],
+                ["client", "status"]
+                | ["client", "accounts"]
+                | ["client", "accounts", "resolve"]
+                | ["client", "kit"],
                 _,
             ) => method_not_allowed("GET"),
             _ => not_found(),
@@ -217,7 +224,7 @@ pub async fn handle(
         (["quota", "probe"], &Method::POST) => {
             probe::handle(server, peer, principal, request).await
         }
-        (["operations", id], &Method::GET) => operation_show(server, id),
+        (["operations", id], &Method::GET) => operation_show(server, principal, id),
         (["operations", id, "code"], &Method::POST) => {
             operation_code(server, peer, principal, id, request).await
         }
@@ -473,6 +480,8 @@ pub(super) fn member_errors(object: &Value, allowed: &[(&str, &str, bool)]) -> V
                 let ok = match *kind {
                     "string" => v.is_string(),
                     "object" => v.is_object(),
+                    "integer" => v.is_u64() || v.is_i64(),
+                    "boolean" => v.is_boolean(),
                     _ => true,
                 };
                 if !ok {
@@ -487,7 +496,7 @@ pub(super) fn member_errors(object: &Value, allowed: &[(&str, &str, bool)]) -> V
 /// The operations that carry a pooled credential or an authorisation
 /// code are refused off-loopback on a plaintext listener.
 pub(super) fn insecure_channel(server: &Server, peer: SocketAddr) -> bool {
-    !is_loopback_peer(peer) && server.config().config.data_plane.tls.is_none()
+    !is_loopback_peer(peer) && !server.config().config.data_plane.tls.is_on()
 }
 
 /// Start the browser flow and answer `202` with the login operation.
@@ -514,12 +523,15 @@ async fn login_start(
             details,
         );
     }
-    let display_name = body["display_name"]
-        .as_str()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(String::from);
-    match server.logins.start(Arc::clone(server), display_name).await {
+    match server
+        .logins
+        .start(
+            Arc::clone(server),
+            Starter::Operator,
+            login_display_name(&body),
+        )
+        .await
+    {
         Ok(started) => {
             mutation_line(
                 server,
@@ -529,16 +541,7 @@ async fn login_start(
                 &started.id.to_string(),
                 "started",
             );
-            base(
-                StatusCode::ACCEPTED,
-                json!({
-                    "operation_id": started.id,
-                    "state": "awaiting_authorization",
-                    "authorization_url": started.url,
-                    "expires_at": rfc3339(started.expires_at),
-                    "manual_code_required": started.manual_code_required,
-                }),
-            )
+            login_started(&started)
         }
         Err(message) => error(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -550,26 +553,70 @@ async fn login_start(
     }
 }
 
-/// The read of one login operation; the read is not secret-bearing.
-fn operation_show(server: &Arc<Server>, id: &str) -> Response<ResponseBody> {
+/// A login's `display_name` member, trimmed; blank is none.
+fn login_display_name(body: &Value) -> Option<String> {
+    body["display_name"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+}
+
+/// The `202` that answers a started login.
+fn login_started(started: &Started) -> Response<ResponseBody> {
+    base(
+        StatusCode::ACCEPTED,
+        json!({
+            "operation_id": started.id,
+            "state": "awaiting_authorization",
+            "authorization_url": started.url,
+            "expires_at": rfc3339(started.expires_at),
+            "manual_code_required": started.manual_code_required,
+        }),
+    )
+}
+
+/// The operation an id names, if the caller may reach it: an operator
+/// reaches every one, a client only those it started.
+fn reachable_operation(
+    server: &Server,
+    principal: &Principal,
+    id: &str,
+) -> Result<Uuid, Box<Response<ResponseBody>>> {
     let Ok(id) = id.parse::<Uuid>() else {
-        return error(
+        return Err(Box::new(error(
             StatusCode::BAD_REQUEST,
             "invalid_request",
             "an operation path segment is its id, a UUID",
-            Some((*id).to_string()),
-            vec![],
-        );
-    };
-    match server.logins.show(server, id) {
-        Some(operation) => read(json!({ "operation": operation })),
-        None => error(
-            StatusCode::NOT_FOUND,
-            "not_found",
-            "no login operation has this id",
             Some(id.to_string()),
             vec![],
-        ),
+        )));
+    };
+    match principal.client_id() {
+        Some(client) if !server.logins.started_by(id, client) => {
+            Err(Box::new(operation_unknown(id)))
+        }
+        _ => Ok(id),
+    }
+}
+
+/// The read of one login operation; the read is not secret-bearing.
+fn operation_show(server: &Arc<Server>, principal: &Principal, id: &str) -> Response<ResponseBody> {
+    let id = match reachable_operation(server, principal, id) {
+        Ok(id) => id,
+        Err(refusal) => return *refusal,
+    };
+    let operation = match principal.client_id() {
+        Some(client) => server.logins.show(id, |handle| {
+            client_accounts::owned_account(server, client, handle)
+        }),
+        None => server
+            .logins
+            .show(id, |handle| account_object(server, handle)),
+    };
+    match operation {
+        Some(operation) => read(json!({ "operation": operation })),
+        None => operation_unknown(id),
     }
 }
 
@@ -598,14 +645,9 @@ async fn operation_code(
             details,
         );
     }
-    let Ok(id) = id.parse::<Uuid>() else {
-        return error(
-            StatusCode::BAD_REQUEST,
-            "invalid_request",
-            "an operation path segment is its id, a UUID",
-            Some((*id).to_string()),
-            vec![],
-        );
+    let id = match reachable_operation(server, principal, id) {
+        Ok(id) => id,
+        Err(refusal) => return *refusal,
     };
     match server
         .logins
@@ -648,14 +690,9 @@ async fn operation_cancel(
     {
         return refusal;
     }
-    let Ok(id) = id.parse::<Uuid>() else {
-        return error(
-            StatusCode::BAD_REQUEST,
-            "invalid_request",
-            "an operation path segment is its id, a UUID",
-            Some((*id).to_string()),
-            vec![],
-        );
+    let id = match reachable_operation(server, principal, id) {
+        Ok(id) => id,
+        Err(refusal) => return *refusal,
     };
     match server.logins.cancel(id) {
         Ok(()) => {
@@ -737,20 +774,24 @@ pub(super) fn time_or_null(t: Option<OffsetDateTime>) -> Value {
     t.map_or(Value::Null, |t| json!(rfc3339(t)))
 }
 
-/// The CA's fingerprint, expiry and state. With the mode
+/// The CA's fingerprint, expiry and state, and the staged CA. With the mode
 /// off every member is `null`; with it on and the material unusable
 /// the state says so and the rest stays unknown.
 fn mitm_ca_object(server: &Server, enabled: bool) -> Value {
     if !enabled {
-        return json!({ "fingerprint": null, "not_after": null, "state": null });
+        return json!({ "fingerprint": null, "not_after": null, "state": null, "next": null });
     }
-    match server.mitm_ca() {
+    let authorities = server.mitm_authorities().clone();
+    match &authorities.current {
         Some(ca) => json!({
             "fingerprint": ca.fingerprint(),
             "not_after": rfc3339(ca.not_after()),
             "state": ca.expiry_state(OffsetDateTime::now_utc()),
+            "next": ca::next_object(&authorities),
         }),
-        None => json!({ "fingerprint": null, "not_after": null, "state": "unusable" }),
+        None => {
+            json!({ "fingerprint": null, "not_after": null, "state": "unusable", "next": null })
+        }
     }
 }
 
@@ -770,7 +811,7 @@ fn configuration_object(
         "loaded_at": rfc3339(*server.configuration.loaded_at.read().expect("configuration lock")),
         "effective": crate::config::effective_view(config),
         "secrets": {
-            "data_plane.tls_private_key_file": config.data_plane.tls.as_ref().map(|t| json!({ "set": true, "readable": t.private_key_file.is_file() })).unwrap_or(json!({ "set": false, "readable": null })),
+            "data_plane.tls_private_key_file": config.data_plane.tls.files().map(|t| json!({ "set": true, "readable": t.private_key_file.is_file() })).unwrap_or(json!({ "set": false, "readable": null })),
             "data_plane.corporate_proxy_url": { "set": config.data_plane.corporate_proxy_url.is_some(), "readable": null },
         },
         "last_reload": last_reload,
@@ -864,7 +905,9 @@ fn snapshot(server: &Server) -> Value {
             "build": { "commit": crate::server::COMMIT, "target": crate::server::TARGET },
             "started_at": rfc3339(server.started_at),
             "listen": config.data_plane.listen.to_string(),
-            "tls": config.data_plane.tls.is_some(),
+            "tls": config.data_plane.tls.is_on(),
+            "tls_pin": server.client_pin(),
+            "signing_key": crate::deploy::release::active_key().ok().map(|key| key.encoded()),
             "control_api_versions": [API_VERSION],
             "telemetry_policy": config.data_plane.telemetry_policy,
             "upstream_origin_override": server.upstream.override_active().then(|| server.upstream.origin().to_string()),

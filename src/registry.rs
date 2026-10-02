@@ -46,6 +46,11 @@ pub struct RegistryEntry {
     pub revoked_at: Option<OffsetDateTime>,
     #[serde(default)]
     pub verifier: Option<Verifier>,
+    /// The invite opted out of the account step: this client adds no Claude
+    /// account of its own. Left out of `state.json` when false, so a 2.0.x
+    /// rollback still reads the entry.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_account: bool,
 }
 
 /// A verifier object with the operator domain plus `rotated_at`.
@@ -84,6 +89,11 @@ impl Registry {
 
     pub fn entry(&self, id: &str) -> Option<&RegistryEntry> {
         self.clients.iter().find(|e| e.id == id)
+    }
+
+    /// Whether the client's invite lets it add accounts of its own.
+    pub fn adds_accounts(&self, id: &str) -> bool {
+        self.entry(id).is_some_and(|entry| !entry.no_account)
     }
 
     /// The active client whose secret verifier matches, for principal resolution.
@@ -162,6 +172,7 @@ impl Registry {
             activated_at: None,
             revoked_at: None,
             verifier: Some(Verifier::new(Role::EnrollmentCode, code.as_str())),
+            no_account: false,
         };
         self.clients.push(entry);
         Ok((code.into_string(), now + duration_seconds(lifetime_seconds)))
@@ -223,6 +234,13 @@ impl Registry {
         entry.expires_at = None;
         entry.verifier = Some(Verifier::new(Role::ClientSecret, secret.as_str()));
         Ok((entry.clone(), secret.into_string()))
+    }
+
+    /// Whether the generation just issued may add accounts; each invite sets it.
+    pub fn set_no_account(&mut self, id: &str, no_account: bool) {
+        if let Some(entry) = self.clients.iter_mut().find(|e| e.id == id) {
+            entry.no_account = no_account;
+        }
     }
 
     /// Rotate an active client; the old secret dies on the next request.
@@ -421,6 +439,21 @@ mod tests {
             "the old code is dead"
         );
         assert!(registry.claim("mac-build", &code2, later).is_ok());
+    }
+
+    #[test]
+    fn the_no_account_flag_is_written_only_when_set() {
+        let (mut registry, _) = issued(60);
+        let plain = serde_json::to_value(registry.entry("mac-build")).expect("serialises");
+        assert!(plain.get("no_account").is_none(), "{plain}");
+        let read: RegistryEntry = serde_json::from_value(plain).expect("reads back");
+        assert!(!read.no_account);
+        assert!(registry.adds_accounts("mac-build"));
+        registry.set_no_account("mac-build", true);
+        let flagged = serde_json::to_value(registry.entry("mac-build")).expect("serialises");
+        assert_eq!(flagged["no_account"], true);
+        assert!(!registry.adds_accounts("mac-build"));
+        assert!(!registry.adds_accounts("unknown"));
     }
 
     #[test]

@@ -63,9 +63,9 @@ async fn the_kit_documentation_states_what_is_recorded() {
     }
 }
 
-use crate::bundle::{
-    Operator, client_platform, config_root, enrol_into, enrol_refused_after_confirm,
-    native_payload, try_enrol_into,
+use crate::enrol::{
+    Operator, client_platform, config_root, enrol_into, installed_binary, native_payload,
+    try_enrol_into,
 };
 
 /// An enrollment
@@ -119,7 +119,7 @@ async fn settings_install_keeps_keys_is_idempotent_and_backed_up() {
         }]),
         "the PreToolUse group is untouched"
     );
-    let binary = config_root(&home).join("bin/jaynshare");
+    let binary = installed_binary(&home);
     let status = &installed["statusLine"];
     let status_command = status["command"].as_str().unwrap();
     assert!(
@@ -150,14 +150,13 @@ async fn settings_install_keeps_keys_is_idempotent_and_backed_up() {
         "the backup holds the bytes as they were before the install"
     );
 
-    // An invalid file stops the install before the code prompt.
+    // An invalid file stops the join before the claim.
     let home2 = scratch("settings-install-keeps-keys-invalid").join("home");
     private_dir(&home2);
     let settings2 = home2.join(".claude/settings.json");
     std::fs::create_dir_all(settings2.parent().unwrap()).unwrap();
     std::fs::write(&settings2, "{\"theme\": ").unwrap();
-    let (exit, transcript) =
-        enrol_refused_after_confirm(&operator, "beta", "Beta Desk", &home2).await;
+    let (exit, transcript) = try_enrol_into(&operator, "beta", "Beta Desk", &home2).await;
     assert_ne!(exit, 0, "the install stops: {transcript}");
     assert!(transcript.contains("settings.json"), "{transcript}");
     assert!(transcript.contains("not valid JSON"), "{transcript}");
@@ -220,7 +219,7 @@ async fn an_engineers_refresh_interval_survives_a_second_install() {
         "the engineer's interval survives the second install"
     );
     assert_eq!(after["model"], "opus", "the engineer's key stands");
-    let binary = config_root(&home).join("bin/jaynshare");
+    let binary = installed_binary(&home);
     let groups = after["hooks"]["UserPromptSubmit"]
         .as_array()
         .expect("the hook groups");
@@ -255,7 +254,7 @@ async fn update_keeps_the_client_files_and_rolls_back_on_failure() {
     let toml_path = client_dir.join("client.toml");
     let secret_path = client_dir.join("client-secret");
     let ca_path = client_dir.join("ca.pem");
-    let binary = config_root(&home).join("bin/jaynshare");
+    let binary = installed_binary(&home);
     let settings = home.join(".claude/settings.json");
     let toml_before = std::fs::read(&toml_path).expect("client.toml");
     let secret_before = std::fs::read(&secret_path).expect("client-secret");
@@ -439,7 +438,7 @@ async fn uninstall_removes_the_two_entries_and_nothing_else() {
         "the client files are gone"
     );
     assert!(
-        !config_root(&home).join("bin/jaynshare").exists(),
+        !installed_binary(&home).exists(),
         "the installed executable is gone"
     );
 }
@@ -511,7 +510,7 @@ async fn uninstall_after_an_unrelated_edit_keeps_it() {
         "the transcript is byte-identical"
     );
     assert!(
-        !config_root(&home).join("bin/jaynshare").exists(),
+        !installed_binary(&home).exists(),
         "the installed executable is gone"
     );
     assert!(
@@ -599,7 +598,7 @@ async fn settings_foreign_entries_survive_install_update_and_uninstall() {
         }),
         "/: the foreign status line is unchanged and ours was not written"
     );
-    let binary = config_root(&home).join("bin/jaynshare");
+    let binary = installed_binary(&home);
     let groups = after_enrol["hooks"]["UserPromptSubmit"]
         .as_array()
         .expect("the hook groups");
@@ -745,7 +744,7 @@ async fn update_without_from_fetches_the_latest_kit() {
     crate::harness::private_dir(&home);
     enrol_into(&operator, "alpha", "Alpha Desk", &home).await;
 
-    let binary = config_root(&home).join("bin/jaynshare");
+    let binary = installed_binary(&home);
     let native = native_payload();
 
     // The kit the origin will serve: the native payload carries bytes this

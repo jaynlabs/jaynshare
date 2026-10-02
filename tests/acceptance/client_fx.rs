@@ -111,7 +111,7 @@ pub(crate) fn roaming(home: &Path) -> PathBuf {
 
 /// Enrol one client on `instance` (issue + claim over the control API) and
 /// write its files under `<instance root>/engineer/home` exactly as
-/// `enrol --bundle` leaves them: `client.toml`, `client-secret` (`0600`) and
+/// `join` leaves them: `client.toml`, `client-secret` (`0600`) and
 /// `ca.pem` with its fingerprint — the instance must run with
 /// `Setup { mitm: true.. }` (`Instance::start_client`). The fake `claude` is
 /// placed on `PATH`.
@@ -177,20 +177,9 @@ impl ClientHome {
     pub(crate) fn env(&self) -> Vec<(String, String)> {
         let mut env = isolated_env(&self.home);
         if cfg!(windows) {
-            // The client directory comes from the Windows profile
-            // (`APPDATA`), never from a shell's `HOME`; `SystemRoot` is what
-            // any Windows process needs to reach the network.
+            // `SystemRoot` is what any Windows process needs to reach the
+            // network.
             let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
-            env.push(("USERPROFILE".into(), self.home.display().to_string()));
-            env.push(("APPDATA".into(), roaming(&self.home).display().to_string()));
-            env.push((
-                "LOCALAPPDATA".into(),
-                self.home
-                    .join("AppData")
-                    .join("Local")
-                    .display()
-                    .to_string(),
-            ));
             env.push((
                 "PATH".into(),
                 format!("{};{system_root}\\System32", self.bin.display()),
@@ -211,7 +200,7 @@ impl ClientHome {
     /// starts its own session (`setsid`, through perl's POSIX module — the
     /// suite has no `unsafe`), so `/dev/tty` cannot be opened and a picker
     /// can never draw on the developer's terminal.
-    fn command(&self, extra: &[(&str, &str)]) -> Command {
+    pub(crate) fn command(&self, extra: &[(&str, &str)]) -> Command {
         let mut command = if cfg!(unix) {
             let mut perl = Command::new("/usr/bin/perl");
             perl.args([
@@ -299,9 +288,23 @@ impl ClientHome {
         for name in ["argv.json", "env.json"] {
             let _ = fs::remove_file(self.out.join(name));
         }
+        let mut env: BTreeMap<String, String> = serde_json::from_str(&env).expect("env.json");
+        // A Windows variable name has no case: the child holds one
+        // `HTTPS_PROXY` however it was spelled, so it reads in either case.
+        if cfg!(windows) {
+            env = env
+                .into_iter()
+                .flat_map(|(name, value)| {
+                    [
+                        (name.to_lowercase(), value.clone()),
+                        (name.to_uppercase(), value),
+                    ]
+                })
+                .collect();
+        }
         Some(FakeClaudeRun {
             argv: serde_json::from_str(&argv).expect("argv.json"),
-            env: serde_json::from_str(&env).expect("env.json"),
+            env,
         })
     }
 

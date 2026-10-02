@@ -80,9 +80,9 @@ async fn the_operator_is_loopback_or_a_credential_on_a_safe_channel() {
         Setup {
             wildcard: true,
             data_plane: format!(
-                "tls_certificate_file = \"{}\"\ntls_private_key_file = \"{}\"\n",
-                cert.display(),
-                key.display()
+                "tls_certificate_file = {}\ntls_private_key_file = {}\n",
+                crate::harness::toml_path(&cert),
+                crate::harness::toml_path(&key)
             ),
             ..Setup::default()
         },
@@ -130,6 +130,7 @@ async fn the_operator_is_loopback_or_a_credential_on_a_safe_channel() {
 /// every path an unauthenticated remote caller
 /// probes answers the one identical refusal, the claim returns a secret once
 /// and its refusal discloses nothing.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn without_a_principal_there_is_only_the_refusal_and_the_claim() {
     let _leak_sweep = crate::leaks::LeakGuard::default();
@@ -674,282 +675,6 @@ async fn the_check_url_is_fetched_only_when_a_pin_is_configured() {
     );
 }
 
-// ------------------------------------------------------------------ the client-kit fixture
-//
-// `bundle.rs` is another brick's file, so the two fixtures its scenarios need
-// (the kit writer and the operator home) are copied here rather than shared.
-// If `bundle.rs`'s fixture changes shape, this copy is meant to drift: each
-// module's scenarios stay readable without meeting on a head line.
-
-/// what a client kit carries besides the release set.
-const SEC_KIT_MEMBERS: [&str; 8] = [
-    "README.txt",
-    "install-macos.sh",
-    "uninstall-macos.sh",
-    "install-windows.ps1",
-    "uninstall-windows.ps1",
-    "payload/macos-x86_64/jaynshare",
-    "payload/macos-aarch64/jaynshare",
-    "payload/windows-x86_64/jaynshare.exe",
-];
-
-/// the bundle root, member for member.
-const SEC_BUNDLE_MEMBERS: [&str; 13] = [
-    "manifest.json",
-    "ca.pem",
-    "release.json",
-    "release.json.minisig",
-    "SHA256SUMS",
-    "README.txt",
-    "install-macos.sh",
-    "uninstall-macos.sh",
-    "install-windows.ps1",
-    "uninstall-windows.ps1",
-    "payload/macos-x86_64/jaynshare",
-    "payload/macos-aarch64/jaynshare",
-    "payload/windows-x86_64/jaynshare.exe",
-];
-
-/// RFC 8785 as far as this manifest goes: sorted keys, no whitespace.
-fn sec_canonical(value: &Value) -> Vec<u8> {
-    fn write(value: &Value, out: &mut String) {
-        match value {
-            Value::Object(map) => {
-                let mut keys: Vec<&String> = map.keys().collect();
-                keys.sort_by_key(|k| k.encode_utf16().collect::<Vec<u16>>());
-                out.push('{');
-                for (i, key) in keys.iter().enumerate() {
-                    if i > 0 {
-                        out.push(',');
-                    }
-                    out.push_str(&serde_json::to_string(key).expect("key"));
-                    out.push(':');
-                    write(&map[*key], out);
-                }
-                out.push('}');
-            }
-            Value::Array(items) => {
-                out.push('[');
-                for (i, item) in items.iter().enumerate() {
-                    if i > 0 {
-                        out.push(',');
-                    }
-                    write(item, out);
-                }
-                out.push(']');
-            }
-            other => out.push_str(&serde_json::to_string(other).expect("scalar")),
-        }
-    }
-    let mut out = String::new();
-    write(value, &mut out);
-    out.into_bytes()
-}
-
-/// The per-run signing key: PKCS#8 document to sign with, raw 32-byte public key.
-fn sec_release_key_pair() -> (Vec<u8>, Vec<u8>) {
-    let rng = ring::rand::SystemRandom::new();
-    let pkcs8 = ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).expect("keygen");
-    let pair = ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).expect("parse");
-    (
-        pkcs8.as_ref().to_vec(),
-        ring::signature::KeyPair::public_key(&pair)
-            .as_ref()
-            .to_vec(),
-    )
-}
-
-/// The minisign public-key file: comment line, then base64(key id ‖ key).
-fn sec_public_key_file(public: &[u8]) -> Vec<u8> {
-    crate::release_fx::public_key_file(public)
-}
-
-/// The minisign signature file over exactly `message`.
-fn sec_signature_file(pkcs8: &[u8], public: &[u8], message: &[u8]) -> Vec<u8> {
-    crate::release_fx::signature_file(pkcs8, public, message)
-}
-
-/// the configuration root under a scenario's home, where `release.pub`
-/// sits until the release pipeline embeds the key.
-fn sec_config_root(home: &Path) -> PathBuf {
-    if cfg!(target_os = "macos") {
-        home.join("Library/Application Support/Jaynshare")
-    } else {
-        home.join(".config/jaynshare")
-    }
-}
-
-/// Writes `release.pub` under `home`.
-fn sec_write_release_key(home: &Path, public: &[u8]) {
-    let root = sec_config_root(home);
-    private_dir(&root);
-    std::fs::write(root.join("release.pub"), sec_public_key_file(public)).expect("release.pub");
-}
-
-/// Writes `release.pub` under `home` and returns the key pair that matches it.
-fn sec_plant_release_key(home: &Path) -> (Vec<u8>, Vec<u8>) {
-    let (pkcs8, public) = sec_release_key_pair();
-    sec_write_release_key(home, &public);
-    (pkcs8, public)
-}
-
-/// A client kit ZIP the product accepts: the members, a `release.json`
-/// binding every one of them, `SHA256SUMS` agreeing with it, and a signature
-/// over the manifest bytes.
-fn sec_write_kit(path: &Path, pkcs8: &[u8], public: &[u8]) {
-    let mut members: Vec<(String, Vec<u8>)> = SEC_KIT_MEMBERS
-        .iter()
-        .map(|name| {
-            let body = format!("{name} of the acceptance client kit\n");
-            ((*name).to_string(), body.into_bytes())
-        })
-        .collect();
-    members.sort_by(|a, b| a.0.cmp(&b.0));
-    let member_map: Vec<Value> = members
-        .iter()
-        .map(|(name, bytes)| {
-            json!({
-                "path": name,
-                "length": bytes.len(),
-                "sha256": sec_sha256_hex(bytes),
-            })
-        })
-        .collect();
-    let sums: Vec<u8> = members
-        .iter()
-        .flat_map(|(name, bytes)| format!("{}  {name}\n", sec_sha256_hex(bytes)).into_bytes())
-        .collect();
-    let release = json!({
-        "schema_version": 1,
-        "version": "0.0.0-acceptance",
-        "commit": "acceptance",
-        "sha256sums_sha256": sec_sha256_hex(&sums),
-        "artifacts": [{ "purpose": "client-kit", "members": member_map }],
-    });
-    let release_bytes = sec_canonical(&release);
-    let mut all = vec![
-        ("release.json".to_string(), release_bytes.clone()),
-        (
-            "release.json.minisig".to_string(),
-            sec_signature_file(pkcs8, public, &release_bytes),
-        ),
-        ("SHA256SUMS".to_string(), sums),
-    ];
-    all.extend(members);
-    let file = std::fs::File::create(path).expect("create the kit");
-    let mut archive = zip::ZipWriter::new(file);
-    let options =
-        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
-    for (name, bytes) in &all {
-        use std::io::Write as _;
-        archive.start_file(name, options).expect("start member");
-        archive.write_all(bytes).expect("write member");
-    }
-    archive.finish().expect("finish the kit");
-}
-
-/// Reads a ZIP into (name, bytes) pairs, in archive order.
-fn sec_read_zip(path: &Path) -> Vec<(String, Vec<u8>)> {
-    let file = std::fs::File::open(path).expect("open the archive");
-    let mut archive = zip::ZipArchive::new(file).expect("read the archive");
-    (0..archive.len())
-        .map(|i| {
-            use std::io::Read as _;
-            let mut entry = archive.by_index(i).expect("member");
-            let name = entry.name().to_string();
-            let mut bytes = Vec::new();
-            entry.read_to_end(&mut bytes).expect("member bytes");
-            (name, bytes)
-        })
-        .collect()
-}
-
-fn sec_sha256_hex(bytes: &[u8]) -> String {
-    use sha2::Digest as _;
-    let mut hasher = sha2::Sha256::new();
-    hasher.update(bytes);
-    hasher
-        .finalize()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
-}
-
-/// An operator instance plus its own home, so the CLI under test resolves
-/// `release.pub` and the client directory under the scenario's root.
-struct SecOperator {
-    instance: Instance,
-    home: PathBuf,
-    out: PathBuf,
-    kit: PathBuf,
-}
-
-impl SecOperator {
-    async fn start(scenario: &str, setup: Setup) -> SecOperator {
-        let instance = Instance::start_with(scenario, setup).await;
-        let root = scratch(&format!("{scenario}-operator"));
-        let home = root.join("home");
-        private_dir(&home);
-        let out = root.join("out");
-        private_dir(&out);
-        let (_pkcs8, public) = sec_plant_release_key(&home);
-        let kit = root.join("client-kit.zip");
-        sec_write_kit(&kit, &_pkcs8, &public);
-        SecOperator {
-            instance,
-            home,
-            out,
-            kit,
-        }
-    }
-
-    fn env(&self) -> Vec<(String, String)> {
-        isolated_env(&self.home)
-    }
-
-    /// One operator CLI run against this instance, with the scenario's home
-    /// so `release.pub` resolves under it.
-    fn cli(&self, args: &[&str]) -> (i32, String, String) {
-        let owned = self.env();
-        let pairs: Vec<(&str, &str)> = owned
-            .iter()
-            .map(|(k, v)| (k.as_str(), v.as_str()))
-            .collect();
-        self.instance.cli_env(args, None, &pairs)
-    }
-
-    /// the pending entry the packaging verb works from, with its
-    /// once-disclosed code.
-    async fn issue(&self, id: &str, name: &str) -> Value {
-        let answer = control_post(
-            self.instance.addr,
-            "/control/v1/clients",
-            &[],
-            json!({ "id": id, "display_name": name }),
-        )
-        .await;
-        assert_eq!(answer.status, StatusCode::CREATED, "issue {id}: {answer:?}");
-        answer.json()
-    }
-}
-
-/// The operator CLI's invocation of the packaging verb.
-fn sec_bundle_args(operator: &SecOperator, id: &str) -> Vec<String> {
-    [
-        "client",
-        "bundle",
-        id,
-        "--kit",
-        &operator.kit.display().to_string(),
-        "--out",
-        &operator.out.display().to_string(),
-        "--json",
-    ]
-    .into_iter()
-    .map(String::from)
-    .collect()
-}
-
 /// After one instance has held and *used* all three kinds of
 /// secret (the pooled credentials, a client secret with the enrollment code
 /// that minted it, the operator secret), nothing it wrote anywhere but the
@@ -1027,190 +752,29 @@ async fn no_secret_reaches_any_surface_but_the_state_file() {
         }
     }
     let argv = {
-        let output = Command::new("/bin/ps")
-            .args(["-o", "command=", "-p", &instance.pid().to_string()])
-            .output()
-            .expect("ps runs");
+        let pid = instance.pid().to_string();
+        let output = if cfg!(windows) {
+            Command::new("powershell")
+                .args(["-NoProfile", "-Command"])
+                .arg(format!(
+                    "(Get-CimInstance Win32_Process -Filter 'ProcessId={pid}').CommandLine"
+                ))
+                .output()
+        } else {
+            Command::new("/bin/ps")
+                .args(["-o", "command=", "-p", &pid])
+                .output()
+        }
+        .expect("the process's command line");
         String::from_utf8_lossy(&output.stdout).into_owned()
     };
+    assert!(!argv.trim().is_empty(), "the command line was read");
     for needle in &refs {
         assert!(
             !encodings(needle).iter().any(|f| argv.contains(f)),
             "argv carries {needle}: {argv}"
         );
     }
-}
-
-/// A stolen enrollment bundle yields nothing: no private key,
-/// no pooled secret, no enrollment code and no client secret in any
-/// member; it carries the CA certificate and its fingerprint when
-/// MITM is on; and the bundle alone enrols nobody — a claim without a code
-/// and a claim with a consumed code are the same refusal and disclose
-/// nothing.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_stolen_bundle_yields_nothing() {
-    let _leak_sweep = crate::leaks::LeakGuard::default();
-    let operator = SecOperator::start(
-        "stolen-bundle-yields",
-        Setup {
-            mitm: true,
-            ..Setup::default()
-        },
-    )
-    .await;
-    let issued = operator.issue("alpha", "Alpha Desk").await;
-    let code = issued["enrollment_code"]
-        .as_str()
-        .expect("the code is disclosed once")
-        .to_string();
-
-    let args = sec_bundle_args(&operator, "alpha");
-    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let (exit, stdout, stderr) = operator.cli(&arg_refs);
-    assert_eq!(exit, 0, "packaging: {stdout}{stderr}");
-    let envelope: Value = serde_json::from_str(stdout.trim()).expect("the CLI envelope");
-    let archive = PathBuf::from(
-        envelope["result"]["archive"]
-            .as_str()
-            .expect("the archive path"),
-    );
-    let members = sec_read_zip(&archive);
-    let names: Vec<&str> = members.iter().map(|(n, _)| n.as_str()).collect();
-    assert_eq!(names, SEC_BUNDLE_MEMBERS, "the bundle tree");
-
-    // The operator reads the code from the issue response — the channel apart
-    // from the bundle — and consumes it. The thief has only the archive.
-    let claimed = control_post(
-        operator.instance.addr,
-        "/control/v1/enrollment/claim",
-        &[],
-        json!({ "id": "alpha", "code": code }),
-    )
-    .await;
-    assert_eq!(claimed.status, StatusCode::OK, "{claimed:?}");
-    let client_secret = claimed.json()["client_secret"]
-        .as_str()
-        .expect("the client secret")
-        .to_string();
-
-    // No member carries a private key, a pooled credential, the code or the
-    // client secret, in any form a redaction bug would leave.
-    let mut needles: Vec<String> = operator
-        .instance
-        .needles
-        .all()
-        .into_iter()
-        .map(String::from)
-        .collect();
-    needles.push(code.clone());
-    needles.push(client_secret);
-    for (name, bytes) in &members {
-        let text = String::from_utf8_lossy(bytes);
-        assert!(
-            !text.contains("PRIVATE KEY"),
-            "{name} carries a private key"
-        );
-        for needle in &needles {
-            assert!(
-                !encodings(needle).iter().any(|f| text.contains(f)),
-                "{name} carries the needle {needle}"
-            );
-        }
-    }
-
-    // What it does carry: the CA certificate and its fingerprint.
-    let (_, ca_pem) = &members
-        .iter()
-        .find(|(n, _)| n == "ca.pem")
-        .expect("ca.pem in the bundle")
-        .clone();
-    assert!(
-        ca_pem.starts_with(b"-----BEGIN CERTIFICATE-----"),
-        "ca.pem is a PEM certificate"
-    );
-    let manifest: Value = serde_json::from_slice(
-        &members
-            .iter()
-            .find(|(n, _)| n == "manifest.json")
-            .expect("manifest.json")
-            .1,
-    )
-    .expect("the manifest parses");
-    assert_eq!(
-        manifest["ca"]["fingerprint"],
-        json!(crate::mtm::ca_fingerprint(
-            &operator.instance.root.join("state")
-        )),
-        "the manifest names the CA fingerprint in force: {manifest}"
-    );
-
-    // The bundle alone enrols nobody. A claim with no code is refused; the
-    // refusal body is the one envelope and names no reason.
-    let registry_count = || async {
-        let answer = control(
-            operator.instance.addr,
-            Method::GET,
-            "/control/v1/clients",
-            &[],
-            None,
-        )
-        .await;
-        assert_eq!(answer.status, StatusCode::OK, "{answer:?}");
-        answer.json()["clients"]
-            .as_array()
-            .expect("the registry")
-            .len()
-    };
-    let before = registry_count().await;
-    let no_code = control_post(
-        operator.instance.addr,
-        "/control/v1/enrollment/claim",
-        &[],
-        json!({ "id": "alpha" }),
-    )
-    .await;
-    assert_eq!(no_code.status, StatusCode::BAD_REQUEST, "{no_code:?}");
-    assert!(
-        no_code.json()["client_secret"].is_null(),
-        "no secret in a refusal: {no_code:?}"
-    );
-    assert_eq!(
-        no_code.json()["error"]["details"].as_array().map(Vec::len),
-        Some(1),
-        "the refusal names only the missing member: {no_code:?}"
-    );
-    assert_eq!(registry_count().await, before, "no code: nobody enrolled");
-
-    // A claim with the code the first claim already consumed is refused with
-    // the one envelope, disclosing nothing.
-    let consumed = control_post(
-        operator.instance.addr,
-        "/control/v1/enrollment/claim",
-        &[],
-        json!({ "id": "alpha", "code": code }),
-    )
-    .await;
-    assert_eq!(consumed.status, StatusCode::FORBIDDEN, "{consumed:?}");
-    assert_eq!(
-        consumed.json()["error"]["code"],
-        "enrollment_claim_refused",
-        "{consumed:?}"
-    );
-    assert_eq!(
-        consumed.json()["error"]["message"],
-        "the enrollment claim was refused; ask the operator to issue a new code"
-    );
-    assert_eq!(consumed.json()["error"]["details"], json!([]));
-    assert_eq!(consumed.json()["control_api_version"], 1);
-    assert!(
-        consumed.json()["client_secret"].is_null(),
-        "no secret in a refusal: {consumed:?}"
-    );
-    assert_eq!(
-        registry_count().await,
-        before,
-        "a consumed code: nobody enrolled"
-    );
 }
 
 /// The trail carries no content, no

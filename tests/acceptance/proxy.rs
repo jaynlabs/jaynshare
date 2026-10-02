@@ -1012,6 +1012,10 @@ async fn unreachable_targets_are_502_and_504_before_any_200() {
     // TEST-NET-1 is documentation space (RFC 5737) and reaches no service;
     // A host whose network answers it outright has no 30 s wait to observe,
     // and that half is checked by hand.
+    if cfg!(windows) {
+        eprintln!("skipping: Windows gives up a connection at about 21 s, before the 30 s");
+        return;
+    }
     let unroutable: SocketAddr = "192.0.2.1:443".parse().expect("TEST-NET-1");
     let answered_fast = tokio::task::spawn_blocking(move || {
         let at = Instant::now();
@@ -1474,17 +1478,17 @@ fn serve_once(root: &std::path::Path, listen: u16, proxy: Option<u16>) -> (i32, 
              [data_plane]\n\
              listen = \"127.0.0.1:{listen}\"\n\n\
              [storage]\n\
-             state_file = \"{}\"\n\n\
+             state_file = {}\n\n\
              [logging]\n\
-             directory = \"{}\"\n{mitm}",
-            root.join("state/state.json").display(),
-            root.join("log").display(),
+             directory = {}\n{mitm}",
+            crate::harness::toml_path(&root.join("state/state.json")),
+            crate::harness::toml_path(&root.join("log")),
         ),
     );
     let output = Command::new(binary())
         .args(["--config", &config.display().to_string(), "serve"])
         .env("PATH", root.join("no-browser-on-path"))
-        .env("HOME", root.join("home"))
+        .envs(crate::harness::platform_home(&root.join("home")))
         .stdin(Stdio::null())
         .output()
         .expect("start the binary under test");
@@ -3939,8 +3943,8 @@ async fn absolute_form_is_sent_to_the_corporate_proxy() {
     );
 }
 
-/// `ca rotate` while the proxy
-/// listener serves, and the next intercepted handshake presents the new
+/// A staged CA leaves the presented leaf alone; `ca rotate --now` while the
+/// proxy listener serves, and the next intercepted handshake presents the new
 /// leaf: made with the new CA file as the only trust anchor, it succeeds
 /// and the probe host reports the new fingerprint, while the tunnel opened
 /// before the rotation keeps serving on the leaf it negotiated. The
@@ -3974,8 +3978,25 @@ async fn a_rotated_ca_is_live_on_the_listener() {
         "the leaf in force at start"
     );
 
-    // Rotate while the listener serves.
+    // A staged CA: new handshakes still present the current leaf.
     let envelope = instance.cli_json(&["ca", "rotate", "--yes"], None);
+    assert_eq!(envelope["ok"], true, "staged: {envelope}");
+    let mut staged_tunnel = intercept(
+        proxy,
+        "probe.jaynshare.invalid:443",
+        None,
+        &ca,
+        Offer::alpn(&["http/1.1"]),
+    )
+    .await
+    .expect("the current CA still validates the leaf");
+    let answer = staged_tunnel
+        .send(staged_tunnel.request(Method::GET, "probe.jaynshare.invalid", "/", ""))
+        .await;
+    assert_eq!(answer.json()["ca_fingerprint"], old, "{}", answer.text());
+
+    // Rotate now while the listener serves.
+    let envelope = instance.cli_json(&["ca", "rotate", "--now", "--yes"], None);
     assert_eq!(envelope["ok"], true, "the rotation applied: {envelope}");
     let new = envelope["result"]["fingerprint"]
         .as_str()
@@ -3987,8 +4008,7 @@ async fn a_rotated_ca_is_live_on_the_listener() {
     // The tunnel established before the rotation keeps the leaf it
     // negotiated until it closes, so it still serves — under the
     // old trust anchor, which this client is still holding. What it reports
-    // is the CA now in force, which is how a client learns it needs the
-    // bundle.
+    // is the CA now in force, which is how a client learns it changed.
     let answer = tunnel
         .send(tunnel.request(Method::GET, "probe.jaynshare.invalid", "/", ""))
         .await;

@@ -1,40 +1,32 @@
 Jaynshare client kit
 
 This archive is the client half of a Jaynshare release: the client
-executable for each supported platform and the installer that enrols this
-machine with a pool. Your operator packages it into an enrollment bundle
-for you; you never use the kit directly.
+executable for each supported platform. `jaynshare join` fetches it from
+your pool's server and installs the one for this machine; you never use
+the kit directly.
 
 Prerequisite: Claude Code must already be installed on this machine; the
 pool serves Claude Code; it never installs it or replaces your own login.
 
-To enrol, extract the bundle you received into an empty directory, open a
-terminal in that directory and run its installer. On macOS:
+To join a pool, run the line your operator sends you:
 
-  /bin/sh ./install-macos.sh
+  jaynshare join jsi1_...
 
-On Windows, from PowerShell or the Command Prompt:
+The invite works once and expires. It names the server, the identity that
+server must present and the key its client is signed with, so the join
+refuses any other server and any other client.
 
-  powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install-windows.ps1
-
-The bypass applies to that one PowerShell process and changes no machine
-or user policy. If PowerShell still refuses the script, a policy managed by
-your organisation forbids it, and that setup is not supported.
-
-The installer shows the client id, the display name, both server origins,
-the pending expiry, the CA fingerprints (the interception CA and, for an
-HTTPS base URL, the base-URL CA) and the release, then asks for your
-confirmation and reads the one-time enrollment code at a hidden prompt. Your
-operator sends the code separately from the bundle; enter it only there.
+The join then offers to add your Claude account to the pool: you sign in
+through your browser, and the pool's sessions can draw from it.
+`jaynshare account login` does it later.
 
 Members:
   release.json, release.json.minisig, SHA256SUMS   the signed release set
-  install-*.sh|ps1, uninstall-*.sh|ps1            the installers
   payload/<platform>/jaynshare[.exe]              the client executable
 
 Using the pool
 
-Once enrolled, run `jaynshare claude` wherever you would have run Claude
+Once joined, run `jaynshare claude` wherever you would have run Claude
 Code. It starts a picker when the pool cannot choose for you: pick the
 account to serve this session and it is remembered for it. Pass
 `--account <name>` to name the account yourself, or `--auto` to let the
@@ -45,11 +37,14 @@ under your own login instead of a pool account.
 If you want plain `claude` to keep working, `jaynshare alias` makes it
 run the pool client.
 
-A private address never provides encryption. If the base URL is
-plain HTTP, the client secret and request content travel in clear on the
-private network (the CONNECT proxy exposes its proxy credential there);
-your operator mitigates this with TLS on the base URL's listener and by
-keeping the pool's network segmented.
+When the server runs another version, `jaynshare claude` and
+`jaynshare status` first replace this client with the server's, checked
+against the key the invite named.
+
+The base URL is TLS, checked against the identity the invite named. A
+private address never provides encryption: the CONNECT proxy's credential
+crosses the private network in clear, so your operator keeps that network
+segmented.
 
 What does not work through the pool
 
@@ -57,7 +52,8 @@ Claude Code's Remote Control and other account-bound features do not
 work through the pool, in either mode. A warning about connectors at
 startup is expected: it means the pool's gateway credential is in use,
 not that something is broken. Your own Claude login is never used, read
-or relayed by the pool; only the enrolled client identity travels.
+or relayed by the pool; only the enrolled client identity travels. An
+account you add to the pool signs in on its own, through your browser.
 
 If a prompt fails with a proxy-tunnel error
 

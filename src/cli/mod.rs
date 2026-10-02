@@ -10,13 +10,17 @@ mod alias;
 mod args;
 mod bundle;
 mod claude;
+mod client_accounts;
 mod control;
 mod deploy;
 mod edit;
 mod engineer;
 mod env;
 mod help;
+mod invite;
+mod join;
 mod schema;
+mod search_path;
 mod tail;
 mod trust_ca;
 mod uninstall;
@@ -33,8 +37,9 @@ use time::OffsetDateTime;
 
 use crate::audit::{AUDIT_LOG, AuditLog};
 use crate::capture::Capture;
-use crate::config;
+use crate::config::{self, ListenerTls};
 use crate::data_plane::upstream::Upstream;
+use crate::identity::{self, Identity};
 use crate::pool::refresh::{self, Trigger};
 use crate::pool::{Credential, Errored, Pool, probe};
 use crate::server::{COMMIT, Server, Stop, TARGET, VERSION};
@@ -45,14 +50,16 @@ use args::{
     OperatorSecretVerb, OperatorVerb, SecretVerb, ServerVerb, Verb,
 };
 use control::Control;
-pub(crate) use control::{error_chain, http_client, http_client_anchors, http_client_plain};
+pub(crate) use control::{
+    error_chain, http_client, http_client_anchors, http_client_pinned, http_client_plain,
+};
 use help::Role;
+pub(crate) use update::follow;
 use verbs::{
     account_add, account_availability, account_list, account_login, account_remove, account_rename,
-    account_replace, account_show, api, ca_export, ca_rotate, ca_show, client_issue, client_list,
-    client_reissue, client_rename, client_revoke, client_rotate, client_show, operation_cancel,
-    operation_code, operation_show, operator_secret_remove, operator_secret_set, probe, status,
-    switch,
+    account_replace, account_show, api, ca_export, ca_rotate, ca_show, client_list, client_rename,
+    client_revoke, client_rotate, client_show, operation_cancel, operation_code, operation_show,
+    operator_secret_remove, operator_secret_set, probe, status, switch,
 };
 
 /// A failure the envelope reports: the exit code and the error object.
@@ -101,23 +108,19 @@ fn client_installation() -> (std::path::PathBuf, bool) {
 }
 
 /// An engineer verb without an installation exits 11 naming the
-/// missing file and the installer to run.
+/// missing file and how to join.
 fn engineer_context() -> Result<(), Failure> {
     let (file, exists) = client_installation();
     if exists {
         return Ok(());
     }
-    let installer = if cfg!(target_os = "windows") {
-        "install-windows.ps1"
-    } else {
-        "install-macos.sh"
-    };
     Err(Failure::local(
         11,
         "cli_not_enrolled",
         format!(
-            "this machine is not enrolled: {} is missing; run the enrollment bundle's {installer}",
-            file.display()
+            "this machine is not enrolled: {} is missing; {}",
+            file.display(),
+            crate::client::JOIN_HINT
         ),
     ))
 }
@@ -260,6 +263,9 @@ pub fn main() -> i32 {
     let dual = match verb {
         Verb::Status(args) => Some(dual_role(&cli, args.operator, args.client)),
         Verb::Api(args) => Some(dual_role(&cli, args.operator, args.client)),
+        Verb::Account {
+            verb: AccountVerb::Login(_) | AccountVerb::List,
+        } => Some(dual_role(&cli, false, false)),
         _ => None,
     };
     // The deploy verbs are file-backed, with no control connection.
@@ -275,13 +281,12 @@ pub fn main() -> i32 {
     // configuration is read, the installation (or the bundle) is the context.
     let engineer_direct = matches!(
         verb,
-        Verb::Enrol { .. }
+        Verb::Join { .. }
             | Verb::Secret { .. }
-            | Verb::CaUpdate { .. }
             | Verb::Update { .. }
             | Verb::Uninstall
             | Verb::TrustCa { .. }
-    ) || matches!(verb, Verb::Status(_) | Verb::Api(_) if dual == Some(Role::Engineer));
+    ) || matches!(verb, Verb::Status(_) | Verb::Api(_) | Verb::Account { .. } if dual == Some(Role::Engineer));
     if engineer_direct {
         if let Some(refusal) = later_verb_refusal(&cli, verb, path, role, dual) {
             if matches!(verb, Verb::Status(args) if args.check) {
@@ -297,14 +302,10 @@ pub fn main() -> i32 {
             match verb {
                 Verb::Status(args) => engineer::status(&cli, args).await,
                 Verb::Api(args) => engineer::api(&cli, args).await,
-                Verb::Enrol {
-                    bundle,
-                    trust_os_store,
-                } => engineer::enrol(&cli, bundle, *trust_os_store).await,
+                Verb::Join { invite } => join::join(&cli, invite).await,
                 Verb::Secret {
                     verb: SecretVerb::Set { channel },
                 } => engineer::secret_set(&cli, channel).await,
-                Verb::CaUpdate { from } => engineer::ca_update(&cli, from).await,
                 Verb::Update {
                     from,
                     version,
@@ -322,6 +323,12 @@ pub fn main() -> i32 {
                 Verb::TrustCa { verb } => {
                     trust_ca::trust_ca(&cli, matches!(verb, args::TrustCaVerb::Add)).await
                 }
+                Verb::Account {
+                    verb: AccountVerb::Login(args),
+                } => client_accounts::account_login(&cli, args).await,
+                Verb::Account {
+                    verb: AccountVerb::List,
+                } => client_accounts::account_list(&cli).await,
                 _ => unreachable!("engineer_direct"),
             }
         });
@@ -390,35 +397,10 @@ pub fn main() -> i32 {
             Verb::Client { verb } => match verb {
                 ClientVerb::List => client_list(&control).await,
                 ClientVerb::Show { id } => client_show(&control, id).await,
-                ClientVerb::Issue {
-                    id,
-                    name,
-                    disclose_to,
-                } => client_issue(&control, &cli, id, name, disclose_to.as_deref()).await,
-                ClientVerb::Bundle { id, kit, out } => {
-                    bundle::validate_client_id(id)?;
-                    bundle::client_bundle(&control, id, kit, out).await
+                ClientVerb::Invite(args) => invite::client_invite(&control, &cli, args).await,
+                ClientVerb::Reissue { id, terms } => {
+                    invite::client_reissue(&control, &cli, id, terms).await
                 }
-                ClientVerb::Enrol { id, name, kit, out } => {
-                    bundle::client_enrol(&control, id, name, kit, out).await
-                }
-                ClientVerb::Reissue {
-                    id,
-                    kit,
-                    out,
-                    disclose_to,
-                } => match (kit, out) {
-                    // The packaging half repacks for the new
-                    // generation; the bare form is the registry call alone.
-                    (Some(kit), Some(out)) => {
-                        bundle::client_reissue(&control, &cli, id, kit, out, disclose_to.as_deref())
-                            .await
-                    }
-                    (None, None) => {
-                        client_reissue(&control, &cli, id, disclose_to.as_deref()).await
-                    }
-                    _ => unreachable!("clap requires --kit and --out together"),
-                },
                 ClientVerb::Rotate { id, disclose_to } => {
                     client_rotate(&control, &cli, id, disclose_to.as_deref()).await
                 }
@@ -436,15 +418,12 @@ pub fn main() -> i32 {
                 OperatorSecretVerb::Remove => operator_secret_remove(&control).await,
             },
             Verb::Ca {
-                verb: CaVerb::Rotate,
-            } => ca_rotate(&control, &cli).await,
+                verb: CaVerb::Rotate { now },
+            } => ca_rotate(&control, &cli, *now).await,
             Verb::Ca { verb: CaVerb::Show } => ca_show(&control).await,
             Verb::Ca {
                 verb: CaVerb::Export { out },
             } => ca_export(&control, out.as_deref()).await,
-            Verb::Ca {
-                verb: CaVerb::UpdateBundle { out },
-            } => bundle::ca_update_bundle(&control, out).await,
             Verb::Route { verb } => edit::route(&control, &cli, verb).await,
             Verb::Priority { verb } => edit::priority(&control, verb).await,
             Verb::Block { verb } => edit::block(&control, verb).await,
@@ -478,7 +457,7 @@ fn later_verb_refusal(
         verb,
         Verb::Server {
             verb: ServerVerb::Uninstall { purge: true }
-        } | Verb::Enrol { .. }
+        }
     );
     if interactive_only {
         if cli.yes {
@@ -499,25 +478,21 @@ fn later_verb_refusal(
         }
     }
     match dual.unwrap_or(role) {
-        // `secret set` and `ca-update` replace installation files, so they
-        // need one; `enrol` creates one and gates itself (its interactive
-        // check ran above); the engineer `status` form needs its files
-        // too.
+        // `secret set` replaces an installation file, so it needs one;
+        // `join` creates one and gates itself; the engineer `status` form
+        // needs its files too.
         Role::Engineer
             if matches!(
                 verb,
-                Verb::Secret { .. }
-                    | Verb::CaUpdate { .. }
-                    | Verb::Update { .. }
-                    | Verb::Uninstall
-                    | Verb::TrustCa { .. }
+                Verb::Secret { .. } | Verb::Update { .. } | Verb::Uninstall | Verb::TrustCa { .. }
             ) =>
         {
             engineer_context().err()
         }
-        Role::Engineer if matches!(verb, Verb::Enrol { .. }) => None,
+        Role::Engineer if matches!(verb, Verb::Join { .. }) => None,
         Role::Engineer
-            if matches!(verb, Verb::Status(_) | Verb::Api(_)) && dual == Some(Role::Engineer) =>
+            if matches!(verb, Verb::Status(_) | Verb::Api(_) | Verb::Account { .. })
+                && dual == Some(Role::Engineer) =>
         {
             engineer_context().err()
         }
@@ -632,9 +607,7 @@ fn verb_path(verb: &Verb) -> &'static str {
         Verb::Client { verb } => match verb {
             ClientVerb::List => "client list",
             ClientVerb::Show { .. } => "client show",
-            ClientVerb::Issue { .. } => "client issue",
-            ClientVerb::Bundle { .. } => "client bundle",
-            ClientVerb::Enrol { .. } => "client enrol",
+            ClientVerb::Invite(_) => "client invite",
             ClientVerb::Reissue { .. } => "client reissue",
             ClientVerb::Rotate { .. } => "client rotate",
             ClientVerb::Revoke { .. } => "client revoke",
@@ -649,8 +622,7 @@ fn verb_path(verb: &Verb) -> &'static str {
         Verb::Ca { verb } => match verb {
             CaVerb::Show => "ca show",
             CaVerb::Export { .. } => "ca export",
-            CaVerb::Rotate => "ca rotate",
-            CaVerb::UpdateBundle { .. } => "ca update-bundle",
+            CaVerb::Rotate { .. } => "ca rotate",
         },
         Verb::Config { verb } => match verb {
             ConfigVerb::Paths => "config paths",
@@ -680,6 +652,7 @@ fn verb_path(verb: &Verb) -> &'static str {
             ServerVerb::Update { .. } => "server update",
             ServerVerb::Uninstall { .. } => "server uninstall",
             ServerVerb::Prune { .. } => "server prune",
+            ServerVerb::AutoUpdate { .. } => "server auto-update",
         },
         Verb::Service { verb } => match verb {
             ServiceVerb::Install => "service install",
@@ -692,9 +665,8 @@ fn verb_path(verb: &Verb) -> &'static str {
         Verb::Claude(_) => "claude",
         Verb::Env(_) => "env",
         Verb::Alias { .. } => "alias",
-        Verb::Enrol { .. } => "enrol",
+        Verb::Join { .. } => "join",
         Verb::Update { .. } => "update",
-        Verb::CaUpdate { .. } => "ca-update",
         Verb::TrustCa { verb } => match verb {
             TrustCaVerb::Add => "trust-ca add",
             TrustCaVerb::Remove => "trust-ca remove",
@@ -865,9 +837,14 @@ fn serve_inner(cli: &Cli) -> Result<i32, (i32, String)> {
     if let Some(dir) = state_path.parent() {
         protected.push(("state directory", dir.to_path_buf()));
     }
-    if let Some(tls) = &cfg.data_plane.tls {
+    if let Some(tls) = cfg.data_plane.tls.files() {
         protected.push(("TLS private key", tls.private_key_file.clone()));
     }
+    let state_dir = state_path.parent().map_or_else(
+        || std::path::PathBuf::from("."),
+        std::path::Path::to_path_buf,
+    );
+    protected.push(("server identity key", state_dir.join(identity::KEY_FILE)));
     for (what, p) in &protected {
         state::check_private(p).map_err(|m| preflight(what, p, m))?;
     }
@@ -914,13 +891,19 @@ fn serve_inner(cli: &Cli) -> Result<i32, (i32, String)> {
     };
     let upstream =
         Upstream::new(&cfg.data_plane).map_err(|m| (23, format!("upstream client: {m}")))?;
-    // The TLS pair, if both files are set, is loaded and matched before the bind.
+    // The identity exists whatever the transport, so a plain-HTTP server's
+    // clients learn its pin before TLS is turned on.
+    let identity = Identity::load_or_generate(&state_dir)
+        .map_err(|m| (23, format!("server identity: {m}")))?;
+    // The listener's certificate, the identity's or the operator's matched
+    // pair, is ready before the bind.
     let tls = match &cfg.data_plane.tls {
-        Some(files) => {
-            Some(data_plane::tls::prepare(files).map_err(|m| (23, format!("TLS listener: {m}")))?)
-        }
-        None => None,
-    };
+        ListenerTls::Off => None,
+        ListenerTls::Identity => Some(data_plane::tls::identity(&identity)),
+        ListenerTls::Certificate(files) => Some(data_plane::tls::prepare(files)),
+    }
+    .transpose()
+    .map_err(|m| (23, format!("TLS listener: {m}")))?;
     let now = OffsetDateTime::now_utc();
     // Every preflight open succeeded: the one pre-bind state change (an
     // expired family with nothing to refresh it) may be written now.
@@ -964,10 +947,6 @@ fn serve_inner(cli: &Cli) -> Result<i32, (i32, String)> {
 
     let listen_addr = cfg.data_plane.listen;
     let mitm = cfg.mitm.clone();
-    let ca_state_dir = state_path.parent().map_or_else(
-        || std::path::PathBuf::from("."),
-        std::path::Path::to_path_buf,
-    );
     let runtime = tokio::runtime::Runtime::new().map_err(|e| (1, format!("runtime: {e}")))?;
     runtime.block_on(async move {
         // Before the first write the logs can fail: a file-size limit is an
@@ -995,23 +974,26 @@ fn serve_inner(cli: &Cli) -> Result<i32, (i32, String)> {
         // stops the start: base-URL mode and tunnelled targets keep serving
         // and intercepted targets answer 503.
         let started = OffsetDateTime::now_utc();
-        let ca = match mitm.enabled {
-            true => match crate::mitm::ca::Ca::load_or_generate(&ca_state_dir, started) {
-                Ok(ca) => {
-                    ca.warn_expiry(started);
-                    Some(Arc::new(ca))
+        let authorities = match mitm.enabled {
+            true => match mitm::ca::Authorities::load(&state_dir, started) {
+                Ok(authorities) => {
+                    if let (Some(current), None) = (&authorities.current, &authorities.next) {
+                        current.warn_expiry(started);
+                    }
+                    authorities
                 }
                 Err(e) => {
                     tracing::error!(event = "ca_unusable", error = %e, "the CA trust material is unusable; intercepted targets answer 503");
-                    None
+                    mitm::ca::Authorities::default()
                 }
             },
-            false => None,
+            false => mitm::ca::Authorities::default(),
         };
         let listen = listener.local_addr().map_err(|e| (1, e.to_string()))?;
         let (path, digest) = (loaded.path.clone(), loaded.digest.clone());
         let server = Arc::new(Server::new(loaded, durable, pool, audit, capture, upstream));
-        server.set_mitm_ca(ca);
+        *server.mitm_authorities() = authorities;
+        server.set_identity(identity.pin());
         if restored_quota_changed {
             server.mark_quota_dirty();
         }
@@ -1028,7 +1010,7 @@ fn serve_inner(cli: &Cli) -> Result<i32, (i32, String)> {
             format!(" upstream {} verified against the system trust store", server.upstream.origin())
         };
         // The one startup line; the scheme names the transport.
-        let scheme = if server.config().config.data_plane.tls.is_some() { "https" } else { "http" };
+        let scheme = if server.config().config.data_plane.tls.is_on() { "https" } else { "http" };
         println!("jaynshare {VERSION} listening on {scheme}://{listen} configuration {} digest {digest}{upstream_note}", path.display());
         tracing::info!(event = "server_started", listen = %listen, configuration = %path.display(), digest = %digest, upstream = %server.upstream.origin(), upstream_override = server.upstream.override_active(), "server started");
         // The bootstrap exception says so, once, until it ends.
@@ -1041,6 +1023,7 @@ fn serve_inner(cli: &Cli) -> Result<i32, (i32, String)> {
 
         tokio::spawn(quota_flusher(Arc::clone(&server)));
         tokio::spawn(probe::scheduler(Arc::clone(&server)));
+        tokio::spawn(mitm::ca::switch_when_due(Arc::clone(&server)));
         tokio::spawn(signals(Arc::clone(&server), signal_set));
         tokio::spawn(mitm::listener::serve(
             Arc::clone(&server),

@@ -203,15 +203,12 @@ def build(payload_dir: str, key_path: str, out_path: str,
     for root, _, files in os.walk(payload_dir):
         for name in files:
             path = os.path.join(root, name)
-            member = os.path.relpath(path, payload_dir)
+            # A ZIP member name separates with `/` on every platform.
+            member = os.path.relpath(path, payload_dir).replace(os.sep, "/")
             with open(path, "rb") as handle:
                 members[member] = handle.read()
     required = [
         "README.txt",
-        "install-macos.sh",
-        "uninstall-macos.sh",
-        "install-windows.ps1",
-        "uninstall-windows.ps1",
         "payload/macos-x86_64/jaynshare",
         "payload/macos-aarch64/jaynshare",
         "payload/windows-x86_64/jaynshare.exe",
@@ -222,7 +219,7 @@ def build(payload_dir: str, key_path: str, out_path: str,
     # The kit's own release.json binds every member; its file-level
     # length/digest are null (the outer release set's concern), and
     # SHA256SUMS agrees with it. A release build stamps its own version and
-    # commit in the bundle manifest; placeholder kits keep the placeholders.
+    # commit; placeholder kits keep the placeholders.
     member_map = [
         {
             "path": name,

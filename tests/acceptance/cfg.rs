@@ -34,9 +34,9 @@ fn write_config(root: &Path, extra: &str) -> PathBuf {
     write_private(
         &path,
         &format!(
-            "version = 1\n[storage]\nstate_file = \"{}\"\n[logging]\ndirectory = \"{}\"\n{extra}",
-            root.join("state/state.json").display(),
-            root.join("log").display(),
+            "version = 1\n[storage]\nstate_file = {}\n[logging]\ndirectory = {}\n{extra}",
+            crate::harness::toml_path(&root.join("state/state.json")),
+            crate::harness::toml_path(&root.join("log")),
         ),
     );
     path
@@ -47,7 +47,7 @@ fn write_config(root: &Path, extra: &str) -> PathBuf {
 fn serve_fails(root: &Path, config: &Path) -> (i32, String) {
     let output = Command::new(binary())
         .args(["--config", &config.display().to_string(), "serve"])
-        .env("HOME", root.join("home"))
+        .envs(crate::harness::platform_home(&root.join("home")))
         .env("PATH", root.join("no-browser-on-path"))
         .output()
         .expect("run serve");
@@ -63,7 +63,7 @@ fn run(root: &Path, config: &Path, args: &[&str]) -> (i32, String, String) {
     full.extend_from_slice(args);
     let output = Command::new(binary())
         .args(&full)
-        .env("HOME", root.join("home"))
+        .envs(crate::harness::platform_home(&root.join("home")))
         .env_remove("JAYNSHARE_CONFIG")
         .env_remove("VISUAL")
         .env_remove("EDITOR")
@@ -109,6 +109,10 @@ fn minimal_document_is_every_default_and_bytes_unchanged() {
     assert_eq!(effective["data_plane"]["egress"]["mode"], "off");
     assert_eq!(effective["mitm"]["listen"], "127.0.0.1:17422");
     assert_eq!(effective["clients"]["enrollment_lifetime_seconds"], 86400);
+    assert_eq!(
+        effective["clients"]["kit_file"],
+        "/opt/jaynshare/current/client-kit.zip"
+    );
     assert_eq!(effective["logging"]["level"], "info");
     assert_eq!(effective["logging"]["max_bytes"], 10_485_760);
     assert_eq!(effective["logging"]["retained_files"], 5);
@@ -231,7 +235,6 @@ fn relative_paths_resolve_to_the_config_directory_without_expansion() {
 #[test]
 fn platform_paths_with_no_override() {
     let _leak_sweep = crate::leaks::LeakGuard::default();
-    let _leak_sweep = crate::leaks::LeakGuard::default();
     let home = scratch("platform-paths-no-override").join("home");
     private_dir(&home);
     let env = isolated_env(&home);
@@ -250,6 +253,11 @@ fn platform_paths_with_no_override() {
         expect("state", "Application Support/Jaynshare/state.json");
         expect("log_directory", "Logs/Jaynshare");
         expect("client_directory", "Application Support/Jaynshare/client");
+    } else if cfg!(windows) {
+        expect("configuration", r"AppData\Roaming\Jaynshare\config.toml");
+        expect("state", r"AppData\Local\Jaynshare\state.json");
+        expect("log_directory", r"AppData\Local\Jaynshare\log");
+        expect("client_directory", r"AppData\Roaming\Jaynshare\client");
     } else {
         expect("configuration", "jaynshare/config.toml");
         expect("state", "jaynshare/state.json");
@@ -352,8 +360,8 @@ step_interval_ms = 1
 window_seconds = 1
 [data_plane]
 listen = "127.0.0.1:18421"
-tls_certificate_file = "{}"
-tls_private_key_file = "{}"
+tls_certificate_file = {}
+tls_private_key_file = {}
 upstream_origin = "http://127.0.0.1:9"
 max_connections = 1
 first_byte_timeout_seconds = 1
@@ -375,8 +383,8 @@ wire_capture_directory = "./capture-custom"
 enabled = true
 listen = "127.0.0.1:18422"
 "#,
-            certificate.display(),
-            private_key.display()
+            toml_path(&certificate),
+            toml_path(&private_key)
         ),
     );
 
@@ -821,8 +829,8 @@ async fn capture_keeps_the_audit_and_a_nested_capture_is_rejected() {
     let config = write_config(
         &root,
         &format!(
-            "[diagnostics]\nwire_capture_directory = \"{}\"\n",
-            root.join("log/cap").display()
+            "[diagnostics]\nwire_capture_directory = {}\n",
+            crate::harness::toml_path(&root.join("log/cap"))
         ),
     );
     let (code, _, stderr) = run(&root, &config, &["config", "validate"]);
@@ -1741,7 +1749,7 @@ fn spawn_serve(root: &Path, config: &Path) -> std::process::Child {
     let err = fs::File::create(root.join("stderr.txt")).expect("stderr");
     let mut child = Command::new(binary())
         .args(["--config", &config.display().to_string(), "serve"])
-        .env("HOME", root.join("home"))
+        .envs(crate::harness::platform_home(&root.join("home")))
         .env("PATH", root.join("no-browser-on-path"))
         .stdout(Stdio::from(out))
         .stderr(Stdio::from(err))

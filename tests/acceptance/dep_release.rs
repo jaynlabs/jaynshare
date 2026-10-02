@@ -3,11 +3,11 @@
 //! production `release.pub` store.
 
 #[allow(unused_imports)]
-use crate::bundle::config_root;
+use crate::enrol::config_root;
 #[allow(unused_imports)]
 use crate::harness::{Value, binary, cli_raw, isolated_env, private_dir, scratch};
 #[allow(unused_imports)]
-use crate::release_fx::{FIXTURE_VERSION, ReleaseKey, write_release};
+use crate::release_fx::{FIXTURE_VERSION, ReleaseKey, host_target, write_release};
 
 use std::path::{Path, PathBuf};
 
@@ -184,7 +184,9 @@ async fn the_active_key_and_the_rotation_overlap() {
     );
     let (bytes, mode) = store(&home);
     assert_eq!(bytes, key_b.public_file(), ": B is admitted");
-    assert_eq!(mode, 0o644, "the admitted key's mode");
+    if cfg!(unix) {
+        assert_eq!(mode, 0o644, "the admitted key's mode");
+    }
 
     // After the admission B alone is the active key.
     let release = write_release(&dir("after-overlap-b"), &key_b, |_| {}, |_| {});
@@ -324,7 +326,7 @@ async fn an_idle_server_makes_no_release_request() {
 // ------------------------------------------------------------------ scenarios
 
 /// One release set, one version, only the allowed files:
-/// `tools/release/build.py` produces the six artifacts plus
+/// `tools/release/build.py` produces the nine artifacts plus
 /// the three release-set files, each archive holding exactly its
 /// four entries, the host archive's executable being the binary under test,
 /// and `release verify` accepting the set under the minted key.
@@ -396,7 +398,7 @@ async fn one_release_set_one_version_only_the_allowed_files() {
         "the four placeholder targets are announced on stderr: {stderr}"
     );
 
-    // Exactly the six artifacts plus the three release-set files.
+    // Exactly the nine artifacts plus the three release-set files.
     let mut files: Vec<String> = std::fs::read_dir(&out)
         .expect("release directory")
         .map(|entry| {
@@ -424,7 +426,12 @@ async fn one_release_set_one_version_only_the_allowed_files() {
                 format!("jaynshare-{version}-{target}.tar.gz")
             }
         })
-        .chain([format!("jaynshare-{version}-client-kit.zip")])
+        .chain([
+            format!("jaynshare-{version}-client-kit.zip"),
+            "install.ps1".to_owned(),
+            "install.sh".to_owned(),
+            "quickstart.sh".to_owned(),
+        ])
         .collect::<Vec<_>>();
     artifacts.sort();
     let mut expected = artifacts.clone();
@@ -491,10 +498,15 @@ async fn one_release_set_one_version_only_the_allowed_files() {
     }
 
     // The host archive's executable is the binary under test
-    // and reports the same `version`.
+    // and reports the same `version`. Windows' own `tar` reads a ZIP too.
     let extract = root.join("extract");
     std::fs::create_dir_all(&extract).expect("extract directory");
-    let host_archive = out.join(format!("jaynshare-{version}-{host}.tar.gz"));
+    let (host_extension, host_executable) = if cfg!(windows) {
+        ("zip", "jaynshare.exe")
+    } else {
+        ("tar.gz", "jaynshare")
+    };
+    let host_archive = out.join(format!("jaynshare-{version}-{host}.{host_extension}"));
     let extracted = std::process::Command::new("tar")
         .args([
             "xzf",
@@ -507,7 +519,7 @@ async fn one_release_set_one_version_only_the_allowed_files() {
     assert!(extracted.success(), "tar xzf the host archive");
     let extracted_bin = extract
         .join(format!("jaynshare-{version}-{host}"))
-        .join("jaynshare")
+        .join(host_executable)
         .canonicalize()
         .expect("the extracted executable");
     let shipped = std::process::Command::new(&extracted_bin)
@@ -526,7 +538,7 @@ async fn one_release_set_one_version_only_the_allowed_files() {
     );
 
     // Release.json parses, agrees with SHA256SUMS, and carries the
-    // six artifacts.
+    // nine artifacts.
     let manifest: serde_json::Value = serde_json::from_slice(
         &std::fs::read(out.join("release.json")).expect("read release.json"),
     )
@@ -536,7 +548,7 @@ async fn one_release_set_one_version_only_the_allowed_files() {
     assert_eq!(manifest["commit"], commit);
     assert_eq!(
         manifest["artifacts"].as_array().expect("artifacts").len(),
-        6
+        9
     );
     let sums = std::fs::read(out.join("SHA256SUMS")).expect("read SHA256SUMS");
     assert_eq!(
@@ -546,7 +558,7 @@ async fn one_release_set_one_version_only_the_allowed_files() {
     );
 
     // `release verify` accepts the whole set under the minted key.
-    let config = crate::bundle::config_root(&home);
+    let config = crate::enrol::config_root(&home);
     crate::harness::private_dir(&config);
     std::fs::write(
         config.join("release.pub"),
@@ -561,18 +573,8 @@ async fn one_release_set_one_version_only_the_allowed_files() {
     assert_eq!(code, 0, "{stdout}{stderr}");
 }
 
-/// the target for the machine the suite runs on.
-fn host_target() -> &'static str {
-    match (std::env::consts::ARCH, std::env::consts::OS) {
-        ("x86_64", "macos") => "x86_64-apple-darwin",
-        ("aarch64", "macos") => "aarch64-apple-darwin",
-        ("x86_64", "linux") => "x86_64-unknown-linux-musl",
-        ("aarch64", "linux") => "aarch64-unknown-linux-musl",
-        _ => panic!("no release target for this machine"),
-    }
-}
-
-/// `release fetch` (the explicit release-host contact): the four files come from the named mirror and nothing
+/// `release fetch` (the explicit release-host contact): the release set,
+/// the archive and the client kit come from the named mirror and nothing
 /// else is requested; a redirect is followed only within the mirror's host; a
 /// mirror that is not plain `https` is a usage error; a
 /// tampered archive is a release failure; a stopped host is unreachable.
@@ -670,7 +672,8 @@ async fn release_fetch_contacts_only_the_named_origin() {
     });
     let origin = format!("https://localhost:{}", addr.port());
 
-    // The happy leg: exactly the four files, from this origin only.
+    // The happy leg: the release set, this host's archive and the client
+    // kit, from this origin only.
     let out = root.join("out");
     let (code, stdout, stderr) = cli_raw(
         &[
@@ -695,7 +698,7 @@ async fn release_fetch_contacts_only_the_named_origin() {
             artifact_names(FIXTURE_VERSION)
                 .into_iter()
                 .filter(|(_, purpose, target)| {
-                    *purpose == "platform" && *target == Some(host_target())
+                    *purpose == "client-kit" || *target == Some(host_target())
                 })
                 .map(|(name, _, _)| name),
         )
@@ -1143,6 +1146,7 @@ use crate::linux_fx::head_commit;
 /// version, the signing key and all five `--bin` lines, and `gh release
 /// create` receives absolute asset paths and creates the tag at the built
 /// commit. A seed inside the repository is refused before anything runs.
+#[cfg(unix)]
 #[test]
 fn publish_script_runs_cross_build_publish_in_order() {
     let _leak_sweep = crate::leaks::LeakGuard::default();

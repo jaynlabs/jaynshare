@@ -37,8 +37,7 @@ fn assert_envelope(envelope: &Value, command: &str, dual_role: bool) {
 
 /// The release surface's top-level help, per-verb help and JSON
 /// schemas agree on exactly one verb set; the retained vocabulary is present,
-/// `enrol`/`enroll` is the only alias pair, and there is no watch/full-screen
-/// status verb.
+/// and there is no alias and no watch/full-screen status verb.
 #[test]
 fn help_grammar_and_schema_name_one_verb_set() {
     let _leak_sweep = crate::leaks::LeakGuard::default();
@@ -91,11 +90,7 @@ fn help_grammar_and_schema_name_one_verb_set() {
                 .any(|path| path == word || path.starts_with(&format!("{word} ")))
         );
     }
-    let (_, enrol, _) = cli_raw(&["enrol", "--help"], &env, None);
-    let (code, enroll, stderr) = cli_raw(&["enroll", "--help"], &env, None);
-    assert_eq!(code, 0, "{stderr}");
-    assert_eq!(enrol, enroll, "enrol/enroll is one verb");
-    for alias in ["watch", "tui", "routes", "logs", "account ls"] {
+    for alias in ["enroll", "watch", "tui", "routes", "logs", "account ls"] {
         let args: Vec<_> = alias.split_whitespace().collect();
         assert_eq!(cli_raw(&args, &env, None).0, 2, "unexpected alias {alias}");
     }
@@ -476,7 +471,7 @@ async fn two_streams_quiet_and_one_document() {
     // --json: one document, the envelope's members, nothing else on stdout.
     for (args, command, dual) in [
         (vec!["status"], "status", true),
-        (vec!["account", "list"], "account list", false),
+        (vec!["account", "list"], "account list", true),
         (vec!["switch", "FSUB"], "switch", false),
         (vec!["account", "show", "nobody"], "account show", false),
         (vec!["config", "validate"], "config validate", false),
@@ -496,6 +491,8 @@ async fn two_streams_quiet_and_one_document() {
 
 /// Colour appears only on a terminal; `NO_COLOR`, `--no-color`
 /// and a pipe each remove every escape sequence and leave the same facts.
+// Driven through a Unix pseudo-terminal.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn colour_only_on_a_terminal_and_the_same_facts_without() {
     let _leak_sweep = crate::leaks::LeakGuard::default();
@@ -973,31 +970,33 @@ async fn every_json_document_validates_against_its_schema() {
         json!({ "control_api_version": 1, "captured_at": "2026-01-01T00:00:00Z", "clients": [] }),
         "{envelope}"
     );
-    let body_file = instance.root.join("issue-body.json");
-    fs::write(
-        &body_file,
-        json!({ "id": "cmp-1", "display_name": "Cmp One" }).to_string(),
-    )
-    .expect("write body");
-    let body_file = body_file.display().to_string();
+    for (id, name) in [("cmp-1", "Cmp One"), ("cmp-2", "Cmp Two")] {
+        let issued = control_post(
+            instance.addr,
+            "/control/v1/clients",
+            &[],
+            json!({ "id": id, "display_name": name }),
+        )
+        .await;
+        assert_eq!(issued.status, StatusCode::CREATED, "{issued:?}");
+    }
     let direct: Value = serde_json::from_str(
         &instance
             .cli(
                 &[
                     "api",
                     "POST",
-                    "/control/v1/clients",
-                    "--body-file",
-                    &body_file,
+                    "/control/v1/clients/cmp-1/revoke",
+                    "--body-stdin",
                 ],
-                None,
+                Some("{}"),
             )
             .1,
     )
     .expect("control body");
-    let envelope = instance.cli_json(&["client", "issue", "cmp-2", "--name", "Cmp Two"], None);
-    // The body shape, exactly the server's members; the times and the code
-    // are the call's own (two calls never agree on a timestamp).
+    let envelope = instance.cli_json(&["client", "revoke", "cmp-2", "--yes"], None);
+    // The body shape, exactly the server's members; the times are the
+    // call's own (two calls never agree on a timestamp).
     let result = envelope["result"]
         .as_object()
         .unwrap_or_else(|| panic!("result object: {envelope}"));
@@ -1189,8 +1188,8 @@ async fn every_exit_row_once_and_novel_slugs_by_class() {
     let (code, _, stderr) = cli_raw(&["alias"], &env, None);
     assert_eq!(code, 11, "{stderr}");
     assert!(
-        stderr.contains("client.toml") && stderr.contains("install-"),
-        "names the file and the installer: {stderr}"
+        stderr.contains("client.toml") && stderr.contains("jaynshare join"),
+        "names the file and the join: {stderr}"
     );
 
     // the registry rows from the live instance — a
@@ -1200,8 +1199,14 @@ async fn every_exit_row_once_and_novel_slugs_by_class() {
     assert_eq!((code, slug.as_str()), (6, "client_not_found"));
     let (code, slug, _) = local(&["client", "show", "BAD_ID"], None);
     assert_eq!((code, slug.as_str()), (2, "cli_usage"));
-    let (code, slug, _) = local(&["client", "issue", "app-1", "--name", "App"], None);
-    assert_eq!(code, 0, "{slug}");
+    let issued = control_post(
+        instance.addr,
+        "/control/v1/clients",
+        &[],
+        json!({ "id": "app-1", "display_name": "App" }),
+    )
+    .await;
+    assert_eq!(issued.status, StatusCode::CREATED, "{issued:?}");
     let (code, slug, _) = local(&["client", "rotate", "app-1"], None);
     assert_eq!((code, slug.as_str()), (8, "conflict"));
     produced.append(&mut fake_rows);
@@ -1244,6 +1249,8 @@ async fn every_exit_row_once_and_novel_slugs_by_class() {
 /// world-readable file is refused; 64 KiB + 1 on standard input is refused;
 /// no terminal and no channel is exit 2 naming the three; the secret appears
 /// in no argv, file the CLI writes, log or message.
+// Driven through a Unix pseudo-terminal.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn secret_channels_and_no_leak() {
     let _leak_sweep = crate::leaks::LeakGuard::default();
@@ -1522,6 +1529,8 @@ async fn references_resolve_before_use() {
 /// where allowed and no terminal without it is 21; the interactive-only
 /// verbs refuse `--yes` (21) and exit 21 without a terminal. The
 /// half: `account remove` live, the others at the grammar.
+// Driven through a Unix pseudo-terminal.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn confirmations_refused_skipped_and_interactive_only() {
     let _leak_sweep = crate::leaks::LeakGuard::default();
@@ -1568,32 +1577,25 @@ async fn confirmations_refused_skipped_and_interactive_only() {
     assert_eq!(envelope["exit_code"], 0, "{envelope}");
     assert_eq!(instance.status()["accounts"].as_array().unwrap().len(), 0);
 
-    // Interactive-only verbs: --yes is never accepted, and no terminal is 21.
+    // The interactive-only verb: --yes is never accepted, and no terminal is 21.
     // `server install` is not one: the trust statements live in the
     // deployment guide, it asks nothing; its refusals are the deploy exit rows.
-    for args in [
-        vec!["server", "uninstall", "--purge", "--yes"],
-        vec!["enrol", "--bundle", "/nonexistent", "--yes"],
-    ] {
-        let (code, _, stderr) = cli_raw(&args, &env, None);
-        assert_eq!(code, 21, "{args:?}: {stderr}");
-        assert!(
-            stderr.contains("--yes"),
-            "{args:?} says --yes is not accepted: {stderr}"
-        );
-    }
-    for args in [
-        vec!["server", "uninstall", "--purge"],
-        vec!["enrol", "--bundle", "/nonexistent"],
-    ] {
-        let (code, _, stderr) = cli_raw(&args, &env, None);
-        assert_eq!(code, 21, "{args:?} without a terminal: {stderr}");
-    }
+    let (code, _, stderr) = cli_raw(&["server", "uninstall", "--purge", "--yes"], &env, None);
+    assert_eq!(code, 21, "{stderr}");
+    assert!(stderr.contains("--yes"), "--yes is not accepted: {stderr}");
+    let (code, _, stderr) = cli_raw(&["server", "uninstall", "--purge"], &env, None);
+    assert_eq!(code, 21, "without a terminal: {stderr}");
 
     // `client revoke` asks too. A refused
     // answer changes nothing; `--yes` is accepted without a terminal.
-    let envelope = instance.cli_json(&["client", "issue", "rev-1", "--name", "Rev One"], None);
-    assert_eq!(envelope["ok"], true, "{envelope}");
+    let issued = control_post(
+        instance.addr,
+        "/control/v1/clients",
+        &[],
+        json!({ "id": "rev-1", "display_name": "Rev One" }),
+    )
+    .await;
+    assert_eq!(issued.status, StatusCode::CREATED, "{issued:?}");
     let (code, transcript) = cli_pty(
         "confirmations-refused-skipped-revoke-no",
         &["--config", &config, "client", "revoke", "rev-1"],
@@ -1668,7 +1670,6 @@ async fn status_check_is_silent_and_answers_by_exit_code() {
 #[test]
 fn api_streams_beyond_the_timeout_and_reports_truncation() {
     let _leak_sweep = crate::leaks::LeakGuard::default();
-    let _leak_sweep = crate::leaks::LeakGuard::default();
     let (first_chunk, first_chunk_sent) = std::sync::mpsc::channel();
     let (mut child, server, stdout, stderr) =
         api_fixture("api-streams-beyond-slow", move |mut stream| {
@@ -1680,7 +1681,9 @@ fn api_streams_beyond_the_timeout_and_reports_truncation() {
             std::thread::sleep(Duration::from_millis(1500));
             stream.write_all(b"def").expect("write final chunk");
         });
-    first_chunk_sent.recv().expect("first chunk sent");
+    first_chunk_sent
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the CLI connects and the first chunk is sent");
     let deadline = Instant::now() + Duration::from_millis(500);
     while fs::metadata(&stdout).map_or(0, |m| m.len()) < 3 && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(10));
@@ -1732,59 +1735,68 @@ fn api_streams_beyond_the_timeout_and_reports_truncation() {
     );
 }
 
-/// `client issue` and `client reissue` print the code exactly
+/// `client invite` and `client reissue` print the invite exactly
 /// once; `client show` never has it; `--disclose-to` refuses an existing
-/// path and writes a fresh `0600` file; with `--json` the code is only in
+/// path and writes a fresh `0600` file; with `--json` the invite is only in
 /// `result`.
 #[tokio::test(flavor = "multi_thread")]
 async fn disclosures_are_printed_once_and_only_once() {
     let _leak_sweep = crate::leaks::LeakGuard::default();
-    let instance = Instance::start("disclosures-printed").await;
+    let instance = Instance::start_with(
+        "disclosures-printed",
+        Setup {
+            mitm: true,
+            data_plane: "tls = \"identity\"\n".into(),
+            ..Setup::default()
+        },
+    )
+    .await;
 
-    // The human form: the registry entry, then the code as the last line.
+    // The human form: the registry entry, then the join to run as the last line.
     let (code, stdout, stderr) =
-        instance.cli(&["client", "issue", "web-one", "--name", "Web One"], None);
+        instance.cli(&["client", "invite", "web-one", "--name", "Web One"], None);
     assert_eq!(code, 0, "{stderr}");
     let lines: Vec<&str> = stdout.trim_end().lines().collect();
     assert!(lines.len() >= 3, "{stdout}");
     assert!(lines[0].contains("web-one"), "{stdout}");
-    assert!(lines[1].contains("pending"), "{stdout}");
     let last = *lines.last().expect("lines");
-    assert!(last.starts_with("enrollment code"), "{stdout}");
-    let first_code = last.rsplit(' ').next().expect("code").to_string();
-    assert!(first_code.starts_with("jse2_"), "{stdout}");
+    let first_invite = last
+        .strip_prefix("jaynshare join ")
+        .unwrap_or_else(|| panic!("the join line: {stdout}"))
+        .to_string();
+    assert!(first_invite.starts_with("jsi1_"), "{stdout}");
 
     // `client show` never re-discloses it.
     let (code, stdout, _) = instance.cli(&["client", "show", "web-one"], None);
     assert_eq!(code, 0);
-    assert!(!stdout.contains(&first_code), "{stdout}");
+    assert!(!stdout.contains(&first_invite), "{stdout}");
 
-    // `--json`: the code travels only inside `result`.
-    let envelope = instance.cli_json(&["client", "issue", "web-two", "--name", "Web Two"], None);
+    // `--json`: the invite travels only inside `result`.
+    let envelope = instance.cli_json(&["client", "invite", "web-two", "--name", "Web Two"], None);
     assert_eq!(envelope["ok"], true, "{envelope}");
-    let json_code = envelope["result"]["enrollment_code"]
+    let json_invite = envelope["result"]["invite"]
         .as_str()
         .expect("the result carries it once")
         .to_string();
-    assert!(json_code.starts_with("jse2_"), "{envelope}");
+    assert!(json_invite.starts_with("jsi1_"), "{envelope}");
     let (_, stdout, _) = instance.cli(&["client", "show", "web-two"], None);
-    assert!(!stdout.contains(&json_code));
+    assert!(!stdout.contains(&json_invite));
 
-    // `reissue` replaces a code; the old one is gone from every surface.
+    // `reissue` replaces an invite.
     let envelope = instance.cli_json(&["client", "reissue", "web-one"], None);
     assert_eq!(envelope["ok"], true, "{envelope}");
-    let reissued = envelope["result"]["enrollment_code"]
+    let reissued = envelope["result"]["invite"]
         .as_str()
-        .expect("the new code is in result")
+        .expect("the new invite is in result")
         .to_string();
-    assert_ne!(reissued, first_code);
+    assert_ne!(reissued, first_invite);
 
     // `--disclose-to`: a fresh 0600 file, nothing printed but the path.
-    let disclosure = instance.root.join("disclosed-code");
+    let disclosure = instance.root.join("disclosed-invite");
     let (code, stdout, stderr) = instance.cli(
         &[
             "client",
-            "issue",
+            "invite",
             "web-three",
             "--name",
             "Web Three",
@@ -1800,7 +1812,7 @@ async fn disclosures_are_printed_once_and_only_once() {
         "the path alone: {stdout}"
     );
     let contents = fs::read_to_string(&disclosure).expect("disclosure file");
-    assert!(contents.starts_with("jse2_"), "{contents}");
+    assert!(contents.starts_with("jsi1_"), "{contents}");
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -1810,10 +1822,10 @@ async fn disclosures_are_printed_once_and_only_once() {
             .mode();
         assert_eq!(mode & 0o777, 0o600, "mode {mode:o}");
     }
-    let (_, _, stderr) = instance.cli(
+    let (code, _, stderr) = instance.cli(
         &[
             "client",
-            "issue",
+            "invite",
             "web-four",
             "--name",
             "Web Four",
@@ -1822,28 +1834,16 @@ async fn disclosures_are_printed_once_and_only_once() {
         ],
         None,
     );
-    assert!(stderr.contains("already exists"), "exit 8: {stderr}");
-    let (code, _, _) = instance.cli(
-        &[
-            "client",
-            "issue",
-            "web-four",
-            "--name",
-            "Web Four",
-            "--disclose-to",
-            &disclosure.display().to_string(),
-        ],
-        None,
-    );
-    assert_eq!(code, 8);
+    assert_eq!(code, 8, "{stderr}");
+    assert!(stderr.contains("already exists"), "{stderr}");
 
     // `--json` plus `--disclose-to`: the file holds it, the envelope says
-    // where, and the code is in no output at all.
-    let fresh = instance.root.join("disclosed-code-2");
+    // where, and the invite is in no output at all.
+    let fresh = instance.root.join("disclosed-invite-2");
     let (code, stdout, stderr) = instance.cli(
         &[
             "client",
-            "issue",
+            "invite",
             "web-five",
             "--name",
             "Web Five",
@@ -1860,11 +1860,8 @@ async fn disclosures_are_printed_once_and_only_once() {
         fresh.display().to_string(),
         "{envelope}"
     );
-    assert!(
-        envelope["result"]["enrollment_code"].is_null(),
-        "{envelope}"
-    );
-    assert!(!stdout.contains("jse2_"), "{stdout}");
+    assert!(envelope["result"]["invite"].is_null(), "{envelope}");
+    assert!(!stdout.contains("jsi1_"), "{stdout}");
 
     // The codes live nowhere durable: not the state file, not the logs.
     for surface in [
@@ -1873,8 +1870,10 @@ async fn disclosures_are_printed_once_and_only_once() {
         instance.stdout(),
         instance.stderr(),
     ] {
-        for code in [&first_code, &reissued, &json_code] {
-            assert!(!surface.contains(code.as_str()), "a leaked code: {code}");
+        for invite in [&first_invite, &reissued, &json_invite] {
+            let decoded = crate::enrol::decode_invite(invite);
+            let code = decoded["code"].as_str().expect("the code");
+            assert!(!surface.contains(code), "a leaked code: {code}");
         }
     }
 }
@@ -1892,7 +1891,7 @@ async fn registry_ids_validated_locally_and_lifecycle_rows() {
         ("invalid id", vec!["client", "show", "BAD_ID"]),
         (
             "invalid display name",
-            vec!["client", "issue", "ok-id", "--name", "bad\u{7}name"],
+            vec!["client", "invite", "ok-id", "--name", "bad\u{7}name"],
         ),
     ] {
         let envelope = instance.cli_json(&args, None);
@@ -1908,8 +1907,14 @@ async fn registry_ids_validated_locally_and_lifecycle_rows() {
         "no request left the machine for an invalid id"
     );
 
-    let envelope = instance.cli_json(&["client", "issue", "app-1", "--name", "App One"], None);
-    assert_eq!(envelope["ok"], true, "{envelope}");
+    let issued = control_post(
+        instance.addr,
+        "/control/v1/clients",
+        &[],
+        json!({ "id": "app-1", "display_name": "App One" }),
+    )
+    .await;
+    assert_eq!(issued.status, StatusCode::CREATED, "{issued:?}");
 
     // An unknown id is the server's 404 → 6.
     let envelope = instance.cli_json(&["client", "revoke", "no-such-id"], None);
@@ -2000,29 +2005,31 @@ async fn operator_secret_loopback_only_and_confirmed() {
     );
     assert_eq!(instance.state_digest(), before, "nothing rotated");
 
-    // The confirmation on a terminal: a refused answer changes nothing.
-    let (code, transcript) = cli_pty(
-        "operator-secret-loopback-no",
-        &["--config", &config, "operator", "secret", "set"],
-        &env,
-        Some(("[y/N]", "n\n")),
-    );
-    assert_eq!(code, 21, "{transcript}");
-    assert_eq!(instance.state_digest(), before, "a no answers nothing");
-    assert!(
-        !transcript.contains("jso2_"),
-        "no disclosure happened: {transcript}"
-    );
+    // The confirmation on a terminal (a Unix pseudo-terminal): a refused
+    // answer changes nothing, a yes discloses a new secret once.
+    if cfg!(unix) {
+        let (code, transcript) = cli_pty(
+            "operator-secret-loopback-no",
+            &["--config", &config, "operator", "secret", "set"],
+            &env,
+            Some(("[y/N]", "n\n")),
+        );
+        assert_eq!(code, 21, "{transcript}");
+        assert_eq!(instance.state_digest(), before, "a no answers nothing");
+        assert!(
+            !transcript.contains("jso2_"),
+            "no disclosure happened: {transcript}"
+        );
 
-    // Answered yes (or --yes): a new secret, disclosed once.
-    let (code, transcript) = cli_pty(
-        "operator-secret-loopback-yes",
-        &["--config", &config, "operator", "secret", "set"],
-        &env,
-        Some(("[y/N]", "y\n")),
-    );
-    assert_eq!(code, 0, "{transcript}");
-    assert!(transcript.contains("operator secret"), "{transcript}");
+        let (code, transcript) = cli_pty(
+            "operator-secret-loopback-yes",
+            &["--config", &config, "operator", "secret", "set"],
+            &env,
+            Some(("[y/N]", "y\n")),
+        );
+        assert_eq!(code, 0, "{transcript}");
+        assert!(transcript.contains("operator secret"), "{transcript}");
+    }
     let envelope = instance.cli_json(&["operator", "secret", "set", "--yes"], None);
     assert_eq!(envelope["ok"], true, "{envelope}");
     assert!(
@@ -2052,8 +2059,14 @@ async fn status_renders_every_section_including_clients() {
     )
     .await;
     instance.add_fsub();
-    let envelope = instance.cli_json(&["client", "issue", "mac-1", "--name", "Mac One"], None);
-    assert_eq!(envelope["ok"], true, "{envelope}");
+    let issued = control_post(
+        instance.addr,
+        "/control/v1/clients",
+        &[],
+        json!({ "id": "mac-1", "display_name": "Mac One" }),
+    )
+    .await;
+    assert_eq!(issued.status, StatusCode::CREATED, "{issued:?}");
 
     // The default view: routes, then the account table, then the
     // default line; the diagnostics are --verbose.
@@ -2133,8 +2146,8 @@ async fn status_renders_every_section_including_clients() {
 /// The CA verbs: with MITM off, `ca rotate` is the server's
 /// exit 8, and `ca show`/`ca export` answer that there is no CA; with MITM
 /// on, `ca show` names the CA, `ca export` prints the PEM or writes it into
-/// A fresh `0644` file (exit 8 on an existing one), and `ca rotate` prints
-/// old and new fingerprints with the `ca update-bundle` reminder.
+/// A fresh `0644` file (exit 8 on an existing one), `ca rotate` stages the
+/// next CA, which `ca show` names, and `ca rotate --now` replaces the CA.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_ca_verbs() {
     let _leak_sweep = crate::leaks::LeakGuard::default();
@@ -2199,40 +2212,40 @@ async fn the_ca_verbs() {
     let envelope = instance.cli_json(&["ca", "export", "--out", &out_str], None);
     assert_eq!(envelope["error"]["code"], "cli_output_exists", "{envelope}");
 
-    // Rotate: old and new fingerprints, and the reminder.
+    // Rotate: the next CA is staged, the current one still presented.
     let envelope = instance.cli_json(&["ca", "rotate", "--yes"], None);
     assert_eq!(envelope["ok"], true, "{envelope}");
+    assert_eq!(envelope["result"]["fingerprint"], old_fingerprint.as_str());
+    let staged = envelope["result"]["next"]["fingerprint"]
+        .as_str()
+        .expect("the staged fingerprint")
+        .to_string();
+    assert_ne!(staged, old_fingerprint, "{envelope}");
+    let envelope = instance.cli_json(&["ca", "show"], None);
+    assert_eq!(envelope["result"]["fingerprint"], old_fingerprint.as_str());
+    assert_eq!(envelope["result"]["next"]["fingerprint"], staged.as_str());
+    let (code, stdout, stderr) = instance.cli(&["ca", "show"], None);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains(&format!("next CA {staged}")), "{stdout}");
+    let (code, _, stderr) = instance.cli(&["ca", "rotate", "--yes"], None);
+    assert_eq!(code, 8, "one staged CA at a time: {stderr}");
+
+    // Rotate now: old and new fingerprints, the staged CA dropped.
+    let (code, stdout, stderr) = instance.cli(&["ca", "rotate", "--now", "--yes"], None);
+    assert_eq!(code, 0, "{stderr}");
+    let envelope = instance.cli_json(&["ca", "show"], None);
     let new_fingerprint = envelope["result"]["fingerprint"]
         .as_str()
         .expect("fingerprint")
         .to_string();
-    assert_ne!(old_fingerprint, new_fingerprint, "{envelope}");
-    assert_eq!(
-        envelope["result"]["previous_fingerprint"]
-            .as_str()
-            .unwrap_or(""),
-        old_fingerprint,
+    assert!(
+        new_fingerprint != old_fingerprint && new_fingerprint != staged,
         "{envelope}"
     );
-    // `ca show` afterwards names the new one.
-    let envelope = instance.cli_json(&["ca", "show"], None);
-    assert_eq!(
-        envelope["result"]["fingerprint"].as_str().unwrap_or(""),
-        new_fingerprint,
-        "{envelope}"
-    );
-    // The human output carries both fingerprints; the reminder is on
-    // standard error, after them.
-    let (code, stdout, stderr) = instance.cli(&["ca", "rotate", "--yes"], None);
-    assert_eq!(code, 0, "{stderr}");
-    assert!(stdout.contains(&new_fingerprint), "{stdout}{stderr}");
+    assert_eq!(envelope["result"]["next"], Value::Null, "{envelope}");
     assert!(
-        stdout.contains(envelope["result"]["fingerprint"].as_str().unwrap_or("?")),
-        "the previous fingerprint too: {stdout}"
-    );
-    assert!(
-        stderr.contains("ca update-bundle") && !stdout.contains("ca update-bundle"),
-        "the reminder on standard error: {stdout}{stderr}"
+        stdout.contains(&old_fingerprint) && stdout.contains(&new_fingerprint),
+        "both fingerprints: {stdout}"
     );
     instance.stop();
 }

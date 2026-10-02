@@ -22,8 +22,9 @@ use rustls_pki_types::pem::PemObject as _;
 use rustls_pki_types::{CertificateDer, ServerName, UnixTime};
 use serde_json::{Value, json};
 
-use crate::config::{self, LoadedConfig};
+use crate::config::{self, ListenerTls, LoadedConfig};
 use crate::control::API_VERSION;
+use crate::identity::{self, Identity, PinnedVerifier};
 
 use super::Failure;
 use super::args::Cli;
@@ -53,7 +54,14 @@ impl Control {
         if let Some(origin) = &cli.server {
             return Self::remote(cli, origin);
         }
-        let config_path = config::config_path(cli.config.as_deref());
+        Self::loopback(
+            config::config_path(cli.config.as_deref()),
+            Duration::from_secs(cli.timeout),
+        )
+    }
+
+    /// The loopback operator of the instance `config_path` configures.
+    pub(super) fn loopback(config_path: PathBuf, timeout: Duration) -> Result<Self, Failure> {
         let bytes = config::read(&config_path).map_err(|e| {
             // An operator verb needs a readable configuration or --server.
             Failure::local(
@@ -86,18 +94,12 @@ impl Control {
             digest: config::sha256_hex(&bytes),
             config: parsed.config,
         };
-        // Https when the TLS certificate and key are configured, trusting the system
-        // store plus every certificate of the configured chain.
-        let (scheme, extra_anchor) = match &loaded.config.data_plane.tls {
-            Some(tls) => ("https", Some(tls.certificate_file.as_path())),
-            None => ("http", None),
-        };
         // The TCP peer is always 127.0.0.1, so the call resolves
         // as the loopback operator; a non-loopback address stays the HTTP host
         // and the TLS identity, reached through the implicit loopback bind.
         let listen = loaded.config.data_plane.listen;
         let port = listen.port();
-        let (host, identity) = if listen.ip().is_unspecified() || listen.ip().is_loopback() {
+        let (host, address) = if listen.ip().is_unspecified() || listen.ip().is_loopback() {
             ("127.0.0.1".to_string(), None)
         } else {
             (listen.ip().to_string(), Some(listen.ip()))
@@ -107,12 +109,22 @@ impl Control {
         } else {
             host
         };
+        // Https on an operator certificate trusts the system store plus every
+        // certificate of the configured chain.
+        let (scheme, client) = match &loaded.config.data_plane.tls {
+            ListenerTls::Off => ("http", http_client_identity(&[], address)?),
+            ListenerTls::Identity => ("https", http_client_pinned(&server_pin(&state_path)?)?),
+            ListenerTls::Certificate(tls) => (
+                "https",
+                http_client_identity(&[tls.certificate_file.as_path()], address)?,
+            ),
+        };
         Ok(Self {
             origin: format!("{scheme}://{host}:{port}"),
-            dial: identity.map(|_| format!("{scheme}://127.0.0.1:{port}")),
-            client: http_client_identity(&extra_anchor.into_iter().collect::<Vec<_>>(), identity)?,
-            timeout: Duration::from_secs(cli.timeout),
-            config_path: Some(config_path.clone()),
+            dial: address.map(|_| format!("{scheme}://127.0.0.1:{port}")),
+            client,
+            timeout,
+            config_path: Some(config_path),
             state_path: Some(state_path),
             bearer: None,
         })
@@ -447,6 +459,32 @@ impl Control {
     }
 }
 
+/// The pin of the identity key the server writes beside its state on its
+/// first start.
+fn server_pin(state_path: &Path) -> Result<String, Failure> {
+    let state_dir = state_path.parent().unwrap_or(Path::new("."));
+    let key = state_dir.join(identity::KEY_FILE);
+    if !key.exists() {
+        return Err(Failure::local(
+            4,
+            "cli_unreachable",
+            format!(
+                "{} does not exist: the server has not started yet",
+                key.display()
+            ),
+        ));
+    }
+    Identity::load(state_dir)
+        .map(|identity| identity.pin().to_string())
+        .map_err(|why| {
+            Failure::local(
+                3,
+                "cli_configuration_invalid",
+                format!("server identity: {why}"),
+            )
+        })
+}
+
 /// The error and every cause under it, so a refused TLS handshake reads as
 /// its reason (`invalid peer certificate: CaUsedAsEndEntity`) and not as the
 /// connector's bare `client error (Connect)`.
@@ -475,12 +513,31 @@ pub(crate) fn http_client_plain()
             .map_err(|e| Failure::local(1, "cli_internal", e.to_string()))?
             .with_root_certificates(RootCertStore::empty())
             .with_no_client_auth();
+    Ok(client_over(tls))
+}
+
+/// The same client checking the server against its identity pin alone.
+pub(crate) fn http_client_pinned(
+    pin: &str,
+) -> Result<Client<HttpsConnector<HttpConnector>, Full<Bytes>>, Failure> {
+    let provider = rustls::crypto::ring::default_provider();
+    let verifier = PinnedVerifier::new(pin, provider.signature_verification_algorithms);
+    let tls = ClientConfig::builder_with_provider(Arc::new(provider))
+        .with_safe_default_protocol_versions()
+        .map_err(|e| Failure::local(1, "cli_internal", e.to_string()))?
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(verifier))
+        .with_no_client_auth();
+    Ok(client_over(tls))
+}
+
+fn client_over(tls: ClientConfig) -> Client<HttpsConnector<HttpConnector>, Full<Bytes>> {
     let https = hyper_rustls::HttpsConnectorBuilder::new()
         .with_tls_config(tls)
         .https_or_http()
         .enable_http1()
         .build();
-    Ok(Client::builder(TokioExecutor::new()).build(https))
+    Client::builder(TokioExecutor::new()).build(https)
 }
 
 /// An `http`-or-`https` client trusting the system store plus, when given,
@@ -540,12 +597,7 @@ fn http_client_identity(
                 .with_no_client_auth()
         }
     };
-    let https = hyper_rustls::HttpsConnectorBuilder::new()
-        .with_tls_config(tls)
-        .https_or_http()
-        .enable_http1()
-        .build();
-    Ok(Client::builder(TokioExecutor::new()).build(https))
+    Ok(client_over(tls))
 }
 
 /// The full WebPKI verification, for the configured address

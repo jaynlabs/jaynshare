@@ -364,6 +364,8 @@ type FileStamp = (u64, SystemTime);
 
 fn stamps_excluded(machine: &ClientHome, path: &Path) -> bool {
     path.starts_with(&machine.out)
+        // The fake `powershell` the Windows environment places on first use.
+        || path.starts_with(machine.home.join("fake-tools"))
         || path
             .file_name()
             .is_some_and(|n| n.to_string_lossy().starts_with("transcript-"))

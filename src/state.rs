@@ -229,128 +229,263 @@ pub fn mode_summary(path: &Path) -> Option<String> {
     }
 }
 
-/// Refuse a secret-bearing existing file or directory broader than owner-only.
-/// On Windows: reduces `path`'s ACL to the installing
-/// user's SID and `SYSTEM` (inheritance removed), then verifies that no
-/// other access entry remains; fails closed when protection cannot be
+/// Replaces `path`'s ACL with a protected one granting full control to the
+/// current user and `SYSTEM` alone, then reads it back and fails closed
+/// unless exactly those entries remain. Principals are compared as SIDs,
+/// so neither the display language nor an elevated token's default
+/// `Administrators` entry changes the outcome.
 #[cfg(windows)]
 pub fn protect_windows(path: &Path) -> Result<(), String> {
-    let (user_name, user_sid) = windows_user()?;
-    let flags = if path.is_dir() { ":(OI)(CI)F" } else { ":F" };
-    let user_flags = format!("{user_sid}{flags}");
-    let system_flags = format!("*S-1-5-18{flags}");
-    let out = icacls(&[
-        path.as_os_str(),
-        std::ffi::OsStr::new("/inheritance:r"),
-        std::ffi::OsStr::new("/grant:r"),
-        std::ffi::OsStr::new(&user_flags),
-        std::ffi::OsStr::new(&system_flags),
-    ])?;
-    if !out.status.success() {
-        return Err(format!(
-            "icacls could not restrict {}: {}",
-            path.display(),
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
-    }
-    // Read the result back and fail closed unless only the user and
-    // `SYSTEM` remain (inherited entries included).
-    let read = icacls(&[path.as_os_str()])?;
-    if !read.status.success() {
-        return Err(format!(
-            "icacls could not read {}: {}",
-            path.display(),
-            String::from_utf8_lossy(&read.stderr).trim()
-        ));
-    }
-    judge_acl(
-        &String::from_utf8_lossy(&read.stdout),
-        &user_sid,
-        &user_name,
-    )
-    .map_err(|e| format!("{}: {e}", path.display()))
+    windows_acl::restrict(path).map_err(|e| format!("{}: {e}", path.display()))
 }
 
-/// The one `icacls` wrapper (the test suite's fake answers it).
 #[cfg(windows)]
-pub fn icacls(args: &[&std::ffi::OsStr]) -> Result<std::process::Output, String> {
-    std::process::Command::new("icacls")
-        .args(args)
-        .stdin(std::process::Stdio::null())
-        .output()
-        .map_err(|e| format!("icacls: {e}"))
-}
+mod windows_acl {
+    use std::ffi::c_void;
+    use std::io;
+    use std::os::windows::ffi::OsStrExt;
+    use std::path::Path;
+    use std::ptr::{addr_of, null, null_mut};
 
-/// The current user's name and SID (the ACL grant targets), through
-/// `whoami /user /fo csv /nh` (`"host\\user","S-1-…"`).
-#[cfg(windows)]
-fn windows_user() -> Result<(String, String), String> {
-    let out = std::process::Command::new("whoami")
-        .args(["/user", "/fo", "csv", "/nh"])
-        .stdin(std::process::Stdio::null())
-        .output()
-        .map_err(|e| format!("whoami: {e}"))?;
-    if !out.status.success() {
-        return Err(format!(
-            "whoami /user failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
-    }
-    let row = String::from_utf8_lossy(&out.stdout);
-    let row = row.trim().trim_matches('"');
-    let mut fields = row.split("\",\"");
-    let name = fields
-        .next()
-        .ok_or_else(|| format!("whoami /user gave no user: {row}"))?
-        .trim()
-        .to_owned();
-    let sid = fields
-        .next()
-        .ok_or_else(|| format!("whoami /user gave no SID: {row}"))?
-        .trim()
-        .to_owned();
-    Ok((name, sid))
-}
+    use windows_sys::Win32::Foundation::{CloseHandle, ERROR_SUCCESS, HANDLE, LocalFree};
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertSidToStringSidW, GetNamedSecurityInfoW, SE_FILE_OBJECT, SetNamedSecurityInfoW,
+    };
+    use windows_sys::Win32::Security::{
+        ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, ACL_REVISION, AddAccessAllowedAceEx,
+        CONTAINER_INHERIT_ACE, CreateWellKnownSid, DACL_SECURITY_INFORMATION, EqualSid, GetAce,
+        GetLengthSid, GetTokenInformation, INHERITED_ACE, InitializeAcl, OBJECT_INHERIT_ACE,
+        PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SECURITY_MAX_SID_SIZE,
+        TOKEN_QUERY, TOKEN_USER, TokenUser, WinLocalSystemSid,
+    };
+    use windows_sys::Win32::Storage::FileSystem::FILE_ALL_ACCESS;
+    use windows_sys::Win32::System::SystemServices::ACCESS_ALLOWED_ACE_TYPE;
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
-/// The read-back judge: every access entry must be the user (by SID or
-/// name, case-insensitive, host prefix optional) or `NT AUTHORITY\SYSTEM`
-/// (`*S-1-5-18`); an inherited `(I)` entry means the inheritance removal did
-/// not happen. Any other entry fails, naming it. Pure so unit tests run it on
-/// every OS.
-#[cfg(any(test, windows))]
-fn judge_acl(readback: &str, user_sid: &str, user_name: &str) -> Result<(), String> {
-    fn tail(s: &str) -> &str {
-        s.rfind('\\').map(|i| &s[i + 1..]).unwrap_or(s)
+    /// A SID copied into a buffer aligned for the API to read in place.
+    struct Sid(Vec<u32>);
+
+    impl Sid {
+        fn copied(sid: PSID) -> Self {
+            // SAFETY: `sid` is a valid SID, so its length covers its bytes.
+            let length = unsafe { GetLengthSid(sid) } as usize;
+            let mut buffer = vec![0u32; length.div_ceil(4)];
+            // SAFETY: both regions hold `length` bytes and do not overlap.
+            unsafe {
+                std::ptr::copy_nonoverlapping(sid.cast::<u8>(), buffer.as_mut_ptr().cast(), length)
+            };
+            Sid(buffer)
+        }
+
+        fn psid(&self) -> PSID {
+            self.0.as_ptr().cast_mut().cast()
+        }
+
+        fn len(&self) -> usize {
+            // SAFETY: the buffer holds a valid SID.
+            unsafe { GetLengthSid(self.psid()) as usize }
+        }
     }
-    let user_allowed = |principal: &str| {
-        principal.eq_ignore_ascii_case(user_sid)
-            || principal.eq_ignore_ascii_case(user_name)
-            || tail(principal).eq_ignore_ascii_case(tail(user_name))
-    };
-    let system_allowed = |principal: &str| {
-        principal.eq_ignore_ascii_case("NT AUTHORITY\\SYSTEM") || principal == "*S-1-5-18"
-    };
-    for line in readback.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        if line.starts_with("Successfully processed") {
-            break;
-        }
-        // ACE lines end the principal with `:(`; the first line is the path.
-        let Some(at) = line.find(":(") else {
-            continue;
+
+    pub(super) fn restrict(path: &Path) -> Result<(), String> {
+        let user = current_user()?;
+        let system = local_system()?;
+        let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        let mut acl = private_acl(&user, &system, path.is_dir())?;
+        // SAFETY: `wide` is NUL-terminated and `acl` is an initialized ACL.
+        let status = unsafe {
+            SetNamedSecurityInfoW(
+                wide.as_ptr(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                null_mut(),
+                null_mut(),
+                acl.as_mut_ptr().cast(),
+                null(),
+            )
         };
-        let principal = line[..at].trim();
-        if line[at..].contains("(I)") {
-            return Err(format!("an inherited access entry for {principal} remains"));
+        if status != ERROR_SUCCESS {
+            return Err(format!(
+                "cannot restrict its ACL: {}",
+                io::Error::from_raw_os_error(status as i32)
+            ));
         }
-        if !user_allowed(principal) && !system_allowed(principal) {
-            return Err(format!("the ACL grants access to {principal}"));
-        }
+        read_back(&wide, &user, &system)
     }
-    Ok(())
+
+    fn current_user() -> Result<Sid, String> {
+        let mut token: HANDLE = null_mut();
+        // SAFETY: the pseudo handle of this process needs no closing.
+        if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+            return Err(format!(
+                "cannot open the process token: {}",
+                io::Error::last_os_error()
+            ));
+        }
+        let mut size = 0u32;
+        // SAFETY: a null buffer of size 0 only asks for the size.
+        unsafe { GetTokenInformation(token, TokenUser, null_mut(), 0, &mut size) };
+        let mut buffer = vec![0u64; (size as usize).div_ceil(8)];
+        // SAFETY: `buffer` holds `size` bytes, aligned for `TOKEN_USER`.
+        let read = unsafe {
+            GetTokenInformation(
+                token,
+                TokenUser,
+                buffer.as_mut_ptr().cast(),
+                size,
+                &mut size,
+            )
+        };
+        let failure = io::Error::last_os_error();
+        // SAFETY: `token` was opened above.
+        unsafe { CloseHandle(token) };
+        if read == 0 {
+            return Err(format!("cannot read the process user: {failure}"));
+        }
+        // SAFETY: the call filled `buffer` with a `TOKEN_USER`.
+        let user = unsafe { &*buffer.as_ptr().cast::<TOKEN_USER>() };
+        Ok(Sid::copied(user.User.Sid))
+    }
+
+    fn local_system() -> Result<Sid, String> {
+        let mut buffer = vec![0u32; (SECURITY_MAX_SID_SIZE as usize).div_ceil(4)];
+        let mut size = SECURITY_MAX_SID_SIZE;
+        // SAFETY: `buffer` holds `size` bytes.
+        let made = unsafe {
+            CreateWellKnownSid(
+                WinLocalSystemSid,
+                null_mut(),
+                buffer.as_mut_ptr().cast(),
+                &mut size,
+            )
+        };
+        if made == 0 {
+            return Err(format!(
+                "cannot name SYSTEM: {}",
+                io::Error::last_os_error()
+            ));
+        }
+        Ok(Sid(buffer))
+    }
+
+    /// An ACL of two full-control entries; a directory's entries also
+    /// apply to what is created inside it.
+    fn private_acl(user: &Sid, system: &Sid, directory: bool) -> Result<Vec<u32>, String> {
+        let flags = if directory {
+            OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE
+        } else {
+            0
+        };
+        // Each entry's SID replaces the `SidStart` placeholder in place.
+        let entry = size_of::<ACCESS_ALLOWED_ACE>() - size_of::<u32>();
+        let size = size_of::<ACL>() + 2 * entry + user.len() + system.len();
+        let mut acl = vec![0u32; size.div_ceil(4)];
+        let pointer = acl.as_mut_ptr().cast::<ACL>();
+        // SAFETY: `acl` holds `size` bytes, aligned for `ACL`.
+        if unsafe { InitializeAcl(pointer, (acl.len() * 4) as u32, ACL_REVISION) } == 0 {
+            return Err(format!(
+                "cannot build an ACL: {}",
+                io::Error::last_os_error()
+            ));
+        }
+        for sid in [user, system] {
+            // SAFETY: `pointer` is an initialized ACL with room for the entry.
+            let added = unsafe {
+                AddAccessAllowedAceEx(pointer, ACL_REVISION, flags, FILE_ALL_ACCESS, sid.psid())
+            };
+            if added == 0 {
+                return Err(format!(
+                    "cannot build an ACL: {}",
+                    io::Error::last_os_error()
+                ));
+            }
+        }
+        Ok(acl)
+    }
+
+    fn read_back(wide: &[u16], user: &Sid, system: &Sid) -> Result<(), String> {
+        let mut dacl: *mut ACL = null_mut();
+        let mut descriptor: PSECURITY_DESCRIPTOR = null_mut();
+        // SAFETY: `wide` is NUL-terminated; the outputs are written on success.
+        let status = unsafe {
+            GetNamedSecurityInfoW(
+                wide.as_ptr(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                null_mut(),
+                null_mut(),
+                &mut dacl,
+                null_mut(),
+                &mut descriptor,
+            )
+        };
+        if status != ERROR_SUCCESS {
+            return Err(format!(
+                "cannot read its ACL back: {}",
+                io::Error::from_raw_os_error(status as i32)
+            ));
+        }
+        let verdict = judge(dacl, user, system);
+        // SAFETY: the descriptor was allocated by the call above.
+        unsafe { LocalFree(descriptor) };
+        verdict
+    }
+
+    /// Every entry must allow the user or `SYSTEM` and none be inherited.
+    fn judge(dacl: *const ACL, user: &Sid, system: &Sid) -> Result<(), String> {
+        if dacl.is_null() {
+            return Err("it has no ACL, which grants everyone access".into());
+        }
+        // SAFETY: a non-null DACL from the descriptor is valid while it lives.
+        let count = unsafe { (*dacl).AceCount };
+        for index in 0..u32::from(count) {
+            let mut entry: *mut c_void = null_mut();
+            // SAFETY: `index` is below the entry count.
+            if unsafe { GetAce(dacl, index, &mut entry) } == 0 {
+                return Err(format!(
+                    "cannot read its ACL: {}",
+                    io::Error::last_os_error()
+                ));
+            }
+            // SAFETY: every entry starts with an `ACE_HEADER`.
+            let header = unsafe { &*entry.cast::<ACE_HEADER>() };
+            if u32::from(header.AceFlags) & INHERITED_ACE != 0 {
+                return Err("an inherited access entry remains".into());
+            }
+            if u32::from(header.AceType) != ACCESS_ALLOWED_ACE_TYPE {
+                return Err(format!(
+                    "an access entry of type {} remains",
+                    header.AceType
+                ));
+            }
+            // SAFETY: an access-allowed entry carries its SID at `SidStart`.
+            let sid: PSID = unsafe { addr_of!((*entry.cast::<ACCESS_ALLOWED_ACE>()).SidStart) }
+                .cast_mut()
+                .cast();
+            // SAFETY: all three are valid SIDs.
+            let known =
+                unsafe { EqualSid(sid, user.psid()) != 0 || EqualSid(sid, system.psid()) != 0 };
+            if !known {
+                return Err(format!("the ACL grants access to {}", sid_text(sid)));
+            }
+        }
+        Ok(())
+    }
+
+    fn sid_text(sid: PSID) -> String {
+        let mut text: *mut u16 = null_mut();
+        // SAFETY: `sid` is valid; the string is allocated on success.
+        if unsafe { ConvertSidToStringSidW(sid, &mut text) } == 0 {
+            return "an unreadable SID".into();
+        }
+        // SAFETY: the string is NUL-terminated.
+        let length = (0..).take_while(|&i| unsafe { *text.add(i) } != 0).count();
+        // SAFETY: `length` units precede the NUL.
+        let owned = String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(text, length) });
+        // SAFETY: allocated by `ConvertSidToStringSidW`.
+        unsafe { LocalFree(text.cast()) };
+        owned
+    }
 }
 
 pub fn check_private(path: &Path) -> Result<(), String> {
@@ -461,44 +596,5 @@ mod tests {
             assert!(check_private(&path).is_err());
         }
         fs::remove_dir_all(&dir).unwrap();
-    }
-
-    // unix-runnable: the `icacls` read-back judge accepts
-    // exactly the user and `NT AUTHORITY\SYSTEM`, and names anything else.
-    const PRIVATE_READBACK: &str = concat!(
-        "C:\\Users\\max\\AppData\\Jaynshare\\client\\client-secret\n",
-        "DESKTOP-ABC\\max:(F)\n",
-        "NT AUTHORITY\\SYSTEM:(F)\n",
-        "\n",
-        "Successfully processed 1 files; Failed processing 0 files\n",
-    );
-
-    #[test]
-    fn judge_acl_accepts_exactly_the_user_and_system() {
-        judge_acl(PRIVATE_READBACK, "S-1-5-21-1-2-3-1001", "DESKTOP-ABC\\max")
-            .expect("the user and SYSTEM alone are private");
-        // The bare user name (no host prefix) is the same principal.
-        judge_acl(PRIVATE_READBACK, "S-1-5-21-1-2-3-1001", "max")
-            .expect("the user is the same principal without the host");
-    }
-
-    #[test]
-    fn judge_acl_names_an_extra_entry() {
-        let open = "BUILTIN\\Users:(RX)";
-        let readback =
-            PRIVATE_READBACK.replace("\nSuccessfully", &format!("\n{open}\nSuccessfully"));
-        let err = judge_acl(&readback, "S-1-5-21-1-2-3-1001", "DESKTOP-ABC\\max")
-            .expect_err("BUILTIN\\Users is an extra principal");
-        assert!(err.contains("BUILTIN\\Users"), "{err}");
-    }
-
-    #[test]
-    fn judge_acl_refuses_an_inherited_entry() {
-        let inherited = PRIVATE_READBACK
-            .replace("DESKTOP-ABC\\max:(F)", "DESKTOP-ABC\\max:(I)(F)")
-            .replace("NT AUTHORITY\\SYSTEM:(F)", "NT AUTHORITY\\SYSTEM:(I)(F)");
-        let err = judge_acl(&inherited, "S-1-5-21-1-2-3-1001", "DESKTOP-ABC\\max")
-            .expect_err("inherited entries mean the inheritance removal failed");
-        assert!(err.contains("inherited access entry"), "{err}");
     }
 }

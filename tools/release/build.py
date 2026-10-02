@@ -11,8 +11,9 @@ Writes into `--out`:
 - the five platform archives (`.tar.gz`, windows `.zip`), each
   rooted in one directory named like the archive without its extension and
   holding exactly the executable, LICENSE, NOTICE.md and a README.txt;
-- `jaynshare-<version>-client-kit.zip`, with the installers of
+- `jaynshare-<version>-client-kit.zip`, with the README of
   `deploy/kit/` plus the client executables;
+- `install.sh`, `install.ps1` and `quickstart.sh`;
 - `SHA256SUMS`, canonical `release.json` and `release.json.minisig`;
 - with `--next-key`, the key-rotation overlap: `release.json` names the
   next key id, and `release.json.<next-key-id>.minisig` and
@@ -49,6 +50,11 @@ RELEASE_TARGETS = [
     "x86_64-pc-windows-msvc",
 ]
 WINDOWS_TARGET = "x86_64-pc-windows-msvc"
+BOOTSTRAPS = [
+    ("install.ps1", "tools/release/install.ps1"),
+    ("install.sh", "tools/release/install.sh"),
+    ("quickstart.sh", "tools/quickstart.sh"),
+]
 
 SEMVER = re.compile(
     r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)"
@@ -157,13 +163,7 @@ def client_kit(version: str, commit: str, seed_path: str, bins: dict, allow: boo
         payload = os.path.join(work, "payload")
         os.makedirs(payload)
         kit_dir = os.path.join(REPO, "deploy", "kit")
-        for name in [
-            "README.txt",
-            "install-macos.sh",
-            "uninstall-macos.sh",
-            "install-windows.ps1",
-            "uninstall-windows.ps1",
-        ]:
+        for name in ["README.txt"]:
             with open(os.path.join(kit_dir, name), "rb") as source:
                 data = source.read()
             with open(os.path.join(payload, name), "wb") as sink:
@@ -247,6 +247,9 @@ def build_release(version: str, commit: str, seed_path: str, bins: dict,
     kit_bytes, kit_members = client_kit(version, commit, seed_path, bins, allow)
     artifacts.append((f"jaynshare-{version}-client-kit.zip", "client-kit", None,
                       kit_bytes, kit_members))
+    for name, path in BOOTSTRAPS:
+        with open(os.path.join(REPO, path), "rb") as handle:
+            artifacts.append((name, "bootstrap", None, handle.read(), []))
 
     artifacts.sort(key=lambda a: a[0].encode())
     sums = b"".join(
@@ -313,6 +316,7 @@ def self_test() -> None:
             [archive_name("1.2.3", t) for t in RELEASE_TARGETS]
             + [
                 "jaynshare-1.2.3-client-kit.zip",
+                *[name for name, _ in BOOTSTRAPS],
                 "SHA256SUMS",
                 "release.json",
                 "release.json.minisig",
@@ -335,7 +339,10 @@ def self_test() -> None:
         assert manifest["commit"] == "0123456789abcdef0123456789abcdef01234567"
         assert re.fullmatch(r"[0-9A-F]{16}", manifest["key_id"])
         assert manifest["sha256sums_sha256"] == hashlib.sha256(read("SHA256SUMS")).hexdigest()
-        assert len(manifest["artifacts"]) == 6
+        assert len(manifest["artifacts"]) == 9
+        for name, path in BOOTSTRAPS:
+            with open(os.path.join(REPO, path), "rb") as source:
+                assert read(name) == source.read(), name
         kit_entry = next(a for a in manifest["artifacts"] if a["purpose"] == "client-kit")
         with zipfile.ZipFile(io.BytesIO(read("jaynshare-1.2.3-client-kit.zip"))) as archive:
             assert [m["path"] for m in kit_entry["members"]] == sorted(archive.namelist())

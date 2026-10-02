@@ -15,7 +15,7 @@
 #        quickstart.sh [--release] logs | down
 #
 # The server home persists, so an account logged in once stays logged in.
-# Removing the scratch home's client/ re-enrols the client; removing it all starts over.
+# Removing the scratch home's client/ joins the client again; removing it all starts over.
 set -euo pipefail
 umask 077
 
@@ -84,14 +84,6 @@ EOF
 
 result_field() { python3 -c 'import json, sys; print(json.load(sys.stdin)["result"][sys.argv[1]])' "$1"; }
 
-# `client enrol` writes the one-time code beside the bundle; `client
-# reissue --json` returns it.
-enrollment_code() {
-    python3 -c 'import json, sys
-result = json.load(sys.stdin)["result"]
-print(result.get("enrollment_code") or open(result["code_file"]).read().strip())'
-}
-
 server_pid() {
     local pid
     pid=$(cat "$SCRATCH/server.pid" 2>/dev/null) || return 1
@@ -123,9 +115,17 @@ prepare_homes() {
     server_root=$(config_root "$SERVER_HOME")
     mkdir -p "$server_root" "$(config_root "$CLIENT_HOME")"
     if [ ! -f "$server_root/config.toml" ]; then
-        printf 'version = 1\n\n[data_plane]\nlisten = "%s"\n\n[mitm]\nenabled = true\nlisten = "%s"\n' \
+        printf 'version = 1\n\n[data_plane]\nlisten = "%s"\ntls = "identity"\n\n[mitm]\nenabled = true\nlisten = "%s"\n' \
             "$LISTEN" "$PROXY_LISTEN" >"$server_root/config.toml"
     fi
+    # A machine joins only over TLS; a scratch home from before turns it on.
+    if ! grep -q '^tls' "$server_root/config.toml"; then
+        awk '{ print } /^\[data_plane\]$/ { print "tls = \"identity\"" }' "$server_root/config.toml" >"$server_root/config.toml.new"
+        mv "$server_root/config.toml.new" "$server_root/config.toml"
+    fi
+    # The client follows the kit the server offers: this script's own.
+    grep -q '^kit_file' "$server_root/config.toml" ||
+        printf '\n[clients]\nkit_file = "%s"\n' "$KIT" >>"$server_root/config.toml"
 }
 
 # A throwaway release key replaces the embedded one in both homes, so the
@@ -161,7 +161,7 @@ build_kit() {
 }
 
 # The published binary is trusted as GitHub serves it over HTTPS; the client
-# kit is checked at enrolment against the release key that binary embeds.
+# kit is checked at the join against the release key that binary embeds.
 fetch_release() {
     local version=$RELEASE dir
     if [ "$version" = latest ]; then
@@ -192,47 +192,29 @@ ensure_account() {
     fi
 }
 
-# The enrollment code goes in at the client's hidden prompt, typed by
-# expect, as an engineer would type it.
-enrol_client() {
-    local out="$SCRATCH/bundle" verb result archive code
-    rm -rf "$out"
-    mkdir -p "$out"
+# The client joins with an invite, as an engineer's machine would.
+join_client() {
+    local verb invite
     if as_server client show "$CLIENT_ID" >/dev/null 2>&1; then
         verb=(client reissue "$CLIENT_ID")
     else
-        verb=(client enrol "$CLIENT_ID" --name "Quickstart client")
+        verb=(client invite "$CLIENT_ID" --name "Quickstart client")
     fi
-    result=$(as_server "${verb[@]}" --kit "$KIT" --out "$out" --json)
-    archive=$(result_field archive <<<"$result")
-    code=$(enrollment_code <<<"$result")
-    unzip -q "$archive" -d "$out/extracted"
-    HOME="$CLIENT_HOME" JS_CODE=$code expect -c "
-        set timeout 60
-        spawn {$BIN} enrol --bundle {$out/extracted}
-        expect {
-            {\[y/N\] } { send y\r; exp_continue }
-            {(hidden): } { log_user 0; send \$env(JS_CODE)\r; expect \n; log_user 1; exp_continue }
-            eof
-        }
-        lassign [wait] _ _ _ status
-        exit \$status
-    " || die "the client enrolment failed"
-    rm -rf "$out"
+    invite=$(as_server "${verb[@]}" --json | result_field invite)
+    HOME="$CLIENT_HOME" "$BIN" join "$invite" || die "the client join failed"
 }
 
 up() {
     require python3 "run xcode-select --install"
-    require expect "run brew install expect"
     require claude "install Claude Code and log in to it first"
     prepare_homes
     if [ -n "$RELEASE" ]; then fetch_release; else build_from_source; fi
     stop_server
     start_server
-    if [ -x "$(client_bin)" ]; then
+    if [ -f "$(config_root "$CLIENT_HOME")/client/client.toml" ]; then
         as_client update --from "$KIT" >/dev/null
     else
-        enrol_client
+        join_client
     fi
     ensure_account
     echo "pool up on $LISTEN (proxy $PROXY_LISTEN); $SELF claude to use it"

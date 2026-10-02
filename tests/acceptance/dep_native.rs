@@ -1309,27 +1309,29 @@ async fn the_unit_carries_no_secret_and_its_capture_stays_in_the_journal() {
     let (code, stdout, stderr) = install(&linux, &release, CFG);
     assert_eq!(code, 0, "install: {stdout}\n{stderr}");
 
-    // 2. A secret exists: a client enrollment code, disclosed once to a
-    // mode-0600 file. The needle is its secret value.
+    // 2. A secret exists: a client enrollment code, disclosed once in the
+    // control answer. The needle is its secret value.
+    linux.write(
+        "/root/unit-carries-no-secret/client.json",
+        br#"{"id": "unit-carries-no-secret", "display_name": "Journal check"}"#,
+        0o600,
+    );
     let (code, stdout, stderr) = linux.cli(&[
         "--config",
         SERVICE_CFG,
-        "client",
-        "issue",
-        "unit-carries-no-secret",
-        "--name",
-        "Journal check",
-        "--disclose-to",
-        "/root/unit-carries-no-secret/secret",
+        "api",
+        "POST",
+        "/control/v1/clients",
+        "--body-file",
+        "/root/unit-carries-no-secret/client.json",
     ]);
-    assert_eq!(code, 0, "client issue: {stdout}\n{stderr}");
-    let needle = String::from_utf8_lossy(
-        &linux
-            .read("/root/unit-carries-no-secret/secret")
-            .expect("the disclosure file exists"),
-    )
-    .trim()
-    .to_owned();
+    assert_eq!(code, 0, "issue: {stdout}\n{stderr}");
+    let issued: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("the control answer");
+    let needle = issued["enrollment_code"]
+        .as_str()
+        .expect("the code")
+        .to_owned();
     assert!(
         needle.chars().count() >= 16,
         "the disclosed secret is shorter than 16 characters"

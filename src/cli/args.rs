@@ -128,16 +128,12 @@ pub(super) enum Verb {
         #[arg(long, value_enum, value_name = "shell")]
         shell: Option<Shell>,
     },
-    #[command(alias = "enroll")]
-    Enrol {
-        /// The extracted enrollment bundle directory.
-        #[arg(long, value_name = "extracted-dir")]
-        bundle: PathBuf,
-        #[arg(long)]
-        trust_os_store: bool,
+    Join {
+        /// The invite the operator's `client invite` printed (jsi1_…).
+        invite: String,
     },
     Update {
-        /// A client kit or bundle archive; without it, the newest release's
+        /// A client kit archive; without it, the newest release's
         /// client kit is fetched from the origin (`--version` names one).
         #[arg(long, value_name = "zip")]
         from: Option<PathBuf>,
@@ -147,10 +143,6 @@ pub(super) enum Verb {
         /// (with `--version`, or for the latest kit).
         #[arg(long, value_name = "https-origin")]
         release_origin: Option<String>,
-    },
-    CaUpdate {
-        #[arg(long, value_name = "zip")]
-        from: PathBuf,
     },
     TrustCa {
         #[command(subcommand)]
@@ -535,38 +527,11 @@ pub(super) enum ClientVerb {
     Show {
         id: String,
     },
-    Issue {
-        id: String,
-        #[arg(long, value_name = "display-name")]
-        name: String,
-        #[arg(long, value_name = "path")]
-        disclose_to: Option<PathBuf>,
-    },
-    Bundle {
-        id: String,
-        #[arg(long, value_name = "client-kit.zip")]
-        kit: PathBuf,
-        #[arg(long, value_name = "dir")]
-        out: PathBuf,
-    },
-    #[command(alias = "enroll")]
-    Enrol {
-        id: String,
-        #[arg(long, value_name = "display-name")]
-        name: String,
-        #[arg(long, value_name = "client-kit.zip")]
-        kit: PathBuf,
-        #[arg(long, value_name = "dir")]
-        out: PathBuf,
-    },
+    Invite(InviteArgs),
     Reissue {
         id: String,
-        #[arg(long, value_name = "client-kit.zip", requires = "out")]
-        kit: Option<PathBuf>,
-        #[arg(long, value_name = "dir", requires = "kit")]
-        out: Option<PathBuf>,
-        #[arg(long, value_name = "path")]
-        disclose_to: Option<PathBuf>,
+        #[command(flatten)]
+        terms: InviteTerms,
     },
     Rotate {
         id: String,
@@ -580,6 +545,28 @@ pub(super) enum ClientVerb {
         id: String,
         display_name: String,
     },
+}
+
+#[derive(Args)]
+pub(super) struct InviteArgs {
+    pub(super) id: String,
+    /// The display name; the id when omitted.
+    #[arg(long, value_name = "display-name")]
+    pub(super) name: Option<String>,
+    #[command(flatten)]
+    pub(super) terms: InviteTerms,
+}
+
+#[derive(Args)]
+pub(super) struct InviteTerms {
+    /// How long the invite works: seconds, or a number and s, m, h or d.
+    #[arg(long, value_name = "duration", value_parser = super::invite::expiry_seconds)]
+    pub(super) expires: Option<u64>,
+    /// The joining machine adds no Claude account of its own.
+    #[arg(long)]
+    pub(super) no_account: bool,
+    #[arg(long, value_name = "path")]
+    pub(super) disclose_to: Option<PathBuf>,
 }
 
 #[derive(Subcommand)]
@@ -606,10 +593,10 @@ pub(super) enum CaVerb {
         #[arg(long, value_name = "path")]
         out: Option<PathBuf>,
     },
-    Rotate,
-    UpdateBundle {
-        #[arg(long, value_name = "dir")]
-        out: PathBuf,
+    Rotate {
+        /// Replace the CA at once instead of staging the next one.
+        #[arg(long)]
+        now: bool,
     },
 }
 
@@ -648,25 +635,40 @@ pub(super) enum ServerVerb {
         from: Option<PathBuf>,
     },
     Install {
-        #[arg(long, value_name = "release-dir")]
-        from: PathBuf,
+        /// A release directory on this host instead of a download.
+        #[arg(long, value_name = "release-dir", conflicts_with_all = ["version", "binary", "release_origin"])]
+        from: Option<PathBuf>,
+        /// The published version to fetch; default: the newest.
+        #[arg(long, value_name = "semver", conflicts_with = "binary")]
+        version: Option<String>,
+        /// A clone's own build, installed with the official client kit of its version.
+        #[arg(long, value_name = "path")]
+        binary: Option<PathBuf>,
+        /// The client kit for --binary instead of the official one.
+        #[arg(long, value_name = "zip", requires = "binary")]
+        kit: Option<PathBuf>,
+        /// The data-plane address when install writes the configuration;
+        /// default: Tailscale's, else this host's only private one.
+        #[arg(long, value_name = "ip")]
+        listen: Option<std::net::IpAddr>,
+        /// A verified `https` mirror in place of the official origin; later
+        /// updates follow it.
+        #[arg(long, value_name = "https-origin")]
+        release_origin: Option<String>,
     },
     Update {
-        #[arg(
-            long,
-            value_name = "release-dir",
-            conflicts_with = "version",
-            required_unless_present = "version"
-        )]
+        #[arg(long, value_name = "release-dir", conflicts_with = "version")]
         from: Option<PathBuf>,
+        /// Default: the newest release of the origin the server was
+        /// installed from, or its clone build again.
         #[arg(long, value_name = "semver")]
         version: Option<String>,
         /// The explicit downgrade form.
         #[arg(long)]
         allow_downgrade: bool,
-        /// A verified `https` mirror in place of the official origin;
-        /// only with `--version`.
-        #[arg(long, value_name = "https-origin", requires = "version")]
+        /// A verified `https` mirror in place of the recorded or official
+        /// origin; later updates follow it.
+        #[arg(long, value_name = "https-origin", conflicts_with = "from")]
         release_origin: Option<String>,
     },
     Uninstall {
@@ -679,6 +681,16 @@ pub(super) enum ServerVerb {
         #[arg(long, default_value_t = 1, value_name = "n")]
         keep: usize,
     },
+    AutoUpdate {
+        #[arg(value_enum)]
+        switch: Switch,
+    },
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(super) enum Switch {
+    On,
+    Off,
 }
 
 #[derive(Subcommand)]

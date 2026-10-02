@@ -334,6 +334,26 @@ fn refused(
                 vec![],
             ),
         ),
+        OperationError::NotOwner => (
+            "not_owner",
+            error(
+                StatusCode::CONFLICT,
+                "conflict",
+                "this identity is another owner's account",
+                account.map(|h| h.to_string()),
+                vec![],
+            ),
+        ),
+        OperationError::NewAccount => (
+            "new_account",
+            error(
+                StatusCode::CONFLICT,
+                "conflict",
+                "this identity is not an account of the pool",
+                account.map(|h| h.to_string()),
+                vec![],
+            ),
+        ),
         OperationError::ReferenceConflict(entries) => {
             let listed: Vec<String> = entries.iter().map(|c| c.entry.clone()).collect();
             tracing::info!(
@@ -853,7 +873,7 @@ pub(crate) fn project_pool_account(pool: &Pool, account: &Account, runtime: &Run
     object
 }
 
-fn health_of(
+pub(super) fn health_of(
     account: &Account,
     refreshing_since: Option<OffsetDateTime>,
     now: OffsetDateTime,
@@ -948,6 +968,7 @@ pub(super) fn project_account(
         "kind": account.kind().as_str(),
         "source_class": account.source,
         "enabled": account.enabled,
+        "owner": account.owner,
         "health": { "state": health_state, "reason": reason, "since": time_or_null(since) },
         "profile": account.profile,
         "credential": credential,

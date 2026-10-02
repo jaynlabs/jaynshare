@@ -19,9 +19,23 @@ pub struct Inputs<'a> {
     pub from: Option<&'a Path>,
     /// The global `--config <path>`, else the default configuration.
     pub config: Option<&'a Path>,
-    /// The interface and rule an operator on a terminal recorded
-    /// checking by hand, when the host firewall cannot be inspected.
-    pub firewall_record: Option<&'a str>,
+    pub unknown_firewall: UnknownFirewall<'a>,
+}
+
+/// What a host firewall that cannot be inspected means.
+#[derive(Clone, Copy)]
+pub enum UnknownFirewall<'a> {
+    Refused,
+    /// The interface and rule an operator on a terminal recorded checking by hand.
+    Recorded(&'a str),
+    /// Passes: an update keeps the installed configuration.
+    Update,
+}
+
+impl<'a> UnknownFirewall<'a> {
+    pub fn recorded(record: Option<&'a str>) -> Self {
+        record.map_or(Self::Refused, Self::Recorded)
+    }
 }
 
 /// In order: OS and architecture; release integrity (with `from`); systemd
@@ -169,7 +183,7 @@ pub fn run(inputs: &Inputs<'_>) -> DeployResult {
                         full("firewall"),
                         address,
                         &interface,
-                        inputs.firewall_record,
+                        inputs.unknown_firewall,
                     ));
                     true
                 }
@@ -216,33 +230,38 @@ pub fn run(inputs: &Inputs<'_>) -> DeployResult {
     result
 }
 
-/// The firewall verdict for one listener on `interface`, or the unresolved manual check
-/// the unattended operation refuses on.
+/// The firewall verdict for one listener on `interface`; an uninspectable
+/// firewall is judged by `unknown`.
 fn firewall_check(
     name: String,
     listener: SocketAddr,
     interface: &str,
-    record: Option<&str>,
+    unknown: UnknownFirewall<'_>,
 ) -> Check {
-    match firewall::inspect(listener, interface) {
-        Verdict::Private => Check::pass(
+    match (firewall::inspect(listener, interface), unknown) {
+        (Verdict::Private, _) => Check::pass(
             name,
             format!("{listener} is admitted from the private interface only"),
         ),
-        Verdict::PublicAdmitted(rule) => Check::fail(
+        (Verdict::PublicAdmitted(rule), _) => Check::fail(
             name,
             format!(
                 "the firewall admits {listener} from a public interface or source range: {rule}"
             ),
         ),
-        Verdict::Unknown(why) if record.is_some() => Check::pass(
+        (Verdict::Unknown(why), UnknownFirewall::Recorded(record)) => Check::pass(
             name,
             format!(
-                "manual check recorded by the operator: {} (the firewall could not be inspected: {why})",
-                record.unwrap_or_default()
+                "manual check recorded by the operator: {record} (the firewall could not be inspected: {why})"
             ),
         ),
-        Verdict::Unknown(why) => Check::fail(
+        (Verdict::Unknown(why), UnknownFirewall::Update) => Check::pass(
+            name,
+            format!(
+                "the firewall could not be inspected ({why}); an update keeps the installed configuration"
+            ),
+        ),
+        (Verdict::Unknown(why), UnknownFirewall::Refused) => Check::fail(
             name,
             format!(
                 "unresolved manual check: {why}; record the interface and rule checked to continue"

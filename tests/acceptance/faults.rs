@@ -7,6 +7,7 @@
 //! The product sees three `JAYNSHARE_`-prefixed environment variables naming
 //! the shim's control files; they change no behaviour of the product itself,
 //! and nothing of the shim is in the product's bytes.
+//! Interposition is Unix-only: scenarios using it compile out on Windows.
 
 use std::io::Write as _;
 use std::process::Command;

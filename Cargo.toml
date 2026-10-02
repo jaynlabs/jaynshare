@@ -1,6 +1,6 @@
 [package]
 name = "jaynshare"
-version = "2.0.1"
+version = "2.1.0-rc.1"
 edition = "2024"
 rust-version = "1.95"
 publish = false
@@ -23,7 +23,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 sha2 = "0.10"
 time = { version = "0.3", features = ["formatting", "parsing", "macros", "serde"] }
-tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "process", "signal", "time", "sync"] }
+tokio = { version = "1", features = ["rt-multi-thread", "fs", "net", "io-util", "macros", "process", "signal", "time", "sync"] }
 toml = "1"
 toml_edit = "0.25"
 tracing = { version = "0.1", default-features = false, features = ["std"] }
@@ -50,6 +50,17 @@ if-addrs = "0.15.0"
 # The keyboard picker's raw mode and keys, read from the controlling terminal
 # (use-dev-tty) so a piped standard input does not blind it.
 crossterm = { version = "0.29", default-features = false, features = ["events", "windows", "use-dev-tty"] }
+
+[target.'cfg(windows)'.dependencies]
+# Private files' ACLs, set and read back by SID through the security API.
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
+] }
 
 [profile.release]
 strip = true

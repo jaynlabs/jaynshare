@@ -1,5 +1,5 @@
-//! `uninstall`: remove the executable, the installation's files and
-//! only the two Claude Code settings entries; leave Claude Code, its credentials,
+//! `uninstall`: remove the executable, its place on the search path, the
+//! installation's files and only the two Claude Code settings entries; leave Claude Code, its credentials,
 //! transcripts and every unrelated setting; report anything that could not be
 //! removed. The server's registry is not touched.
 
@@ -53,7 +53,10 @@ pub(super) async fn uninstall(cli: &Cli) -> Outcome {
     }
     paths.push(executable.clone());
 
-    let mut removed = Vec::new();
+    let mut removed: Vec<String> = super::search_path::unlink(&executable)
+        .map(|link| link.display().to_string())
+        .into_iter()
+        .collect();
     let mut failures: Vec<(String, String)> = Vec::new();
     for path in paths {
         match std::fs::remove_file(&path) {

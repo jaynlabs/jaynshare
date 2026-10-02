@@ -10,9 +10,13 @@
 //! `rolled_back` is 20.
 
 use std::io::Read as _;
-use std::path::Path;
+use std::net::{IpAddr, SocketAddr};
+use std::path::{Path, PathBuf};
 use std::process::Output;
 
+use serde::{Deserialize, Serialize};
+
+use super::address::Detected;
 use super::result::{Check, DeployResult};
 use unix::{MetadataExt as _, PermissionsExt as _};
 
@@ -92,6 +96,12 @@ pub const COMMAND_LINK: &str = "/usr/local/bin/jaynshare";
 pub const SERVICE_USER: &str = "jaynshare";
 /// The service home, which fixes the Linux default paths.
 pub const SERVICE_HOME: &str = "/var/lib/jaynshare";
+/// The client kit's name inside a version directory, so the server's kit is
+/// `CURRENT/client-kit.zip` (contract K1).
+pub const KIT_FILE: &str = "client-kit.zip";
+/// Where the installed release came from, which `server update` with no
+/// version follows.
+pub const ORIGIN_RECORD: &str = "/opt/jaynshare/origin.json";
 
 /// The one wrapper for the account tools the service account needs (`getent`, `id`,
 /// `useradd`, `groupadd`): `<tool> <args>`, standard input closed.
@@ -103,14 +113,95 @@ pub fn account_tool(tool: &str, args: &[&str]) -> Result<Output, String> {
         .map_err(|e| format!("{tool}: {e}"))
 }
 
-/// `server install`'s and `server update`'s inputs.
+/// `server install`'s inputs.
 pub struct InstallInputs<'a> {
-    /// The release directory, verified before anything of it runs.
-    pub from: &'a Path,
-    /// The global `--config` override, else the default path.
+    pub source: Source<'a>,
+    /// The global `--config`: the operator's configuration, copied to the
+    /// service's path. Without it the installed one stays, or one is written.
     pub config: Option<&'a Path>,
-    /// The manual firewall record (preflight's `firewall_record`).
-    pub firewall_record: Option<&'a str>,
+    /// The data-plane address of a written configuration; detected when absent.
+    pub listen: Option<IpAddr>,
+    /// A mirror in place of the recorded or official origin.
+    pub release_origin: Option<&'a str>,
+    /// The global `--tls-ca`: the extra trust anchor for a download.
+    pub tls_ca: Option<&'a Path>,
+    /// Reads one typed line on a terminal; `Err(why)` when there is none.
+    pub ask: &'a dyn Fn(&str) -> Result<String, String>,
+    /// The manual firewall record for the configuration at a path
+    /// (preflight's `UnknownFirewall::Recorded`).
+    pub firewall_record: &'a dyn Fn(&Path) -> Option<String>,
+}
+
+/// Where `server install` and `server update` take a release from.
+pub enum Source<'a> {
+    /// A release directory on this host (`--from`).
+    Directory(&'a Path),
+    /// A published version, fetched from the origin; the newest when `None`.
+    Published(Option<&'a str>),
+    /// A clone's own build (`--binary`) with a client kit: `--kit`, else the
+    /// official kit of the build's version.
+    Build {
+        binary: &'a Path,
+        kit: Option<&'a Path>,
+    },
+}
+
+/// Where the installed release came from, as [`ORIGIN_RECORD`] holds it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum Origin {
+    Official,
+    /// An `https` mirror of the release origin.
+    Mirror(String),
+    /// A clone build's executable, installed again as it is rebuilt.
+    Build(PathBuf),
+}
+
+impl Origin {
+    /// What `server update` installs from this origin.
+    pub(super) fn followed(&self) -> String {
+        match self {
+            Self::Official => "the newest official release".to_owned(),
+            Self::Mirror(mirror) => format!("the newest release at {mirror}"),
+            Self::Build(binary) => format!("the build at {}", binary.display()),
+        }
+    }
+}
+
+/// What the transaction stages below `RELEASES/<version>/`.
+enum Payload {
+    /// A verified release directory: its platform archive, and its client kit
+    /// when the set carries one.
+    Release(PathBuf),
+    /// A clone build's executable and its verified client kit.
+    Build { binary: PathBuf, kit: PathBuf },
+}
+
+/// A verified release, ready for the transaction.
+struct Prepared {
+    payload: Payload,
+    /// The version directory's name.
+    version: String,
+    /// What `server update` follows next; `None` keeps the recorded origin.
+    origin: Option<Origin>,
+    /// The download, removed when the operation ends.
+    _scratch: Option<Scratch>,
+}
+
+/// A temporary directory, removed when dropped.
+struct Scratch(PathBuf);
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Where a release or a client kit is downloaded from.
+struct Fetch<'a> {
+    /// A mirror; `None` is the official origin.
+    origin: Option<&'a str>,
+    tls_ca: Option<&'a Path>,
 }
 
 /// A server install runs only on Linux x86-64 or arm64 with
@@ -386,47 +477,436 @@ fn judge_account(passwd: &str, group_ids: &str, primary_gid: u32) -> Vec<Check> 
 
 /// `server install`, in this order; each step's checks go
 /// into the result and the first failing step ends it:
-/// 1. [`platform_gate`] — before anything is read or written;
-/// 2. `release::verify` of `--from` — nothing of it runs before it verifies;
-/// 3. [`service_account`] — create or reuse `jaynshare`;
-/// 4. `preflight::run` — binds nothing;
-/// 5. [`transaction`] — stage, select, reload, start, check, and roll back
-///    after selection.
+/// 1. [`platform_gate`], and no build while auto-update is on;
+/// 2. [`prepare`] — nothing of the release runs before it verifies;
+/// 3. on an installed server, no downgrade: running install again updates;
+/// 4. [`service_account`] — create or reuse `jaynshare`;
+/// 5. the configuration: `--config`, else the installed one, else
+///    [`generate_configuration`];
+/// 6. `preflight::run` against it — binds nothing;
+/// 7. [`transaction`] — stage, select, reload, start, check, and roll back
+///    after selection;
+/// 8. the origin `server update` follows next.
 pub fn install(inputs: &InstallInputs<'_>) -> DeployResult {
     let mut result = DeployResult::new("server install");
     if !gated(&mut result, platform_gate("server install")) {
         return result;
     }
-    let verified = super::release::verify(inputs.from, None);
-    result.version = verified.version.clone();
-    result.commit = verified.commit.clone();
-    if !gated(&mut result, verified.checks) {
+    if matches!(inputs.source, Source::Build { .. }) && super::auto_update::is_on() {
+        result.checks.push(Check::fail(
+            "conflict.auto_update",
+            "auto-update follows releases only; run server auto-update off before installing a build",
+        ));
+        return result;
+    }
+    let recorded = recorded_origin();
+    let fetch = Fetch {
+        origin: fetch_origin(inputs.release_origin, recorded.as_ref()),
+        tls_ca: inputs.tls_ca,
+    };
+    let Some(prepared) = prepare(&inputs.source, &fetch, &mut result) else {
+        return result;
+    };
+    if let Some(check) = downgrade(&prepared.version) {
+        result.checks.push(check);
         return result;
     }
     if !gated(&mut result, service_account()) {
         return result;
     }
+    let service_config = service_config_path();
+    let generated = match (inputs.config, service_config.exists(), inputs.listen) {
+        (None, false, listen) => match generate_configuration(listen, inputs.ask) {
+            Ok((scratch, check)) => {
+                result.checks.push(check);
+                Some(scratch)
+            }
+            Err(check) => {
+                result.checks.push(check);
+                return result;
+            }
+        },
+        (_, _, Some(_)) => {
+            result.checks.push(Check::fail(
+                "configuration.listen",
+                "--listen applies only when install writes the configuration, and one is already given or installed",
+            ));
+            return result;
+        }
+        _ => None,
+    };
+    let supplied = inputs.config.map(Path::to_path_buf).or_else(|| {
+        generated
+            .as_ref()
+            .map(|scratch| scratch.0.join("config.toml"))
+    });
+    let checked = supplied.clone().unwrap_or(service_config);
+    let record = (inputs.firewall_record)(&checked);
     let preflight = super::preflight::run(&super::preflight::Inputs {
         from: None,
-        config: inputs.config,
-        firewall_record: inputs.firewall_record,
+        config: Some(&checked),
+        unknown_firewall: super::preflight::UnknownFirewall::recorded(record.as_deref()),
     });
     if !gated(&mut result, preflight.checks) {
         return result;
     }
-    transaction(inputs, &mut result);
+    transaction(&prepared.payload, supplied.as_deref(), &mut result);
+    record_origin(&prepared, &mut result);
     result
 }
 
+/// Reads, fetches or builds `source` and verifies it; a failure lands in
+/// `result` and the answer is `None`. Nothing is written but a scratch
+/// directory.
+fn prepare(source: &Source<'_>, fetch: &Fetch<'_>, result: &mut DeployResult) -> Option<Prepared> {
+    if !matches!(source, Source::Directory(_)) && !unix::is_root() {
+        result.checks.push(Check::fail(
+            "preflight.administrator",
+            format!("run as an administrator able to stage a release below {RELEASES}"),
+        ));
+        return None;
+    }
+    match source {
+        Source::Directory(dir) => verified_release(dir.to_path_buf(), None, None, result),
+        Source::Published(version) => {
+            let (dir, scratch) = fetch_release(*version, fetch, result)?;
+            let origin = fetch
+                .origin
+                .map_or(Origin::Official, |mirror| Origin::Mirror(mirror.to_owned()));
+            verified_release(dir, Some(scratch), Some(origin), result)
+        }
+        Source::Build { binary, kit } => prepare_build(binary, *kit, fetch, result),
+    }
+}
+
+/// The release at `dir` once `release::verify` passes.
+fn verified_release(
+    dir: PathBuf,
+    scratch: Option<Scratch>,
+    origin: Option<Origin>,
+    result: &mut DeployResult,
+) -> Option<Prepared> {
+    let verified = super::release::verify(&dir, None);
+    result.version = verified.version.clone();
+    result.commit = verified.commit.clone();
+    if !gated(result, verified.checks) {
+        return None;
+    }
+    Some(Prepared {
+        payload: Payload::Release(dir),
+        version: verified
+            .version
+            .expect("a verified release names a version"),
+        origin,
+        _scratch: scratch,
+    })
+}
+
+/// `version`, the origin's newest when `None`, fetched into a root-owned
+/// scratch directory below [`RELEASES`].
+fn fetch_release(
+    version: Option<&str>,
+    fetch: &Fetch<'_>,
+    result: &mut DeployResult,
+) -> Option<(PathBuf, Scratch)> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let version = match version {
+        Some(version) => version.to_owned(),
+        None => {
+            match runtime.block_on(super::release::newest_version(fetch.origin, fetch.tls_ca)) {
+                Ok(version) => version,
+                Err(why) => {
+                    result.checks.push(Check::fail("release.unreachable", why));
+                    return None;
+                }
+            }
+        }
+    };
+    // Created as the stage creates it, so the fetch's private directory
+    // below it is the only one narrowed to 0700.
+    if let Err(why) = std::fs::create_dir_all(RELEASES) {
+        result
+            .checks
+            .push(Check::fail("release.out", format!("{RELEASES}: {why}")));
+        return None;
+    }
+    let out = Path::new(RELEASES).join(format!(".fetch-{version}-{}", std::process::id()));
+    let scratch = Scratch(out.clone());
+    let fetched = runtime.block_on(super::release::fetch(
+        &version,
+        &out,
+        None,
+        fetch.origin,
+        fetch.tls_ca,
+    ));
+    if fetched.failed().is_some() {
+        result.checks.extend(fetched.checks);
+        return None;
+    }
+    Some((out, scratch))
+}
+
+/// A clone's build: its version and digest name the version directory
+/// (`<version>+local.<digest>`), and its client kit — `kit`, else the
+/// official kit of that version — verifies under the active release key.
+fn prepare_build(
+    binary: &Path,
+    kit: Option<&Path>,
+    fetch: &Fetch<'_>,
+    result: &mut DeployResult,
+) -> Option<Prepared> {
+    let identity = std::fs::canonicalize(binary)
+        .map_err(|why| format!("{}: {why}", binary.display()))
+        .and_then(|binary| {
+            let (version, commit) = build_identity(&binary)?;
+            let bytes =
+                std::fs::read(&binary).map_err(|why| format!("{}: {why}", binary.display()))?;
+            Ok((binary, version, commit, crate::bundle::sha256_hex(&bytes)))
+        });
+    let (binary, version, commit, digest) = match identity {
+        Ok(identity) => identity,
+        Err(why) => {
+            result.checks.push(Check::fail("release.binary", why));
+            return None;
+        }
+    };
+    let name = format!("{version}+local.{}", &digest[..12]);
+    result.version = Some(name.clone());
+    result.commit = Some(commit);
+    result.checks.push(Check::pass(
+        "release.binary",
+        format!("{} is jaynshare {version}", binary.display()),
+    ));
+    let (kit, scratch, kit_version) = match verified_kit(kit, &version, fetch) {
+        Ok(verified) => verified,
+        Err(why) => {
+            result.checks.push(Check::fail("release.kit", why));
+            return None;
+        }
+    };
+    result.checks.push(Check::pass(
+        "release.kit",
+        format!("the client kit {kit_version} verifies under the active release key"),
+    ));
+    Some(Prepared {
+        payload: Payload::Build {
+            binary: binary.clone(),
+            kit,
+        },
+        version: name,
+        origin: Some(Origin::Build(binary)),
+        _scratch: scratch,
+    })
+}
+
+/// A build's client kit — `kit`, else the official kit of `version`,
+/// downloaded to a scratch directory — once it verifies under the active
+/// release key; with the kit's own version.
+fn verified_kit(
+    kit: Option<&Path>,
+    version: &str,
+    fetch: &Fetch<'_>,
+) -> Result<(PathBuf, Option<Scratch>, String), String> {
+    let (kit, scratch) = match kit {
+        Some(kit) => (kit.to_path_buf(), None),
+        None => {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime");
+            let path = runtime
+                .block_on(super::release::fetch_client_kit(
+                    version,
+                    fetch.origin,
+                    fetch.tls_ca,
+                ))
+                .map_err(|why| {
+                    format!("the official client kit of {version}: {why}; pass --kit <zip>")
+                })?;
+            let scratch = path.parent().map(|dir| Scratch(dir.to_path_buf()));
+            (path, scratch)
+        }
+    };
+    let verified = super::release::active_key()
+        .and_then(|key| crate::bundle::verify_kit_zip(&kit, &key))
+        .map_err(|why| format!("{}: {why}", kit.display()))?;
+    Ok((kit, scratch, verified.version))
+}
+
+/// `<binary> --version --json`'s version and commit; the version must be
+/// a plain one, as it names a directory.
+fn build_identity(binary: &Path) -> Result<(String, String), String> {
+    let unanswered = || format!("{} --version answered no version", binary.display());
+    let output = std::process::Command::new(binary)
+        .args(["--version", "--json"])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|why| format!("{}: {why}", binary.display()))?;
+    let envelope: serde_json::Value =
+        serde_json::from_slice(&output.stdout).map_err(|_| unanswered())?;
+    let field = |key: &str| envelope["result"][key].as_str().map(str::to_owned);
+    match (field("version"), field("commit")) {
+        (Some(version), Some(commit)) if output.status.success() && plain_version(&version) => {
+            Ok((version, commit))
+        }
+        _ => Err(unanswered()),
+    }
+}
+
+/// A version that is safe as a directory name: SemVer's characters only.
+fn plain_version(version: &str) -> bool {
+    !version.is_empty()
+        && version
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+'))
+}
+
+/// The origin to fetch from: `explicit`, else the recorded mirror, else the
+/// official one (`None`).
+fn fetch_origin<'a>(explicit: Option<&'a str>, recorded: Option<&'a Origin>) -> Option<&'a str> {
+    explicit.or(match recorded {
+        Some(Origin::Mirror(mirror)) => Some(mirror.as_str()),
+        _ => None,
+    })
+}
+
+/// The recorded origin; `None` when there is no record or it does not parse.
+pub(super) fn recorded_origin() -> Option<Origin> {
+    serde_json::from_slice(&std::fs::read(ORIGIN_RECORD).ok()?).ok()
+}
+
+/// After a successful transaction, the origin `server update` follows next.
+fn record_origin(prepared: &Prepared, result: &mut DeployResult) {
+    let Some(origin) = &prepared.origin else {
+        return;
+    };
+    if result.failed().is_some() || result.rolled_back {
+        return;
+    }
+    let bytes = serde_json::to_vec(origin).expect("an origin serializes");
+    result.checks.push(
+        match write_private_bytes(Path::new(ORIGIN_RECORD), &bytes, 0o644) {
+            Ok(()) => Check::pass(
+                "manager.origin",
+                format!("server update follows {}", origin.followed()),
+            ),
+            Err(why) => Check::fail("manager.origin", format!("{ORIGIN_RECORD}: {why}")),
+        },
+    );
+}
+
+/// The refusal of `version` when it is lower than the installed release.
+fn downgrade(version: &str) -> Option<Check> {
+    let current = file_name(&std::fs::read_link(CURRENT).ok()?);
+    (semver_precedence(version, &current) == std::cmp::Ordering::Less).then(|| {
+        Check::fail(
+            "conflict.downgrade",
+            format!(
+                "{version} is lower than the installed {current}; a downgrade needs server update --allow-downgrade"
+            ),
+        )
+    })
+}
+
+/// A configuration for this host when there is none: the data plane on
+/// `listen`, else on the detected address, else on the one the operator
+/// types; every other key takes its default, the proxy listener included.
+/// It is written to a private scratch file, which the transaction copies.
+fn generate_configuration(
+    listen: Option<IpAddr>,
+    ask: &dyn Fn(&str) -> Result<String, String>,
+) -> Result<(Scratch, Check), Check> {
+    let (ip, how) = match listen {
+        Some(ip) => (ip, "given by --listen".to_owned()),
+        None => match super::address::detect_listen() {
+            Detected::One(ip, how) => (ip, how),
+            Detected::Choose(candidates) => ask_listen(&candidates, ask)?,
+        },
+    };
+    let port = crate::config::DEFAULT_LISTEN
+        .parse::<SocketAddr>()
+        .expect("the default listener parses")
+        .port();
+    let listen = SocketAddr::new(ip, port);
+    let dir = std::env::temp_dir().join(format!("jaynshare-install-{}", std::process::id()));
+    let scratch = Scratch(dir.clone());
+    let path = dir.join("config.toml");
+    crate::state::ensure_private_dir(&dir)
+        .and_then(|()| crate::state::open_private(&path))
+        .and_then(|mut file| {
+            use std::io::Write as _;
+            file.write_all(configuration_text(listen, &how).as_bytes())
+        })
+        .map_err(|why| {
+            Check::fail(
+                "configuration.generated",
+                format!("{}: {why}", path.display()),
+            )
+        })?;
+    Ok((
+        scratch,
+        Check::pass(
+            "configuration.generated",
+            format!("the data plane listens on {listen} ({how})"),
+        ),
+    ))
+}
+
+/// The address the operator types when detection found no single one;
+/// refused without a terminal.
+fn ask_listen(
+    candidates: &[(String, IpAddr)],
+    ask: &dyn Fn(&str) -> Result<String, String>,
+) -> Result<(IpAddr, String), Check> {
+    let found = match candidates {
+        [] => "none".to_owned(),
+        _ => candidates
+            .iter()
+            .map(|(interface, ip)| format!("{ip} on {interface}"))
+            .collect::<Vec<_>>()
+            .join(", "),
+    };
+    let refused = |why: String| {
+        Check::fail(
+            "configuration.listen",
+            format!(
+                "no single private address to listen on (found: {found}){why}; pass --listen <ip> or --config <path>"
+            ),
+        )
+    };
+    let line = ask(&format!(
+        "No single private IPv4 address to listen on (found: {found}).\nListen on: "
+    ))
+    .map_err(|_| refused(String::new()))?;
+    line.parse()
+        .map(|ip| (ip, "typed at install".to_owned()))
+        .map_err(|_| refused(format!(", and {line:?} is not an address")))
+}
+
+/// The generated document: the data-plane address, its TLS on the server
+/// identity, and the service's state file named outright, so root reading
+/// this configuration finds the identity key the service wrote.
+fn configuration_text(listen: SocketAddr, how: &str) -> String {
+    let state_file = state_root().join("state.json").display().to_string();
+    format!(
+        "# Written by `jaynshare server install`. Listener address: {how}.\n\
+         version = 1\n\n[data_plane]\nlisten = \"{listen}\"\ntls = \"identity\"\n\n\
+         [storage]\nstate_file = {state_file:?}\n"
+    )
+}
+
 /// Appends `checks` to `result`; `true` when every one passed.
-fn gated(result: &mut DeployResult, checks: Vec<Check>) -> bool {
+pub(super) fn gated(result: &mut DeployResult, checks: Vec<Check>) -> bool {
     let passed = checks.iter().all(|check| check.passed);
     result.checks.extend(checks);
     passed
 }
 
 /// After the release verified and preflight passed: stage the
-/// native archive's files below `RELEASES/<version>/` (root-owned, not
+/// payload's files below `RELEASES/<version>/` (root-owned, not
 /// writable by the service user; the executable at
 /// `RELEASES/<version>/jaynshare`), copy a supplied configuration atomically
 /// as `0600` owned by the service user without overwriting one,
@@ -434,7 +914,7 @@ fn gated(result: &mut DeployResult, checks: Vec<Check>) -> bool {
 /// [`COMMAND_LINK`], `daemon-reload`, enable and start or restart the unit,
 /// and complete the loopback status read within 30 s. A failure after
 /// selection calls [`rollback`].
-pub fn transaction(inputs: &InstallInputs<'_>, result: &mut DeployResult) {
+fn transaction(payload: &Payload, supplied_config: Option<&Path>, result: &mut DeployResult) {
     let Some(version) = result.version.clone() else {
         result.checks.push(Check::fail(
             "release.version",
@@ -444,16 +924,16 @@ pub fn transaction(inputs: &InstallInputs<'_>, result: &mut DeployResult) {
     };
     let target = super::release::native_target();
 
-    // 1. Stage: the archive's four files below RELEASES/<version>/.
-    let staged = stage(inputs.from, &version, target, result);
+    // 1. Stage: the payload's files below RELEASES/<version>/.
+    let staged = stage(payload, &version, target, result);
     if !staged {
         return;
     }
     let version_dir = format!("{RELEASES}/{version}");
 
-    // 2. Configuration: a supplied file is copied atomically as
-    //    0600 owned by the service user; an existing one must be identical;
-    //    none is ever synthesized.
+    // 2. Configuration: a supplied file (the operator's or the generated
+    //    one) is copied atomically as 0600 owned by the service user; an
+    //    existing one must be identical.
     let service_config = service_config_path();
 
     // Everything the transaction may have to undo, recorded before
@@ -469,7 +949,7 @@ pub fn transaction(inputs: &InstallInputs<'_>, result: &mut DeployResult) {
         state_dir: None,
         snapshot: None,
     };
-    let supplied = match inputs.config {
+    let supplied = match supplied_config {
         Some(config) => match std::fs::read(config) {
             Ok(bytes) => Some(bytes),
             Err(why) => {
@@ -499,7 +979,7 @@ pub fn transaction(inputs: &InstallInputs<'_>, result: &mut DeployResult) {
         );
         result.checks.push(match config_step {
         ConfigDecision::Copy => copy_configuration(
-            inputs.config.expect("a Copy decision has a source"),
+            supplied_config.expect("a Copy decision has a source"),
             &service_config,
         ),
         ConfigDecision::Keep => Check::pass(
@@ -514,12 +994,12 @@ pub fn transaction(inputs: &InstallInputs<'_>, result: &mut DeployResult) {
             format!(
                 "{} differs from the supplied {}; the existing configuration is never overwritten",
                 service_config.display(),
-                inputs.config.expect("a Conflict decision has a source").display()
+                supplied_config.expect("a Conflict decision has a source").display()
             ),
         ),
         ConfigDecision::Missing => Check::fail(
             "configuration.missing",
-            "a configuration is never synthesized: supply --config <path> or place one at the service's path first",
+            "the service has no configuration: server install writes one, or supply --config <path>",
         ),
     });
         if !result.checks.iter().all(|check| check.passed) {
@@ -686,23 +1166,10 @@ enum ArchiveEntry {
     Refuse,
 }
 
-/// The stage: extract [`judge_archive_entry`]'s files from the
-/// platform archive into `.staging-<version>-<pid>`, set root's modes, then
-/// reuse, refuse or install the version directory. `false` when the result
-/// now holds the failure.
-fn stage(from: &Path, version: &str, target: &str, result: &mut DeployResult) -> bool {
-    let archive_path = from.join(format!("jaynshare-{version}-{target}.tar.gz"));
-    let bytes = match std::fs::read(&archive_path) {
-        Ok(bytes) => bytes,
-        Err(why) => {
-            result.checks.push(Check::fail(
-                "release.archive",
-                format!("{}: {why}", archive_path.display()),
-            ));
-            return false;
-        }
-    };
-    let root = format!("jaynshare-{version}-{target}");
+/// The stage: [`fill_staging`] into `.staging-<version>-<pid>`, set root's
+/// modes, then reuse, refuse or install the version directory. `false` when
+/// the result now holds the failure.
+fn stage(payload: &Payload, version: &str, target: &str, result: &mut DeployResult) -> bool {
     let staging_root = Path::new("/opt/jaynshare");
     let staging = staging_root.join(format!(
         "releases/.staging-{version}-{}",
@@ -711,19 +1178,18 @@ fn stage(from: &Path, version: &str, target: &str, result: &mut DeployResult) ->
     let cleanup = || {
         let _ = std::fs::remove_dir_all(&staging);
     };
-    if let Err(why) = extract_archive(&bytes, &root, &staging) {
-        cleanup();
-        result.checks.push(why);
-        return false;
-    }
-    // Root owns the tree, the executable 0755, the documents 0644.
-    for (name, mode) in [
-        ("jaynshare", 0o755),
-        ("LICENSE", 0o644),
-        ("NOTICE.md", 0o644),
-        ("README.txt", 0o644),
-    ] {
-        let path = staging.join(name);
+    let with_kit = match fill_staging(payload, version, target, &staging) {
+        Ok(with_kit) => with_kit,
+        Err(why) => {
+            cleanup();
+            result.checks.push(why);
+            return false;
+        }
+    };
+    // Root owns the tree, the executable 0755, everything else 0644.
+    for (name, _) in tree_files(&staging).unwrap_or_default() {
+        let path = staging.join(&name);
+        let mode = if name == "jaynshare" { 0o755 } else { 0o644 };
         if let Err(why) = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode))
             .map_err(|why| format!("{}: {why}", path.display()))
             .and_then(|()| {
@@ -740,8 +1206,8 @@ fn stage(from: &Path, version: &str, target: &str, result: &mut DeployResult) ->
     // a conflict, absence installs the staging.
     let version_dir = staging_root.join(format!("releases/{version}"));
     match std::fs::read_dir(&version_dir) {
-        Ok(entries) => {
-            let same = same_tree(&staging, entries);
+        Ok(_) => {
+            let same = tree_files(&staging) == tree_files(&version_dir);
             cleanup();
             if !same {
                 result.checks.push(Check::fail(
@@ -782,36 +1248,71 @@ fn stage(from: &Path, version: &str, target: &str, result: &mut DeployResult) ->
     }
     result.checks.push(Check::pass(
         "release.archive",
-        format!("staged {} below {} root-owned", version, RELEASES),
+        if with_kit {
+            format!("staged {version} below {RELEASES} root-owned, with its client kit")
+        } else {
+            format!(
+                "staged {version} below {RELEASES} root-owned; the release set carries no client kit, so clients cannot follow this server"
+            )
+        },
     ));
     true
 }
 
-/// Whether `staged` and `existing` hold identical file sets and bytes
-/// (`read_dir` on the version directory; the digest is names plus bytes).
-fn same_tree(staged: &Path, entries: std::fs::ReadDir) -> bool {
-    let mut existing: Vec<(String, Vec<u8>)> = entries
-        .filter_map(|entry| entry.ok())
-        .filter(|entry| entry.file_type().map(|t| t.is_file()).unwrap_or(false))
+/// The version directory's files into `staging`: the platform archive's
+/// four or the build's executable, then the client kit as [`KIT_FILE`] when
+/// there is one. `Ok(whether the kit is there)`.
+fn fill_staging(
+    payload: &Payload,
+    version: &str,
+    target: &str,
+    staging: &Path,
+) -> Result<bool, Check> {
+    let copy = |from: &Path, name: &str| {
+        std::fs::create_dir_all(staging)
+            .and_then(|()| std::fs::copy(from, staging.join(name)))
+            .map(|_| ())
+            .map_err(|why| Check::fail("release.archive", format!("{}: {why}", from.display())))
+    };
+    let kit = match payload {
+        Payload::Release(from) => {
+            let archive_path = from.join(format!("jaynshare-{version}-{target}.tar.gz"));
+            let bytes = std::fs::read(&archive_path).map_err(|why| {
+                Check::fail(
+                    "release.archive",
+                    format!("{}: {why}", archive_path.display()),
+                )
+            })?;
+            extract_archive(&bytes, &format!("jaynshare-{version}-{target}"), staging)?;
+            Some(from.join(format!("jaynshare-{version}-client-kit.zip")))
+                .filter(|kit| kit.is_file())
+        }
+        Payload::Build { binary, kit } => {
+            copy(binary, "jaynshare")?;
+            Some(kit.clone())
+        }
+    };
+    match kit {
+        Some(kit) => copy(&kit, KIT_FILE).map(|()| true),
+        None => Ok(false),
+    }
+}
+
+/// A directory's regular files as `(name, bytes)`, sorted by name; `None`
+/// when one cannot be read.
+fn tree_files(dir: &Path) -> Option<Vec<(String, Vec<u8>)>> {
+    let mut files = std::fs::read_dir(dir)
+        .ok()?
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
         .map(|entry| {
             let name = entry.file_name().to_string_lossy().into_owned();
             std::fs::read(entry.path()).map(|bytes| (name, bytes))
         })
-        .collect::<Result<_, _>>()
-        .ok()
-        .unwrap_or_default();
-    existing.sort();
-    let mut staged_files: Vec<(String, Vec<u8>)> =
-        ["jaynshare", "LICENSE", "NOTICE.md", "README.txt"]
-            .iter()
-            .filter_map(|name| {
-                std::fs::read(staged.join(name))
-                    .ok()
-                    .map(|b| ((*name).to_owned(), b))
-            })
-            .collect();
-    staged_files.sort();
-    staged_files == existing
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?;
+    files.sort();
+    Some(files)
 }
 
 /// The platform archive's members into `staging`: only the root directory
@@ -1339,7 +1840,7 @@ fn apply_meta(path: &Path, meta: &std::fs::Metadata) -> Result<(), String> {
         .map_err(|why| format!("{}: {why}", path.display()))
 }
 
-/// Stop and disable the unit, remove it and the command link, keep
+/// Stop and disable the unit, remove it, the auto-update timer and the command link, keep
 /// everything else. `--purge`: name every path, read a typed
 /// confirmation — `confirm(prompt)` is `Ok(the typed line)`, or `Err(why)`
 /// when there is no terminal, and then the purge refuses with a
@@ -1456,7 +1957,7 @@ fn escape_offenders() -> Vec<String> {
 }
 
 /// The purge: name every path, warn, read the typed confirmation, then
-/// stop and disable the unit, remove the five paths and reload — keeping the
+/// stop and disable the unit, remove the auto-update timer and the five paths and reload — keeping the
 /// service account and [`SERVICE_HOME`] itself. Nothing is removed before
 /// the confirmation or on any refusal.
 fn do_purge(result: &mut DeployResult, confirm: &dyn Fn(&str) -> Result<String, String>) {
@@ -1502,7 +2003,7 @@ fn do_purge(result: &mut DeployResult, confirm: &dyn Fn(&str) -> Result<String, 
         Ok(_) => {}
     }
     stop_and_disable(result);
-    if !result.checks.iter().all(|check| check.passed) {
+    if !result.checks.iter().all(|check| check.passed) || !super::auto_update::remove(result) {
         return;
     }
     for path in paths {
@@ -1530,12 +2031,12 @@ fn do_purge(result: &mut DeployResult, confirm: &dyn Fn(&str) -> Result<String, 
     result.paths = purge_paths().into_iter().map(str::to_owned).collect();
 }
 
-/// The preserve uninstall: stop and disable the unit, remove the unit
+/// The preserve uninstall: stop and disable the unit, remove it, the auto-update timer
 /// and the command link, reload, and keep every release, the selection, the
 /// configuration, the state, the logs and the service account.
 fn preserve(result: &mut DeployResult) {
     stop_and_disable(result);
-    if !result.checks.iter().all(|check| check.passed) {
+    if !result.checks.iter().all(|check| check.passed) || !super::auto_update::remove(result) {
         return;
     }
     for (path, name) in [
@@ -1638,8 +2139,8 @@ fn daemon_reload(result: &mut DeployResult) {
     }
 }
 
-/// `server update`'s inputs: a release directory, or a version fetched
-/// from the release origin (or the `--release-origin` mirror) first.
+/// `server update`'s inputs: a release directory, a version fetched from
+/// the origin first, or neither, for what the recorded origin offers.
 pub struct UpdateInputs<'a> {
     pub from: Option<&'a Path>,
     pub version: Option<&'a str>,
@@ -1649,79 +2150,55 @@ pub struct UpdateInputs<'a> {
     pub allow_downgrade: bool,
     /// The global `--yes`: skips the update's confirmation.
     pub yes: bool,
-    /// The manual firewall record (preflight's `firewall_record`).
-    pub firewall_record: Option<&'a str>,
     /// Reads one typed line on a terminal; `Err(why)` when there is none.
     pub confirm: &'a dyn Fn(&str) -> Result<String, String>,
 }
 
 /// Verify, then install, refusing a lower version unless
-/// `allow_downgrade`; never rewrites configuration or state.
+/// `allow_downgrade`; never rewrites configuration or state. With neither
+/// `--from` nor `--version` it follows the recorded origin: the newest
+/// release there, or the clone build at its recorded path; already on that
+/// is success with nothing done.
 pub fn update(inputs: &UpdateInputs<'_>) -> DeployResult {
     let mut result = DeployResult::new("server update");
     if !gated(&mut result, platform_gate("server update")) {
         return result;
     }
-    // The release: `--from`, or `--version` fetched first (an update
-    // is the one explicit release download) into a root-owned temporary
-    // directory under RELEASES. `release fetch`'s product code does the
-    // origin work (the official origin, or `--release-origin`).
-    let fetched = match inputs.from {
-        Some(_) => None,
-        None => {
-            let version = inputs
-                .version
-                .expect("the CLI requires --from or --version for server update");
-            let out = Path::new(RELEASES).join(format!(".update-{version}-{}", std::process::id()));
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("runtime");
-            let fetched = runtime.block_on(super::release::fetch(
-                version,
-                &out,
-                None,
-                inputs.release_origin,
-                inputs.tls_ca,
-            ));
-            if fetched.failed().is_some() {
-                result.checks.extend(fetched.checks);
-                let _ = std::fs::remove_dir_all(&out);
-                return result;
-            }
-            Some(out)
-        }
+    let recorded = recorded_origin();
+    let fetch = Fetch {
+        origin: fetch_origin(inputs.release_origin, recorded.as_ref()),
+        tls_ca: inputs.tls_ca,
     };
-    let from = fetched
-        .as_deref()
-        .unwrap_or_else(|| inputs.from.expect("the CLI requires --from or --version"));
-    update_verified(inputs, from, &mut result);
-    if let Some(temp) = fetched {
-        let _ = std::fs::remove_dir_all(temp);
+    let source = match (inputs.from, inputs.version, &recorded) {
+        (Some(from), _, _) => Source::Directory(from),
+        (None, Some(version), _) => Source::Published(Some(version)),
+        (None, None, Some(Origin::Build(binary))) if inputs.release_origin.is_none() => {
+            Source::Build { binary, kit: None }
+        }
+        (None, None, _) => Source::Published(None),
+    };
+    if let Some(prepared) = prepare(&source, &fetch, &mut result) {
+        let explicit = inputs.from.is_some() || inputs.version.is_some();
+        update_prepared(inputs, &prepared, explicit, &mut result);
     }
     result
 }
 
-/// `update` once the release sits at `from` (fetched when it came from
-/// `--version`): the release verification, the installed-release and version
+/// `update` once the release is verified: the installed-release and version
 /// gates, the confirmation, then the install steps with no `--config`
-/// (configuration, state and the prior release are kept).
-fn update_verified(inputs: &UpdateInputs<'_>, from: &Path, result: &mut DeployResult) {
-    // The release verifies before anything of it is written.
-    let verified = super::release::verify(from, None);
-    result.version = verified.version.clone();
-    result.commit = verified.commit.clone();
-    if !gated(result, verified.checks) {
-        return;
-    }
-    let version = result
-        .version
-        .clone()
-        .expect("a verified release names a version");
+/// (configuration, state and the prior release are kept). `explicit` is a
+/// release the operator named, for which being on it already is a conflict.
+fn update_prepared(
+    inputs: &UpdateInputs<'_>,
+    prepared: &Prepared,
+    explicit: bool,
+    result: &mut DeployResult,
+) {
+    let version = &prepared.version;
 
     // An update updates an installation: CURRENT must resolve.
-    let previous = match std::fs::read_link(CURRENT) {
-        Ok(link) => link,
+    let current = match std::fs::read_link(CURRENT) {
+        Ok(link) => file_name(&link),
         Err(_) => {
             result.checks.push(Check::fail(
                 "conflict.install",
@@ -1730,28 +2207,25 @@ fn update_verified(inputs: &UpdateInputs<'_>, from: &Path, result: &mut DeployRe
             return;
         }
     };
-    let current = file_name(&previous);
 
     // SemVer precedence against the current release's version (read
     // from CURRENT's directory name).
-    match semver_precedence(&version, &current) {
-        std::cmp::Ordering::Less if !inputs.allow_downgrade => {
-            result.checks.push(Check::fail(
-                "conflict.downgrade",
-                format!(
-                    "{version} is lower than the installed {current}; a downgrade needs --allow-downgrade"
-                ),
-            ));
-            return;
-        }
-        std::cmp::Ordering::Equal => {
-            result.checks.push(Check::fail(
-                "conflict.same_version",
-                format!("already on {version}"),
-            ));
-            return;
-        }
-        _ => {}
+    if !inputs.allow_downgrade
+        && let Some(check) = downgrade(version)
+    {
+        result.checks.push(check);
+        return;
+    }
+    if *version == current {
+        result.checks.push(if explicit {
+            Check::fail("conflict.same_version", format!("already on {version}"))
+        } else {
+            Check::pass(
+                "release.current",
+                format!("already on {version}; nothing to do"),
+            )
+        });
+        return;
     }
 
     // The update restarts the service; `--yes` stands in for the
@@ -1787,19 +2261,13 @@ fn update_verified(inputs: &UpdateInputs<'_>, from: &Path, result: &mut DeployRe
     let preflight = super::preflight::run(&super::preflight::Inputs {
         from: None,
         config: Some(&service_config),
-        firewall_record: inputs.firewall_record,
+        unknown_firewall: super::preflight::UnknownFirewall::Update,
     });
     if !gated(result, preflight.checks) {
         return;
     }
-    transaction(
-        &InstallInputs {
-            from,
-            config: None,
-            firewall_record: None,
-        },
-        result,
-    );
+    transaction(&prepared.payload, None, result);
+    record_origin(prepared, result);
 }
 
 /// Remove releases older than the newest `keep`, never `current`'s
@@ -2228,6 +2696,90 @@ mod tests {
             state_root(),
             std::path::PathBuf::from("/var/lib/jaynshare/.local/state/jaynshare")
         );
+    }
+
+    #[test]
+    fn the_generated_configuration_moves_the_listeners_onto_identity_tls() {
+        let listen: SocketAddr = "100.101.102.103:17421".parse().unwrap();
+        let text = configuration_text(listen, "this host's Tailscale address");
+        let config = crate::config::parse(text.as_bytes(), Path::new("/var/lib/jaynshare"))
+            .expect("the generated configuration is valid");
+        assert_eq!(config.data_plane.listen, listen);
+        assert_eq!(config.data_plane.tls, crate::config::ListenerTls::Identity);
+        assert_eq!(
+            config.storage.state_file,
+            crate::config::absolute(&state_root().join("state.json"))
+        );
+        assert!(config.mitm.enabled);
+        assert_eq!(config.mitm.listen.to_string(), "100.101.102.103:17422");
+        let ipv6: SocketAddr = "[fd00::5]:17421".parse().unwrap();
+        let text = configuration_text(ipv6, "typed at install");
+        let config = crate::config::parse(text.as_bytes(), Path::new("/")).expect("valid");
+        assert_eq!(config.data_plane.listen, ipv6);
+    }
+
+    #[test]
+    fn the_listen_question_takes_an_address_and_refuses_without_one() {
+        let candidates = [
+            ("eth0".to_owned(), "192.168.1.5".parse().unwrap()),
+            ("docker0".to_owned(), "172.17.0.1".parse().unwrap()),
+        ];
+        let typed = |line: &'static str| move |_: &str| Ok::<_, String>(line.to_owned());
+        assert_eq!(
+            ask_listen(&candidates, &typed("192.168.1.5")).expect("an address"),
+            (candidates[0].1, "typed at install".to_owned())
+        );
+        let refused = ask_listen(&candidates, &typed("eth0")).expect_err("not an address");
+        assert_eq!(refused.name, "configuration.listen");
+        let no_terminal = |_: &str| Err("no terminal".to_owned());
+        let refused = ask_listen(&candidates, &no_terminal).expect_err("no terminal");
+        assert!(
+            refused
+                .message
+                .contains("192.168.1.5 on eth0, 172.17.0.1 on docker0")
+                && refused.message.contains("--listen <ip>"),
+            "{}",
+            refused.message
+        );
+    }
+
+    #[test]
+    fn a_fetch_takes_the_named_origin_then_the_recorded_mirror() {
+        let mirror = Origin::Mirror("https://mirror.example/r".into());
+        let build = Origin::Build("/home/op/jaynshare/target/release/jaynshare".into());
+        let named = Some("https://other.example/r");
+        assert_eq!(fetch_origin(named, Some(&mirror)), named);
+        assert_eq!(
+            fetch_origin(None, Some(&mirror)),
+            Some("https://mirror.example/r")
+        );
+        for recorded in [None, Some(&Origin::Official), Some(&build)] {
+            assert_eq!(fetch_origin(None, recorded), None, "{recorded:?}");
+        }
+    }
+
+    #[test]
+    fn the_origin_record_names_its_kind() {
+        let record =
+            serde_json::to_string(&Origin::Build("/src/target/release/jaynshare".into())).unwrap();
+        assert_eq!(record, r#"{"build":"/src/target/release/jaynshare"}"#);
+        assert_eq!(
+            serde_json::to_string(&Origin::Official).unwrap(),
+            r#""official""#
+        );
+        let parsed: Origin =
+            serde_json::from_str(r#"{"mirror":"https://mirror.example/r"}"#).expect("a mirror");
+        assert_eq!(parsed, Origin::Mirror("https://mirror.example/r".into()));
+    }
+
+    #[test]
+    fn only_a_plain_version_names_a_directory() {
+        for good in ["2.1.0", "0.7.0-acceptance", "2.1.0-rc.1+build.5"] {
+            assert!(plain_version(good), "{good}");
+        }
+        for bad in ["", "../2.1.0", "2.1.0/x", "2.1 .0"] {
+            assert!(!plain_version(bad), "{bad}");
+        }
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! The scripted platform-tool fake: one executable,
 //! copied under each tool's name (`systemctl`, `nft`, `security`,
-//! `certutil`, `icacls`, …) into a directory the scenario puts first on
+//! `certutil`, …) into a directory the scenario puts first on
 //! `PATH`. Compiled by the harness with `rustc` (std only), never part of the
 //! product.
 //!

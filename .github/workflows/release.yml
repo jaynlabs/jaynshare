@@ -1,0 +1,137 @@
+name: release
+# A `v*` tag publishes a release signed with the `release` environment's key.
+# Anything else is a dry run: signed with a throwaway key, published nowhere.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - tools/release/**
+      - tools/quickstart.sh
+      - tools/make-client-kit.py
+      - deploy/kit/**
+      - deploy/release-key.pub
+      - build.rs
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+env:
+  CARGO_TERM_COLOR: always
+permissions:
+  contents: read
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-musl, os: ubuntu-latest, bin: jaynshare }
+          - { target: aarch64-unknown-linux-musl, os: ubuntu-24.04-arm, bin: jaynshare }
+          - { target: aarch64-apple-darwin, os: macos-latest, bin: jaynshare }
+          - { target: x86_64-apple-darwin, os: macos-latest, bin: jaynshare }
+          - { target: x86_64-pc-windows-msvc, os: windows-latest, bin: jaynshare.exe }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - run: rustup show && rustup target add ${{ matrix.target }}
+      - run: cargo build --locked --release --target ${{ matrix.target }}
+        env:
+          JAYNSHARE_COMMIT: ${{ github.sha }}
+          CC_x86_64_unknown_linux_musl: musl-gcc
+          CC_aarch64_unknown_linux_musl: musl-gcc
+      # An arm64 runner cannot run the x86-64 macOS binary.
+      - if: matrix.target != 'x86_64-apple-darwin'
+        run: target/${{ matrix.target }}/release/${{ matrix.bin }} version --json | grep -F "$GITHUB_SHA"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: bin-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/${{ matrix.bin }}
+          if-no-files-found: error
+          retention-days: 7
+  package:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: ${{ github.event_name == 'push' && 'release' || '' }}
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: bin-*
+          path: bins
+      - id: version
+        run: |
+          linux=bins/bin-x86_64-unknown-linux-musl/jaynshare
+          chmod +x "$linux"
+          version=$("$linux" version --json | python3 -c 'import json, sys; print(json.load(sys.stdin)["result"]["version"])')
+          if [ "$GITHUB_EVENT_NAME" = push ] && [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "::error::tag $GITHUB_REF_NAME, but Cargo.toml says $version"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: release key
+        if: github.event_name == 'push'
+        env:
+          RELEASE_SEED: ${{ secrets.RELEASE_SEED }}
+        run: |
+          if [ -z "$RELEASE_SEED" ]; then
+            echo "::error::the release environment has no RELEASE_SEED secret"
+            exit 1
+          fi
+          printf '%s' "$RELEASE_SEED" | base64 --decode > "$RUNNER_TEMP/seed"
+      # The verifier below reads the throwaway public key from its config root.
+      - name: throwaway key
+        if: github.event_name != 'push'
+        run: |
+          mkdir -p "$RUNNER_TEMP/config/jaynshare"
+          python3 tools/make-client-kit.py keygen --pub "$RUNNER_TEMP/config/jaynshare/release.pub" --seed "$RUNNER_TEMP/seed"
+      - name: build.py
+        run: |
+          python3 tools/release/build.py --version "${{ steps.version.outputs.version }}" --commit "$GITHUB_SHA" \
+            --key "$RUNNER_TEMP/seed" --out dist \
+            --bin x86_64-unknown-linux-musl=bins/bin-x86_64-unknown-linux-musl/jaynshare \
+            --bin aarch64-unknown-linux-musl=bins/bin-aarch64-unknown-linux-musl/jaynshare \
+            --bin aarch64-apple-darwin=bins/bin-aarch64-apple-darwin/jaynshare \
+            --bin x86_64-apple-darwin=bins/bin-x86_64-apple-darwin/jaynshare \
+            --bin x86_64-pc-windows-msvc=bins/bin-x86_64-pc-windows-msvc/jaynshare.exe
+      - if: always()
+        run: rm -f "$RUNNER_TEMP/seed"
+      - name: release verify
+        run: XDG_CONFIG_HOME="$RUNNER_TEMP/config" bins/bin-x86_64-unknown-linux-musl/jaynshare release verify dist
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: release-set
+          path: dist/
+          if-no-files-found: error
+  publish:
+    needs: package
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: release-set
+          path: dist
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.package.outputs.version }}
+        run: |
+          prerelease=()
+          case $VERSION in *-*) prerelease=(--prerelease) ;; esac
+          gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --verify-tag \
+            --title "jaynshare $VERSION" --generate-notes "${prerelease[@]}"

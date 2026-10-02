@@ -4,10 +4,11 @@
 //! reports [`result::DeployResult`].
 //!
 //! Platform tools are invoked by name from `PATH` (`systemctl`, `nft`,
-//! `security`, `certutil`, `icacls`, …), one wrapper function per tool, so
+//! `security`, `certutil`, …), one wrapper function per tool, so
 //! the test suite's fakes answer only what that wrapper asks.
 
 pub mod address;
+pub mod auto_update;
 pub mod firewall;
 pub mod native;
 pub mod preflight;
