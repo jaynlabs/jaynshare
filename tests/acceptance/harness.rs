@@ -2769,20 +2769,31 @@ pub(crate) fn cli_pty_answers(
     env: &[(String, String)],
     answers: &[(&str, &str)],
 ) -> (i32, String) {
+    let bin = binary().display().to_string();
+    let argv = [&[bin.as_str()], args].concat();
+    pty_answers(scenario, &argv, env, answers)
+}
+
+/// The same for any program: `argv[0]` runs with the rest as arguments.
+pub(crate) fn pty_answers(
+    scenario: &str,
+    argv: &[&str],
+    env: &[(String, String)],
+    answers: &[(&str, &str)],
+) -> (i32, String) {
     let root = scratch(scenario);
     let transcript = root.join("transcript");
     let mut command = Command::new("script");
-    let bin = binary().display().to_string();
     if cfg!(target_os = "macos") {
         command
-            .args(["-q", "-F", &transcript.display().to_string(), &bin])
-            .args(args);
+            .args(["-q", "-F", &transcript.display().to_string()])
+            .args(argv);
     } else {
         // util-linux `script -c` runs the line under a shell; `exec` leaves
-        // the binary alone in the terminal's foreground group, as on macOS,
+        // the program alone in the terminal's foreground group, as on macOS,
         // so a Ctrl-C reaches only it.
-        let mut line = format!("exec {}", shell_quote(&bin));
-        for arg in args {
+        let mut line = String::from("exec");
+        for arg in argv {
             line.push(' ');
             line.push_str(&shell_quote(arg));
         }

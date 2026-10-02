@@ -15,7 +15,7 @@ use crate::enrol::{
 use crate::fake_tools::FakeTools;
 use crate::harness::{
     Duration, Instant, Setup, StatusCode, Value, binary, cli_pty_answers, cli_raw, isolated_env,
-    json, private_dir, scratch, send, validate,
+    json, private_dir, pty_answers, scratch, send, validate,
 };
 use crate::own::callback_request;
 use crate::profile_fx::path_editor;
@@ -197,38 +197,14 @@ async fn a_fresh_machine_joins_with_one_command() {
 #[cfg(target_os = "macos")]
 #[tokio::test(flavor = "multi_thread")]
 async fn shell_bootstrap_joins_a_local_server() {
-    use crate::release_fx::{
-        FIXTURE_VERSION, ReleaseKey, host_target, serve_release, with_platform_archive,
-        write_release_of,
-    };
-
     let _leak_sweep = crate::leaks::LeakGuard::default();
     let operator = Operator::start("join-shell-bootstrap").await;
     let invite = operator.invite("bootstrap", "Bootstrap client", &[]);
-    let root = scratch("join-shell-bootstrap-release");
-    let release = root.join("release");
-    let key = ReleaseKey::generate();
-    let executable = std::fs::read(binary()).expect("the bootstrap executable");
-    write_release_of(
-        &release,
-        &key,
-        FIXTURE_VERSION,
-        |parts| with_platform_archive(parts, host_target(), &executable),
-        |_| {},
-    );
-    let (origin, ca) = serve_release(&release, "localhost", FIXTURE_VERSION).await;
+    let bootstrap = Bootstrap::serve("join-shell-bootstrap-release").await;
     let home = fresh_home("join-shell-bootstrap-engineer");
     let output = std::process::Command::new("sh")
-        .arg(release.join("install.sh"))
-        .args([
-            "--version",
-            FIXTURE_VERSION,
-            "--release-origin",
-            &origin,
-            "--tls-ca",
-            ca.to_str().expect("CA path"),
-            &invite,
-        ])
+        .arg(&bootstrap.script)
+        .args(bootstrap.args(&invite))
         .envs(isolated_env(&home))
         .env_remove("JAYNSHARE_CONFIG")
         .env_remove("HTTPS_PROXY")
@@ -250,6 +226,79 @@ async fn shell_bootstrap_joins_a_local_server() {
         "{transcript}"
     );
     assert!(config_root(&home).join("client/client.toml").is_file());
+}
+
+/// A release carrying this build, served with its `install.sh`.
+struct Bootstrap {
+    script: PathBuf,
+    origin: String,
+    ca: PathBuf,
+}
+
+impl Bootstrap {
+    async fn serve(scenario: &str) -> Self {
+        use crate::release_fx::{
+            FIXTURE_VERSION, ReleaseKey, host_target, serve_release, with_platform_archive,
+            write_release_of,
+        };
+
+        let release = scratch(scenario).join("release");
+        let executable = std::fs::read(binary()).expect("the bootstrap executable");
+        write_release_of(
+            &release,
+            &ReleaseKey::generate(),
+            FIXTURE_VERSION,
+            |parts| with_platform_archive(parts, host_target(), &executable),
+            |_| {},
+        );
+        let (origin, ca) = serve_release(&release, "localhost", FIXTURE_VERSION).await;
+        Self {
+            script: release.join("install.sh"),
+            origin,
+            ca,
+        }
+    }
+
+    /// `install.sh`'s arguments for this release and `invite`.
+    fn args<'a>(&'a self, invite: &'a str) -> [&'a str; 7] {
+        [
+            "--version",
+            crate::release_fx::FIXTURE_VERSION,
+            "--release-origin",
+            &self.origin,
+            "--tls-ca",
+            self.ca.to_str().expect("CA path"),
+            invite,
+        ]
+    }
+}
+
+/// Piped into `sh`, as the one-line install runs it, the bootstrap's join
+/// still asks the account question on the terminal.
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_piped_shell_bootstrap_asks_on_the_terminal() {
+    let _leak_sweep = crate::leaks::LeakGuard::default();
+    let operator = Operator::start("join-piped-bootstrap").await;
+    let invite = operator.invite("alpha", "Alpha Desk", &[]);
+    let bootstrap = Bootstrap::serve("join-piped-bootstrap-release").await;
+    let home = fresh_home("join-piped-bootstrap-engineer");
+    let script = bootstrap.script.display().to_string();
+    let argv = [
+        &["/bin/sh", "-c", "cat \"$0\" | sh -s -- \"$@\"", &script][..],
+        &bootstrap.args(&invite),
+    ]
+    .concat();
+    let no_proxy = ["HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"]
+        .map(|name| (name.to_string(), String::new()));
+    let (exit, transcript) = pty_answers(
+        "join-piped-bootstrap-terminal",
+        &argv,
+        &[isolated_env(&home), no_proxy.to_vec()].concat(),
+        &[(QUESTION, "n\n")],
+    );
+    assert_eq!(exit, 0, "{transcript}");
+    assert!(transcript.contains(ACCOUNT_LATER), "{transcript}");
 }
 
 /// An invite claims once: the second machine is refused and installs

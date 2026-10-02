@@ -98,7 +98,12 @@ binary="$work/jaynshare-$version-$target/jaynshare"
 chmod +x "$binary"
 
 if [ "$system" = Darwin ]; then
-    "$binary" join "$invite"
+    # Piped into sh, stdin is this script: the join asks on the terminal.
+    if [ ! -t 0 ] && [ -t 2 ] && (exec </dev/tty) 2>/dev/null; then
+        "$binary" join "$invite" </dev/tty
+    else
+        "$binary" join "$invite"
+    fi
     exit
 fi
 
