@@ -83,7 +83,7 @@ pub(super) static DOCS: &[VerbDoc] = &[
         "join",
         Engineer,
         None,
-        "Join a pool with the operator's invite and install its client",
+        "Join a pool with the operator's invite, install its client and add your Claude account",
         [4, 5, 8, 10, 14, 17, 18],
         ["jaynshare join <invite>"]
     ),

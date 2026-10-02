@@ -41,6 +41,7 @@ mod linux_fx;
 mod linuxbox;
 mod mtm;
 mod own;
+mod profile_fx;
 mod proxy;
 mod qta;
 mod release_fx;

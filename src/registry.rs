@@ -91,6 +91,11 @@ impl Registry {
         self.clients.iter().find(|e| e.id == id)
     }
 
+    /// Whether the client's invite lets it add accounts of its own.
+    pub fn adds_accounts(&self, id: &str) -> bool {
+        self.entry(id).is_some_and(|entry| !entry.no_account)
+    }
+
     /// The active client whose secret verifier matches, for principal resolution.
     pub fn client_by_secret(&self, secret: &str) -> Option<String> {
         self.clients
@@ -443,9 +448,12 @@ mod tests {
         assert!(plain.get("no_account").is_none(), "{plain}");
         let read: RegistryEntry = serde_json::from_value(plain).expect("reads back");
         assert!(!read.no_account);
+        assert!(registry.adds_accounts("mac-build"));
         registry.set_no_account("mac-build", true);
         let flagged = serde_json::to_value(registry.entry("mac-build")).expect("serialises");
         assert_eq!(flagged["no_account"], true);
+        assert!(!registry.adds_accounts("mac-build"));
+        assert!(!registry.adds_accounts("unknown"));
     }
 
     #[test]

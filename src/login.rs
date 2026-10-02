@@ -576,7 +576,17 @@ async fn complete(
             Credential::OAuth(tokens),
         )
     };
-    match server.mutate_pool(|pool| pool.add(account, name)) {
+    let adds = secret
+        .owner
+        .as_deref()
+        .is_none_or(|client| server.registry().adds_accounts(client));
+    match server.mutate_pool(|pool| {
+        if adds {
+            pool.add(account, name)
+        } else {
+            pool.relogin(account, name)
+        }
+    }) {
         Ok(handle) => End::Succeeded { account: handle },
         Err(MutateError::Refused(OperationError::NameConflict(name))) => End::Failed {
             reason: format!("an account already has the display name {name:?}"),
@@ -590,6 +600,9 @@ async fn complete(
         },
         Err(MutateError::Refused(OperationError::NotOwner)) => End::Failed {
             reason: "this identity is another owner's account; the pool is unchanged".into(),
+        },
+        Err(MutateError::Refused(OperationError::NewAccount)) => End::Failed {
+            reason: "this client's invite adds no new account, and this identity is none of its own; the pool is unchanged".into(),
         },
         Err(MutateError::Refused(_)) => End::Failed {
             reason: "the account could not be added".into(),

@@ -466,6 +466,7 @@ pub(super) async fn claim(
             "display_name": entry.display_name,
             "client_secret": secret,
             "generation": entry.generation,
+            "no_account": entry.no_account,
             "proxy_url": proxy_origin(&server.config().config),
             "ca": ca,
         }),

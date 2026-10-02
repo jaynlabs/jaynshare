@@ -344,6 +344,16 @@ fn refused(
                 vec![],
             ),
         ),
+        OperationError::NewAccount => (
+            "new_account",
+            error(
+                StatusCode::CONFLICT,
+                "conflict",
+                "this identity is not an account of the pool",
+                account.map(|h| h.to_string()),
+                vec![],
+            ),
+        ),
         OperationError::ReferenceConflict(entries) => {
             let listed: Vec<String> = entries.iter().map(|c| c.entry.clone()).collect();
             tracing::info!(

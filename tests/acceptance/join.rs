@@ -1,21 +1,30 @@
 //! `client invite` and `join`: a machine becomes a pool client with one
 //! command, on the server the invite names and with the client the invite's
-//! key signed, or not at all.
+//! key signed, or not at all; then the engineer's Claude account joins the
+//! pool too, unless the invite says otherwise.
 
 use std::path::{Path, PathBuf};
 
 use base64::Engine as _;
 
+use crate::acc::callback_target;
 use crate::enrol::{
     Operator, client_platform, config_root, decode_invite, encode_invite, identity_setup,
-    join_from, kit_member_bytes, native_payload,
+    installed_binary, join_from, kit_member_bytes, native_payload,
 };
+use crate::fake_tools::FakeTools;
 use crate::harness::{
-    Setup, Value, binary, cli_raw, isolated_env, json, private_dir, scratch, validate,
+    Duration, Instant, Setup, StatusCode, Value, binary, cli_pty_answers, cli_raw, isolated_env,
+    json, private_dir, scratch, send, validate,
 };
+use crate::own::callback_request;
+use crate::profile_fx::path_editor;
 use crate::release_fx::ReleaseKey;
 
 const OTHER_PIN: &str = "sha256/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+const QUESTION: &str = "Add your Claude account to the pool? [Y/n] ";
+const ACCOUNT_LATER: &str =
+    "add your Claude account to the pool later with `jaynshare account login`";
 
 fn fresh_home(name: &str) -> PathBuf {
     let home = scratch(name).join("home");
@@ -47,7 +56,8 @@ fn operator_status(operator: &Operator) -> Value {
 
 /// A fresh machine joins with one command: the client files with the pin
 /// and the `https` base URL, the pinned key, the server's own client on the
-/// search path; the code lands nowhere; and `uninstall` takes the link back.
+/// search path; with no terminal the account step is named for later; the
+/// code lands nowhere; and `uninstall` takes the link back.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_fresh_machine_joins_with_one_command() {
     let _leak_sweep = crate::leaks::LeakGuard::default();
@@ -66,9 +76,11 @@ async fn a_fresh_machine_joins_with_one_command() {
         format!("✓ connected to the pool at {base_url} (identity matches the invite)"),
         "✓ installed jaynshare 0.0.0-acceptance (this server's client)".to_string(),
         "joined the pool as alpha (Alpha Desk)".to_string(),
+        ACCOUNT_LATER.to_string(),
     ] {
         assert!(transcript.contains(&line), "{line}: {transcript}");
     }
+    assert!(!transcript.contains(QUESTION), "{transcript}");
     let code = fields["code"].as_str().expect("code");
     assert!(!transcript.contains(code), "{transcript}");
 
@@ -106,12 +118,7 @@ async fn a_fresh_machine_joins_with_one_command() {
         fields["signing_key"].as_str(),
         "the pinned key is the invite's: {pinned}"
     );
-    let executable = if cfg!(windows) {
-        let local = PathBuf::from(std::env::var_os("LOCALAPPDATA").expect("LOCALAPPDATA"));
-        local.join("Programs/Jaynshare/jaynshare.exe")
-    } else {
-        root.join("bin/jaynshare")
-    };
+    let executable = installed_binary(&home);
     assert_eq!(
         std::fs::read(&executable).expect("the executable"),
         kit_member_bytes(native_payload()),
@@ -127,6 +134,14 @@ async fn a_fresh_machine_joins_with_one_command() {
         assert!(
             transcript.contains(&link.display().to_string()),
             "{transcript}"
+        );
+    }
+    if cfg!(windows) {
+        let edits = path_editor(&home).calls("powershell");
+        assert_eq!(edits.len(), 1, "{edits:?}");
+        assert!(
+            edits[0].iter().any(|arg| arg.contains("$p + $d")),
+            "the user Path gains the folder: {edits:?}"
         );
     }
     for file in [root.join("client/client.toml"), root.join("release.pub")] {
@@ -148,6 +163,14 @@ async fn a_fresh_machine_joins_with_one_command() {
         std::fs::symlink_metadata(home.join(".local/bin/jaynshare")).is_err(),
         "the link goes with the executable"
     );
+    if cfg!(windows) {
+        let edits = path_editor(&home).calls("powershell");
+        assert_eq!(edits.len(), 2, "{edits:?}");
+        assert!(
+            edits[1].iter().any(|arg| arg.contains("-ne $d")),
+            "the user Path loses the folder: {edits:?}"
+        );
+    }
 
     // `--json`: the installation's facts and the version.
     let invite = operator.invite("beta", "Beta Desk", &[]);
@@ -467,15 +490,214 @@ async fn a_server_without_a_kit_gets_this_executable() {
         transcript.contains("this server offers no client kit"),
         "{transcript}"
     );
-    let executable = if cfg!(windows) {
-        let local = PathBuf::from(std::env::var_os("LOCALAPPDATA").expect("LOCALAPPDATA"));
-        local.join("Programs/Jaynshare/jaynshare.exe")
-    } else {
-        config_root(&home).join("bin/jaynshare")
-    };
+    let executable = installed_binary(&home);
     assert!(
         std::fs::read(&executable).expect("the executable")
             == std::fs::read(binary()).expect("this build"),
         "the joining executable is installed"
     );
+}
+
+/// The account step on a terminal, with `open` scripted by `answer`: the
+/// fake answers for the browser. The server offers no kit, so the client
+/// the join installs and re-runs is this build.
+struct AccountStep {
+    operator: Operator,
+    home: PathBuf,
+    browser: FakeTools,
+}
+
+impl AccountStep {
+    async fn start(scenario: &str) -> Self {
+        let operator = Operator::start(scenario).await;
+        std::fs::remove_file(operator.kit_path()).expect("remove the kit");
+        let home = fresh_home(&format!("{scenario}-engineer"));
+        let browser = FakeTools::new(home.parent().expect("a scratch root"), &["open"]);
+        Self {
+            operator,
+            home,
+            browser,
+        }
+    }
+
+    fn env(&self) -> Vec<(String, String)> {
+        [isolated_env(&self.home), self.browser.env()].concat()
+    }
+
+    /// The account the step added, as the operator sees it.
+    fn account(&self) -> Value {
+        let accounts = self.operator.instance.status()["accounts"].clone();
+        assert_eq!(accounts.as_array().map(Vec::len), Some(1), "{accounts}");
+        accounts[0].clone()
+    }
+}
+
+/// Whether this machine can drive the step: a client platform with a
+/// `script` for the terminal.
+fn account_step_platform() -> bool {
+    client_platform() && cfg!(unix)
+}
+
+/// Answered yes, the step opens the browser on the login the installed
+/// client started; the callback it catches is forwarded, and the account
+/// is the engineer's own.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_join_adds_the_engineer_s_account_through_the_browser_callback() {
+    let _leak_sweep = crate::leaks::LeakGuard::default();
+    if !account_step_platform() {
+        eprintln!("skipping: join: the account step needs a client platform with `script`");
+        return;
+    }
+    let step = AccountStep::start("join-account-callback").await;
+    let invite = step.operator.invite("alpha", "Alpha Desk", &[]);
+    let env = step.env();
+    let join = std::thread::spawn(move || {
+        cli_pty_answers(
+            "join-account-callback-terminal",
+            &["join", &invite],
+            &env,
+            &[(QUESTION, "\n")],
+        )
+    });
+    let url = opened_url(&step.browser).await;
+    let (callback, state) = callback_target(&url);
+    let browser = send(callback, callback_request(&state)).await;
+    assert_eq!(browser.status, StatusCode::FOUND, "the success page");
+    let (exit, transcript) = join.join().expect("the join");
+    assert_eq!(exit, 0, "{transcript}");
+    assert!(transcript.contains("login succeeded"), "{transcript}");
+    assert!(
+        transcript.contains("joined the pool as alpha (Alpha Desk)"),
+        "{transcript}"
+    );
+    assert!(!transcript.contains(ACCOUNT_LATER), "{transcript}");
+    let account = step.account();
+    assert_eq!(account["owner"], "alpha", "{account}");
+    assert_eq!(account["source_class"], "browser", "{account}");
+}
+
+/// The URL the installed client asked the fake browser to open.
+async fn opened_url(browser: &FakeTools) -> String {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        if let Some(call) = browser.calls("open").first() {
+            return call[0].clone();
+        }
+        assert!(Instant::now() < deadline, "the browser was never opened");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// When no browser opens, the step asks for the code instead and forwards
+/// the paste.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_join_without_a_browser_takes_the_pasted_code() {
+    let _leak_sweep = crate::leaks::LeakGuard::default();
+    if !account_step_platform() {
+        eprintln!("skipping: join: the account step needs a client platform with `script`");
+        return;
+    }
+    let step = AccountStep::start("join-account-paste").await;
+    step.browser.rule("open", &[]).exit(1);
+    let invite = step.operator.invite("alpha", "Alpha Desk", &[]);
+    let (exit, transcript) = cli_pty_answers(
+        "join-account-paste-terminal",
+        &["join", &invite],
+        &step.env(),
+        &[
+            (QUESTION, "\n"),
+            ("paste the authorisation code", "oat-fixture-pasted\n"),
+        ],
+    );
+    assert_eq!(exit, 0, "{transcript}");
+    assert!(transcript.contains("login succeeded"), "{transcript}");
+    assert!(!transcript.contains("oat-fixture-pasted"), "{transcript}");
+    assert_eq!(step.account()["owner"], "alpha");
+}
+
+/// Answered no, nothing is added and the step is named for later.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_join_answered_no_adds_no_account() {
+    let _leak_sweep = crate::leaks::LeakGuard::default();
+    if !account_step_platform() {
+        eprintln!("skipping: join: the account step needs a client platform with `script`");
+        return;
+    }
+    let step = AccountStep::start("join-account-declined").await;
+    let invite = step.operator.invite("alpha", "Alpha Desk", &[]);
+    let (exit, transcript) = cli_pty_answers(
+        "join-account-declined-terminal",
+        &["join", &invite],
+        &step.env(),
+        &[(QUESTION, "n\n")],
+    );
+    assert_eq!(exit, 0, "{transcript}");
+    assert!(transcript.contains(ACCOUNT_LATER), "{transcript}");
+    assert!(step.browser.calls("open").is_empty());
+    let accounts = step.operator.instance.status()["accounts"].clone();
+    assert_eq!(accounts, json!([]), "{accounts}");
+}
+
+/// A `--no-account` invite has no account step, even on a terminal, and
+/// the server refuses the client a login while it owns no account.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_no_account_invite_skips_the_account_step() {
+    let _leak_sweep = crate::leaks::LeakGuard::default();
+    if !account_step_platform() {
+        eprintln!("skipping: join: the account step needs a client platform with `script`");
+        return;
+    }
+    let step = AccountStep::start("join-no-account").await;
+    let invite = step
+        .operator
+        .invite("alpha", "Alpha Desk", &["--no-account"]);
+    let (exit, transcript) = cli_pty_answers(
+        "join-no-account-terminal",
+        &["join", &invite],
+        &step.env(),
+        &[],
+    );
+    assert_eq!(exit, 0, "{transcript}");
+    assert!(!transcript.contains(QUESTION), "{transcript}");
+    assert!(!transcript.contains("account login"), "{transcript}");
+
+    let (exit, stdout, stderr) = cli_raw(&["account", "login"], &step.env(), None);
+    assert_eq!(exit, 5, "{stdout}{stderr}");
+    assert!(
+        stderr.contains("adds no account of its own, and it owns none"),
+        "{stderr}"
+    );
+    assert!(step.browser.calls("open").is_empty());
+    assert_eq!(step.operator.instance.status()["accounts"], json!([]));
+}
+
+/// The step re-runs the installed client as `account login`; when that
+/// fails, the step fails and not the join, and the warning names the retry.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_account_step_leaves_the_join_standing() {
+    let _leak_sweep = crate::leaks::LeakGuard::default();
+    if !account_step_platform() {
+        eprintln!("skipping: join: the account step needs a client platform with `script`");
+        return;
+    }
+    let operator = Operator::start("join-account-failed").await;
+    let failing = b"#!/bin/sh\necho \"the installed client ran: $*\"\nexit 3\n";
+    let kit = operator.kit_with_payload(native_payload(), failing);
+    std::fs::copy(kit, operator.kit_path()).expect("the server's kit");
+    let invite = operator.invite("alpha", "Alpha Desk", &[]);
+    let home = fresh_home("join-account-failed-engineer");
+    let (exit, transcript) = cli_pty_answers(
+        "join-account-failed-terminal",
+        &["join", &invite],
+        &isolated_env(&home),
+        &[(QUESTION, "\n")],
+    );
+    assert_eq!(exit, 0, "{transcript}");
+    for line in [
+        "the installed client ran: account login",
+        "warning: no Claude account was added; run `jaynshare account login` to try again",
+        "joined the pool as alpha (Alpha Desk)",
+    ] {
+        assert!(transcript.contains(line), "{line}: {transcript}");
+    }
 }

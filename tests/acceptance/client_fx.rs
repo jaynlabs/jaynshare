@@ -177,20 +177,9 @@ impl ClientHome {
     pub(crate) fn env(&self) -> Vec<(String, String)> {
         let mut env = isolated_env(&self.home);
         if cfg!(windows) {
-            // The client directory comes from the Windows profile
-            // (`APPDATA`), never from a shell's `HOME`; `SystemRoot` is what
-            // any Windows process needs to reach the network.
+            // `SystemRoot` is what any Windows process needs to reach the
+            // network.
             let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
-            env.push(("USERPROFILE".into(), self.home.display().to_string()));
-            env.push(("APPDATA".into(), roaming(&self.home).display().to_string()));
-            env.push((
-                "LOCALAPPDATA".into(),
-                self.home
-                    .join("AppData")
-                    .join("Local")
-                    .display()
-                    .to_string(),
-            ));
             env.push((
                 "PATH".into(),
                 format!("{};{system_root}\\System32", self.bin.display()),

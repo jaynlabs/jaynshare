@@ -49,7 +49,7 @@ pub(crate) async fn client_login(home: &ClientHome) -> (StatusCode, (i32, String
     (browser.status, outcome)
 }
 
-fn callback_request(state: &str) -> Request<Full<Bytes>> {
+pub(crate) fn callback_request(state: &str) -> Request<Full<Bytes>> {
     Request::builder()
         .method(Method::GET)
         .uri(format!(
@@ -58,6 +58,61 @@ fn callback_request(state: &str) -> Request<Full<Bytes>> {
         ))
         .body(Full::new(Bytes::new()))
         .expect("request builds")
+}
+
+/// A login started as `bearer` whose callback is forwarded through the
+/// control API, read until it ends.
+async fn forwarded_login(instance: &Instance, bearer: &str) -> Value {
+    let started = control_post(
+        instance.addr,
+        LOGIN,
+        &[("authorization", bearer)],
+        json!({ "redirect_port": 9 }),
+    )
+    .await;
+    assert_eq!(started.status, StatusCode::ACCEPTED, "{}", started.text());
+    let started = started.json();
+    let id = started["operation_id"].as_str().expect("operation id");
+    let (_, state) = callback_target(started["authorization_url"].as_str().expect("url"));
+    let forwarded = control_post(
+        instance.addr,
+        &format!("/control/v1/client/accounts/operations/{id}/code"),
+        &[("authorization", bearer)],
+        json!({ "code": format!("code=oat-fixture-{}&state={state}", Uuid::new_v4()) }),
+    )
+    .await;
+    assert_eq!(
+        forwarded.status,
+        StatusCode::ACCEPTED,
+        "{}",
+        forwarded.text()
+    );
+    await_client_operation(instance, bearer, id).await
+}
+
+/// The client's operator call at `path` (an issue or a reissue) with
+/// `body`, claimed: the client's bearer.
+async fn claimed_bearer(instance: &Instance, id: &str, path: &str, body: Value) -> String {
+    let issued = control_post(instance.addr, path, &[], body).await;
+    assert_eq!(issued.status, StatusCode::CREATED, "{}", issued.text());
+    let code = issued.json()["enrollment_code"]
+        .as_str()
+        .expect("the code")
+        .to_string();
+    crate::leaks::register_needle("enrollment-code", &code);
+    let claimed = control_post(
+        instance.addr,
+        "/control/v1/enrollment/claim",
+        &[],
+        json!({ "id": id, "code": code }),
+    )
+    .await;
+    assert_eq!(claimed.status, StatusCode::OK, "{}", claimed.text());
+    let claimed = claimed.json();
+    assert_eq!(claimed["no_account"], true, "{claimed}");
+    let secret = claimed["client_secret"].as_str().expect("the secret");
+    crate::leaks::register_needle("client-secret", secret);
+    format!("Bearer {secret}")
 }
 
 /// A client's own operation, read until it ends.
@@ -164,32 +219,7 @@ async fn own_a_client_is_refused_another_client_s_account() {
     let account = instance.status()["accounts"][0].clone();
 
     let beta = enroll(&instance, "beta", "Beta Desk").await.bearer();
-    let started = control_post(
-        instance.addr,
-        LOGIN,
-        &[("authorization", &beta)],
-        json!({ "redirect_port": 9 }),
-    )
-    .await;
-    assert_eq!(started.status, StatusCode::ACCEPTED, "{}", started.text());
-    let started = started.json();
-    let id = started["operation_id"].as_str().expect("operation id");
-    let (_, state) = callback_target(started["authorization_url"].as_str().expect("url"));
-    let forwarded = control_post(
-        instance.addr,
-        &format!("/control/v1/client/accounts/operations/{id}/code"),
-        &[("authorization", &beta)],
-        json!({ "code": format!("code=oat-fixture-beta&state={state}") }),
-    )
-    .await;
-    assert_eq!(
-        forwarded.status,
-        StatusCode::ACCEPTED,
-        "{}",
-        forwarded.text()
-    );
-
-    let operation = await_client_operation(&instance, &beta, id).await;
+    let operation = forwarded_login(&instance, &beta).await;
     assert_eq!(operation["state"], "failed");
     assert_eq!(
         operation["error"]["message"],
@@ -291,4 +321,65 @@ async fn own_a_client_reaches_only_its_own_logins() {
         "{}",
         invalid.text()
     );
+}
+
+/// A client whose invite adds no account logs its own account in again,
+/// is refused a new identity, and owning none, is refused at the start.
+#[tokio::test(flavor = "multi_thread")]
+async fn own_a_no_account_client_logs_in_only_its_own_accounts_again() {
+    let _leak_sweep = crate::leaks::LeakGuard::default();
+    let instance = Instance::start_client("own-no-account").await;
+    let home = install_client(&instance).await;
+    let (_, (code, stdout, stderr)) = client_login(&home).await;
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    let account = instance.status()["accounts"][0].clone();
+    let alpha = claimed_bearer(
+        &instance,
+        "engineer-1",
+        "/control/v1/clients/engineer-1/reissue",
+        json!({ "no_account": true }),
+    )
+    .await;
+
+    let operation = forwarded_login(&instance, &alpha).await;
+    assert_eq!(operation["state"], "succeeded", "{operation}");
+    assert_eq!(operation["account"]["handle"], account["handle"]);
+
+    instance.upstream.script([Reply::status(
+        200,
+        json!({
+            "account": { "email": "new@fixture.invalid", "uuid": Uuid::new_v4() },
+            "organization": { "uuid": Uuid::new_v4(), "name": "New Org" },
+        })
+        .to_string(),
+    )]);
+    let operation = forwarded_login(&instance, &alpha).await;
+    assert_eq!(operation["state"], "failed", "{operation}");
+    assert_eq!(
+        operation["error"]["message"],
+        "this client's invite adds no new account, and this identity is none of its own; the pool is unchanged"
+    );
+    let accounts = instance.status()["accounts"].clone();
+    assert_eq!(
+        accounts.as_array().expect("accounts").len(),
+        1,
+        "{accounts}"
+    );
+
+    let beta = claimed_bearer(
+        &instance,
+        "beta",
+        "/control/v1/clients",
+        json!({ "id": "beta", "display_name": "Beta Desk", "no_account": true }),
+    )
+    .await;
+    let refused = control_post(
+        instance.addr,
+        LOGIN,
+        &[("authorization", &beta)],
+        json!({ "redirect_port": 9 }),
+    )
+    .await;
+    assert_eq!(refused.status, StatusCode::FORBIDDEN, "{}", refused.text());
+    assert_eq!(refused.json()["error"]["code"], "new_account_refused");
 }

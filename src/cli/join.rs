@@ -1,10 +1,13 @@
 //! `join <invite>`: the one step that makes a machine a pool client. It
 //! checks the server against the invite's identity, claims with the
 //! invite's code, installs the server's own client once it verifies against
-//! the invite's signing key, and puts it on the search path. Everything that
-//! can refuse without spending the code refuses before the claim.
+//! the invite's signing key, puts it on the search path, and offers to add
+//! the engineer's Claude account. Everything that can refuse without
+//! spending the code refuses before the claim.
 
+use std::io::{IsTerminal, Write};
 use std::path::Path;
+use std::process::ExitStatus;
 use std::time::Duration;
 
 use http::Method;
@@ -61,7 +64,12 @@ pub(super) async fn join(cli: &Cli, text: &str) -> Outcome {
             "notice: Claude Code's status line is another tool's ({command}); it was left in place and the jaynshare status line was not installed. Remove it and run `jaynshare update --from <kit>` to install ours."
         );
     }
-    let (installation, secret, ca_pem) = claim(cli, &invite).await?;
+    let Claimed {
+        installation,
+        secret,
+        ca_pem,
+        adds_account,
+    } = claim(cli, &invite).await?;
     progress(
         cli,
         &format!(
@@ -90,6 +98,9 @@ pub(super) async fn join(cli: &Cli, text: &str) -> Outcome {
     }
     link(cli, &binary);
     check(cli, &installation, &secret).await?;
+    if adds_account {
+        account_step(cli, &binary).await;
+    }
     let mut result = client::client_result(&installation);
     result["version"] = json!(version);
     let human = format!(
@@ -137,12 +148,16 @@ fn preflight(invite: &Invite) -> Result<&'static str, Failure> {
     })
 }
 
-/// The claim over the invite's pinned channel: the installation it
-/// describes, the client secret and the interception CA.
-async fn claim(
-    cli: &Cli,
-    invite: &Invite,
-) -> Result<(ClientInstallation, String, String), Failure> {
+/// What the claim over the invite's pinned channel answers.
+struct Claimed {
+    installation: ClientInstallation,
+    secret: String,
+    ca_pem: String,
+    /// The invite lets this client add a Claude account of its own.
+    adds_account: bool,
+}
+
+async fn claim(cli: &Cli, invite: &Invite) -> Result<Claimed, Failure> {
     let mut installation = ClientInstallation {
         directory: platform::client_directory(),
         client_id: invite.client_id.clone(),
@@ -213,7 +228,12 @@ async fn claim(
         .to_string();
     installation.proxy = Some(proxy.to_string());
     installation.ca_fingerprint = Some(fingerprint.to_string());
-    Ok((installation, secret.to_string(), ca_pem.to_string()))
+    Ok(Claimed {
+        installation,
+        secret: secret.to_string(),
+        ca_pem: ca_pem.to_string(),
+        adds_account: claimed["no_account"] != true,
+    })
 }
 
 /// The client this server offers, verified against the invite's key, and
@@ -326,5 +346,54 @@ async fn check(cli: &Cli, installation: &ClientInstallation, secret: &str) -> Re
             "cli_unreachable",
             format!("the installation is in place but its status check failed: {why}"),
         )),
+    }
+}
+
+const ACCOUNT_LATER: &str =
+    "add your Claude account to the pool later with `jaynshare account login`";
+
+/// The invite's account step, run by the installed client so it speaks its
+/// server's API. Without a terminal to ask on, or under `--json`, it is
+/// left for later.
+async fn account_step(cli: &Cli, binary: &Path) {
+    if cli.json || !std::io::stdin().is_terminal() {
+        progress(cli, ACCOUNT_LATER);
+        return;
+    }
+    if !cli.yes && !agrees("Add your Claude account to the pool? [Y/n] ") {
+        progress(cli, ACCOUNT_LATER);
+        return;
+    }
+    match run_in_terminal(binary, &["account", "login"]).await {
+        Ok(status) if status.success() => {}
+        Ok(_) => eprintln!(
+            "warning: no Claude account was added; run `jaynshare account login` to try again"
+        ),
+        Err(why) => eprintln!(
+            "warning: {}: {why}; run `jaynshare account login` to add your Claude account",
+            binary.display()
+        ),
+    }
+}
+
+/// A `[Y/n]` question: any answer but a no is a yes; closed input is a no.
+fn agrees(prompt: &str) -> bool {
+    eprint!("{prompt}");
+    std::io::stderr().flush().ok();
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line).is_ok_and(|read| {
+        read > 0 && !matches!(line.trim().to_ascii_lowercase().as_str(), "n" | "no")
+    })
+}
+
+/// Runs `binary` on this terminal until it ends; an interrupt is its own
+/// to handle.
+async fn run_in_terminal(binary: &Path, args: &[&str]) -> std::io::Result<ExitStatus> {
+    let mut child = tokio::process::Command::new(binary).args(args).spawn()?;
+    loop {
+        tokio::select! {
+            status = child.wait() => return status,
+            _ = tokio::signal::ctrl_c() => {}
+        }
     }
 }

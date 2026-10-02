@@ -29,6 +29,8 @@ pub enum OperationError {
     IdentityMismatch,
     /// A client's add landed on an identity it does not own.
     NotOwner,
+    /// A re-login landed on an identity the pool does not hold.
+    NewAccount,
     /// The entries the operation would leave unresolvable or ambiguous.
     ReferenceConflict(Vec<ReferenceConflict>),
 }
@@ -127,6 +129,19 @@ impl Pool {
             self.move_default(Some(handle), OffsetDateTime::now_utc());
         }
         Ok(handle)
+    }
+
+    /// [`Pool::add`] that never adds: only an identity the pool holds
+    /// takes the new credential.
+    pub fn relogin(
+        &mut self,
+        account: Account,
+        operator_name: Option<String>,
+    ) -> Result<Uuid, OperationError> {
+        if self.same_identity_of(&account).is_none() {
+            return Err(OperationError::NewAccount);
+        }
+        self.add(account, operator_name)
     }
 
     fn same_identity_of(&self, candidate: &Account) -> Option<&Account> {
@@ -477,6 +492,28 @@ mod tests {
             Ok(handle)
         );
         assert_eq!(pool.get(handle).unwrap().owner.as_deref(), Some("mac-1"));
+    }
+
+    #[test]
+    fn a_relogin_never_adds_an_account() {
+        let mut pool = Pool::default();
+        let (mine, new) = (Uuid::new_v4(), Uuid::new_v4());
+        let owned_by = |owner: &str, id| Account {
+            owner: Some(owner.into()),
+            ..oauth("a@x.io", Some("One"), id)
+        };
+        let handle = pool.add(owned_by("mac-1", mine), None).unwrap();
+
+        assert_eq!(pool.relogin(owned_by("mac-1", mine), None), Ok(handle));
+        assert_eq!(
+            pool.relogin(owned_by("mac-2", mine), None),
+            Err(OperationError::NotOwner)
+        );
+        assert_eq!(
+            pool.relogin(owned_by("mac-1", new), None),
+            Err(OperationError::NewAccount)
+        );
+        assert_eq!(pool.accounts().len(), 1);
     }
 
     #[test]

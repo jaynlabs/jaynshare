@@ -2689,10 +2689,10 @@ fn claim_scenario_root(scenario: &str) -> PathBuf {
 }
 
 /// The environment that isolates a CLI run from the developer's machine:
-/// a scratch home (so the platform paths resolve under it) and no
-/// `JAYNSHARE_CONFIG` unless the scenario sets one.
+/// a scratch home (so the platform paths resolve under it, the Windows
+/// profile included) and no `JAYNSHARE_CONFIG` unless the scenario sets one.
 pub(crate) fn isolated_env(home: &Path) -> Vec<(String, String)> {
-    vec![
+    let mut env = vec![
         ("HOME".into(), home.display().to_string()),
         (
             "XDG_CONFIG_HOME".into(),
@@ -2702,7 +2702,11 @@ pub(crate) fn isolated_env(home: &Path) -> Vec<(String, String)> {
             "XDG_STATE_HOME".into(),
             home.join(".local/state").display().to_string(),
         ),
-    ]
+    ];
+    if cfg!(windows) {
+        env.extend(crate::profile_fx::windows_profile(home));
+    }
+    env
 }
 
 /// One CLI invocation with exactly these arguments and environment (no

@@ -79,6 +79,13 @@ fn owned(server: &Server, client: &str) -> Response<ResponseBody> {
     read(json!({ "accounts": accounts }))
 }
 
+fn owns_any(server: &Server, client: &str) -> bool {
+    let pool = server.pool.lock().expect("pool lock");
+    pool.accounts()
+        .iter()
+        .any(|account| account.owner.as_deref() == Some(client))
+}
+
 /// One account the client owns, or `None` when it is not the client's.
 pub(super) fn owned_account(server: &Server, client: &str, handle: Uuid) -> Option<Value> {
     let loaded = server.config();
@@ -152,11 +159,21 @@ async fn login_start(
             vec![],
         );
     };
+    let client = principal
+        .client_id()
+        .expect("the route admits clients only");
+    if !server.registry().adds_accounts(client) && !owns_any(server, client) {
+        refusal_line(server, peer, Some(principal), "new_account_refused");
+        return error(
+            StatusCode::FORBIDDEN,
+            "new_account_refused",
+            "this client's invite adds no account of its own, and it owns none to log in again",
+            None,
+            vec![],
+        );
+    }
     let starter = Starter::Client {
-        id: principal
-            .client_id()
-            .expect("the route admits clients only")
-            .to_string(),
+        id: client.to_string(),
         port,
     };
     match server

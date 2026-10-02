@@ -33,8 +33,19 @@ pub(crate) const KIT_MEMBERS: [&str; 4] = [
 pub(crate) fn config_root(home: &Path) -> PathBuf {
     if cfg!(target_os = "macos") {
         home.join("Library/Application Support/Jaynshare")
+    } else if cfg!(windows) {
+        crate::client_fx::roaming(home).join("Jaynshare")
     } else {
         home.join(".config/jaynshare")
+    }
+}
+
+/// Where a join under `home` installs the client executable.
+pub(crate) fn installed_binary(home: &Path) -> PathBuf {
+    if cfg!(windows) {
+        crate::profile_fx::local_app_data(home).join("Programs/Jaynshare/jaynshare.exe")
+    } else {
+        config_root(home).join("bin/jaynshare")
     }
 }
 
