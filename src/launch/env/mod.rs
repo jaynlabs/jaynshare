@@ -35,7 +35,7 @@ impl EnvPlan {
         }
     }
 
-    #[allow(dead_code)] // the env-rule unit tests read the plan with it
+    #[cfg(test)] // the env-rule unit tests read the plan with it
     pub fn get(&self, name: &str) -> Option<&str> {
         self.set
             .iter()

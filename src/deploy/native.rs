@@ -9,8 +9,6 @@
 //! Check names start with their exit class (`cli/deploy.rs::exit_row`);
 //! `rolled_back` is 20.
 
-#![allow(dead_code)] // some helpers are exercised only by the acceptance suite
-
 use std::io::Read as _;
 use std::path::Path;
 use std::process::Output;
@@ -1648,7 +1646,6 @@ pub struct UpdateInputs<'a> {
     pub release_origin: Option<&'a str>,
     /// The global `--tls-ca`: the extra trust anchor for the fetch.
     pub tls_ca: Option<&'a Path>,
-    pub config: Option<&'a Path>,
     pub allow_downgrade: bool,
     /// The global `--yes`: skips the update's confirmation.
     pub yes: bool,

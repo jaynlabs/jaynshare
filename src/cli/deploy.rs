@@ -145,7 +145,6 @@ pub(super) fn dispatch(cli: &Cli, verb: &Verb) -> Option<Outcome> {
                 version: version.as_deref(),
                 release_origin: release_origin.as_deref(),
                 tls_ca: cli.tls_ca.as_deref(),
-                config: cli.config.as_deref(),
                 allow_downgrade: *allow_downgrade,
                 yes: cli.yes,
                 confirm: &interactive_confirm,

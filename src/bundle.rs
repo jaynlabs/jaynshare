@@ -984,12 +984,6 @@ mod tests {
         (pkcs8.as_ref().to_vec(), pair.public_key().as_ref().to_vec())
     }
 
-    #[allow(dead_code)] // helper kept for tests that do not all run on every feature set
-    fn sign(pkcs8: &[u8], message: &[u8]) -> Vec<u8> {
-        let pair = ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8).expect("parse");
-        pair.sign(message).as_ref().to_vec()
-    }
-
     #[test]
     fn canonical_json_sorts_and_escapes() {
         let value = json!({ "b": "line\nbreak", "a": 1, "c": null, "\u{e9}": "q\"uote" });
