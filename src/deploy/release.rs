@@ -152,10 +152,10 @@ async fn get(
         .await
         .map_err(|_| {
             FetchFailure::Unreachable(format!(
-                "{name}: the release host did not answer within {DOWNLOAD_TIMEOUT:?}"
+                "{name}: {url} did not answer within {DOWNLOAD_TIMEOUT:?}"
             ))
         })?
-        .map_err(|e| FetchFailure::Unreachable(format!("{name}: {e}")))
+        .map_err(|e| FetchFailure::Unreachable(format!("{name}: {url}: {e}")))
 }
 
 /// The one redirect `download` follows: https to the origin's own host or,

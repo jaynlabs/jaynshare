@@ -130,7 +130,7 @@ pub struct InstallInputs<'a> {
     /// Reads one typed line on a terminal; `Err(why)` when there is none.
     pub ask: &'a dyn Fn(&str) -> Result<String, String>,
     /// The manual firewall record for the configuration at a path
-    /// (preflight's `firewall_record`).
+    /// (preflight's `UnknownFirewall::Recorded`).
     pub firewall_record: &'a dyn Fn(&Path) -> Option<String>,
 }
 
@@ -151,12 +151,23 @@ pub enum Source<'a> {
 /// Where the installed release came from, as [`ORIGIN_RECORD`] holds it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum Origin {
+pub(super) enum Origin {
     Official,
     /// An `https` mirror of the release origin.
     Mirror(String),
     /// A clone build's executable, installed again as it is rebuilt.
     Build(PathBuf),
+}
+
+impl Origin {
+    /// What `server update` installs from this origin.
+    pub(super) fn followed(&self) -> String {
+        match self {
+            Self::Official => "the newest official release".to_owned(),
+            Self::Mirror(mirror) => format!("the newest release at {mirror}"),
+            Self::Build(binary) => format!("the build at {}", binary.display()),
+        }
+    }
 }
 
 /// What the transaction stages below `RELEASES/<version>/`.
@@ -468,7 +479,7 @@ fn judge_account(passwd: &str, group_ids: &str, primary_gid: u32) -> Vec<Check> 
 
 /// `server install`, in this order; each step's checks go
 /// into the result and the first failing step ends it:
-/// 1. [`platform_gate`] — before anything is read or written;
+/// 1. [`platform_gate`], and no build while auto-update is on;
 /// 2. [`prepare`] — nothing of the release runs before it verifies;
 /// 3. on an installed server, no downgrade: running install again updates;
 /// 4. [`service_account`] — create or reuse `jaynshare`;
@@ -481,6 +492,13 @@ fn judge_account(passwd: &str, group_ids: &str, primary_gid: u32) -> Vec<Check> 
 pub fn install(inputs: &InstallInputs<'_>) -> DeployResult {
     let mut result = DeployResult::new("server install");
     if !gated(&mut result, platform_gate("server install")) {
+        return result;
+    }
+    if matches!(inputs.source, Source::Build { .. }) && super::auto_update::is_on() {
+        result.checks.push(Check::fail(
+            "conflict.auto_update",
+            "auto-update follows releases only; run server auto-update off before installing a build",
+        ));
         return result;
     }
     let recorded = recorded_origin();
@@ -529,7 +547,7 @@ pub fn install(inputs: &InstallInputs<'_>) -> DeployResult {
     let preflight = super::preflight::run(&super::preflight::Inputs {
         from: None,
         config: Some(&checked),
-        firewall_record: record.as_deref(),
+        unknown_firewall: super::preflight::UnknownFirewall::recorded(record.as_deref()),
     });
     if !gated(&mut result, preflight.checks) {
         return result;
@@ -758,7 +776,7 @@ fn fetch_origin<'a>(explicit: Option<&'a str>, recorded: Option<&'a Origin>) -> 
 }
 
 /// The recorded origin; `None` when there is no record or it does not parse.
-fn recorded_origin() -> Option<Origin> {
+pub(super) fn recorded_origin() -> Option<Origin> {
     serde_json::from_slice(&std::fs::read(ORIGIN_RECORD).ok()?).ok()
 }
 
@@ -771,16 +789,11 @@ fn record_origin(prepared: &Prepared, result: &mut DeployResult) {
         return;
     }
     let bytes = serde_json::to_vec(origin).expect("an origin serializes");
-    let followed = match origin {
-        Origin::Official => "the newest official release".to_owned(),
-        Origin::Mirror(mirror) => format!("the newest release at {mirror}"),
-        Origin::Build(binary) => format!("the build at {}", binary.display()),
-    };
     result.checks.push(
         match write_private_bytes(Path::new(ORIGIN_RECORD), &bytes, 0o644) {
             Ok(()) => Check::pass(
                 "manager.origin",
-                format!("server update follows {followed}"),
+                format!("server update follows {}", origin.followed()),
             ),
             Err(why) => Check::fail("manager.origin", format!("{ORIGIN_RECORD}: {why}")),
         },
@@ -888,7 +901,7 @@ fn configuration_text(listen: SocketAddr, how: &str) -> String {
 }
 
 /// Appends `checks` to `result`; `true` when every one passed.
-fn gated(result: &mut DeployResult, checks: Vec<Check>) -> bool {
+pub(super) fn gated(result: &mut DeployResult, checks: Vec<Check>) -> bool {
     let passed = checks.iter().all(|check| check.passed);
     result.checks.extend(checks);
     passed
@@ -1829,7 +1842,7 @@ fn apply_meta(path: &Path, meta: &std::fs::Metadata) -> Result<(), String> {
         .map_err(|why| format!("{}: {why}", path.display()))
 }
 
-/// Stop and disable the unit, remove it and the command link, keep
+/// Stop and disable the unit, remove it, the auto-update timer and the command link, keep
 /// everything else. `--purge`: name every path, read a typed
 /// confirmation — `confirm(prompt)` is `Ok(the typed line)`, or `Err(why)`
 /// when there is no terminal, and then the purge refuses with a
@@ -1946,7 +1959,7 @@ fn escape_offenders() -> Vec<String> {
 }
 
 /// The purge: name every path, warn, read the typed confirmation, then
-/// stop and disable the unit, remove the five paths and reload — keeping the
+/// stop and disable the unit, remove the auto-update timer and the five paths and reload — keeping the
 /// service account and [`SERVICE_HOME`] itself. Nothing is removed before
 /// the confirmation or on any refusal.
 fn do_purge(result: &mut DeployResult, confirm: &dyn Fn(&str) -> Result<String, String>) {
@@ -1992,7 +2005,7 @@ fn do_purge(result: &mut DeployResult, confirm: &dyn Fn(&str) -> Result<String, 
         Ok(_) => {}
     }
     stop_and_disable(result);
-    if !result.checks.iter().all(|check| check.passed) {
+    if !result.checks.iter().all(|check| check.passed) || !super::auto_update::remove(result) {
         return;
     }
     for path in paths {
@@ -2020,12 +2033,12 @@ fn do_purge(result: &mut DeployResult, confirm: &dyn Fn(&str) -> Result<String, 
     result.paths = purge_paths().into_iter().map(str::to_owned).collect();
 }
 
-/// The preserve uninstall: stop and disable the unit, remove the unit
+/// The preserve uninstall: stop and disable the unit, remove it, the auto-update timer
 /// and the command link, reload, and keep every release, the selection, the
 /// configuration, the state, the logs and the service account.
 fn preserve(result: &mut DeployResult) {
     stop_and_disable(result);
-    if !result.checks.iter().all(|check| check.passed) {
+    if !result.checks.iter().all(|check| check.passed) || !super::auto_update::remove(result) {
         return;
     }
     for (path, name) in [
@@ -2140,8 +2153,6 @@ pub struct UpdateInputs<'a> {
     pub allow_downgrade: bool,
     /// The global `--yes`: skips the update's confirmation.
     pub yes: bool,
-    /// The manual firewall record (preflight's `firewall_record`).
-    pub firewall_record: Option<&'a str>,
     /// Reads one typed line on a terminal; `Err(why)` when there is none.
     pub confirm: &'a dyn Fn(&str) -> Result<String, String>,
 }
@@ -2253,7 +2264,7 @@ fn update_prepared(
     let preflight = super::preflight::run(&super::preflight::Inputs {
         from: None,
         config: Some(&service_config),
-        firewall_record: inputs.firewall_record,
+        unknown_firewall: super::preflight::UnknownFirewall::Update,
     });
     if !gated(result, preflight.checks) {
         return;

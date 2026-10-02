@@ -23,6 +23,7 @@ mod cxp_picker;
 mod cxp_run;
 mod cxp_settings;
 mod cxp_status;
+mod dep_auto_update;
 mod dep_client;
 mod dep_install;
 mod dep_native;

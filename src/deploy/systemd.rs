@@ -290,7 +290,7 @@ pub fn service(op: ServiceOp) -> DeployResult {
 
 /// One systemctl step: pass, or a failed `name` check naming the command and
 /// stderr's first line (a manager failure is a failure).
-fn systemctl_step(result: &mut DeployResult, name: &str, args: &[&str]) -> bool {
+pub(super) fn systemctl_step(result: &mut DeployResult, name: &str, args: &[&str]) -> bool {
     let stderr = match systemctl(args) {
         Ok(output) if output.status.success() => {
             result
@@ -310,7 +310,7 @@ fn systemctl_step(result: &mut DeployResult, name: &str, args: &[&str]) -> bool 
 }
 
 /// Writes the unit file, mode 0644.
-fn write_unit_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+pub(super) fn write_unit_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     std::fs::write(path, bytes)?;
     #[cfg(unix)]
     {

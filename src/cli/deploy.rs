@@ -5,11 +5,11 @@
 
 use serde_json::json;
 
-use super::args::{ReleaseVerb, ServerVerb, ServiceVerb, Verb};
+use super::args::{ReleaseVerb, ServerVerb, ServiceVerb, Switch, Verb};
 use super::{Cli, Failure, Outcome};
-use crate::deploy::native;
 use crate::deploy::result::DeployResult;
 use crate::deploy::systemd::{self, ServiceOp};
+use crate::deploy::{auto_update, native};
 
 /// The deploy verbs this build carries; `None` for one whose behaviour has
 /// not landed (its help still names the milestone, so the caller refused it
@@ -95,7 +95,9 @@ pub(super) fn dispatch(cli: &Cli, verb: &Verb) -> Option<Outcome> {
             let result = crate::deploy::preflight::run(&crate::deploy::preflight::Inputs {
                 from: from.as_deref(),
                 config: cli.config.as_deref(),
-                firewall_record: record.as_deref(),
+                unknown_firewall: crate::deploy::preflight::UnknownFirewall::recorded(
+                    record.as_deref(),
+                ),
             });
             Some(finish(result, preflight_row))
         }
@@ -172,7 +174,6 @@ pub(super) fn dispatch(cli: &Cli, verb: &Verb) -> Option<Outcome> {
                 (None, Some(version)) => eprintln!("updating the native server to {version}"),
                 (None, None) => eprintln!("updating the native server from its origin"),
             }
-            let record = firewall_record(Some(&native::service_config_path()));
             let result = native::update(&native::UpdateInputs {
                 from: from.as_deref(),
                 version: version.as_deref(),
@@ -182,7 +183,6 @@ pub(super) fn dispatch(cli: &Cli, verb: &Verb) -> Option<Outcome> {
                 allow_downgrade: *allow_downgrade,
                 yes: cli.yes,
                 confirm: &interactive_confirm,
-                firewall_record: record.as_deref(),
             });
             Some(finish(result, manager_row))
         }
@@ -203,6 +203,21 @@ pub(super) fn dispatch(cli: &Cli, verb: &Verb) -> Option<Outcome> {
         } => {
             eprintln!("pruning native releases, keeping the newest {keep}");
             Some(finish(native::prune(*keep), manager_row))
+        }
+        Verb::Server {
+            verb: ServerVerb::AutoUpdate { switch },
+        } => {
+            let result = match switch {
+                Switch::On => {
+                    eprintln!("turning the nightly server update on");
+                    auto_update::on()
+                }
+                Switch::Off => {
+                    eprintln!("turning the nightly server update off");
+                    auto_update::off()
+                }
+            };
+            Some(finish(result, manager_row))
         }
         Verb::Service { verb } => {
             let op = match verb {

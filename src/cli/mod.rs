@@ -695,6 +695,7 @@ fn verb_path(verb: &Verb) -> &'static str {
             ServerVerb::Update { .. } => "server update",
             ServerVerb::Uninstall { .. } => "server uninstall",
             ServerVerb::Prune { .. } => "server prune",
+            ServerVerb::AutoUpdate { .. } => "server auto-update",
         },
         Verb::Service { verb } => match verb {
             ServiceVerb::Install => "service install",

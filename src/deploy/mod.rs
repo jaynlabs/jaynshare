@@ -8,6 +8,7 @@
 //! the test suite's fakes answer only what that wrapper asks.
 
 pub mod address;
+pub mod auto_update;
 pub mod firewall;
 pub mod native;
 pub mod preflight;

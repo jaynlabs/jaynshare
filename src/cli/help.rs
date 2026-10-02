@@ -698,6 +698,17 @@ pub(super) static DOCS: &[VerbDoc] = &[
         ["jaynshare server prune --keep 2"]
     ),
     verb!(
+        "server auto-update",
+        Deploy,
+        None,
+        "Update the native install from its release origin every night; clients follow on their next launch",
+        [8, 18, 19],
+        [
+            "jaynshare server auto-update on",
+            "jaynshare server auto-update off"
+        ]
+    ),
+    verb!(
         "service install",
         Deploy,
         None,

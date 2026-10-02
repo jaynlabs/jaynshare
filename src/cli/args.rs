@@ -694,6 +694,16 @@ pub(super) enum ServerVerb {
         #[arg(long, default_value_t = 1, value_name = "n")]
         keep: usize,
     },
+    AutoUpdate {
+        #[arg(value_enum)]
+        switch: Switch,
+    },
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(super) enum Switch {
+    On,
+    Off,
 }
 
 #[derive(Subcommand)]
