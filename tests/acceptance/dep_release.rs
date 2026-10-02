@@ -1139,6 +1139,7 @@ use crate::linux_fx::head_commit;
 /// version, the signing key and all five `--bin` lines, and `gh release
 /// create` receives absolute asset paths and creates the tag at the built
 /// commit. A seed inside the repository is refused before anything runs.
+#[cfg(unix)]
 #[test]
 fn publish_script_runs_cross_build_publish_in_order() {
     let _leak_sweep = crate::leaks::LeakGuard::default();

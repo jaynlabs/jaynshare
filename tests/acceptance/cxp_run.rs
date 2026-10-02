@@ -1071,17 +1071,20 @@ async fn env_prints_the_launch_environment_quoted_for_each_shell() {
         );
     }
 
-    // On a terminal without `--show`: refused, the secret not printed.
-    let (code, transcript) = machine.pty(&["env", "--auto", "--shell", "sh"], &[], &[]);
-    assert_eq!(code, 2, "the terminal is refused: {transcript}");
-    assert!(
-        transcript.contains("--show"),
-        "the refusal names --show: {transcript}"
-    );
-    assert!(
-        !transcript.contains(machine.client.secret.as_str()),
-        "the secret never reaches the terminal"
-    );
+    // On a terminal without `--show`: refused, the secret not printed. The
+    // terminal is a Unix pseudo-terminal.
+    if cfg!(unix) {
+        let (code, transcript) = machine.pty(&["env", "--auto", "--shell", "sh"], &[], &[]);
+        assert_eq!(code, 2, "the terminal is refused: {transcript}");
+        assert!(
+            transcript.contains("--show"),
+            "the refusal names --show: {transcript}"
+        );
+        assert!(
+            !transcript.contains(machine.client.secret.as_str()),
+            "the secret never reaches the terminal"
+        );
+    }
 
     // `env --json` is a usage error (refused before the verb runs).
     let (code, _, _) = machine.jaynshare(&["env", "--auto", "--json"], &[], None);
@@ -1100,46 +1103,50 @@ async fn env_prints_the_launch_environment_quoted_for_each_shell() {
         stdout.lines().any(|l| l == "unset ANTHROPIC_API_KEY"),
         "the API key is removed: {stdout}"
     );
-    let round = std::process::Command::new("/bin/sh")
-        .arg("-c")
-        .arg(r#"eval "$1"; printf "%s" "$NODE_EXTRA_CA_CERTS""#)
-        .arg("sh")
-        .arg(&stdout)
-        .output()
-        .expect("sh runs");
-    assert!(
-        round.status.success(),
-        "{}",
-        String::from_utf8_lossy(&round.stderr)
-    );
-    assert_eq!(
-        String::from_utf8_lossy(&round.stdout),
-        ca,
-        "evaluating the lines gives the value"
-    );
+    if cfg!(unix) {
+        let round = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(r#"eval "$1"; printf "%s" "$NODE_EXTRA_CA_CERTS""#)
+            .arg("sh")
+            .arg(&stdout)
+            .output()
+            .expect("sh runs");
+        assert!(
+            round.status.success(),
+            "{}",
+            String::from_utf8_lossy(&round.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&round.stdout),
+            ca,
+            "evaluating the lines gives the value"
+        );
+    }
 
     // A `'` in a no-proxy member survives quoting.
     machine.set("no_proxy", "[\"it's.example\"]");
     let odd = "localhost,127.0.0.1,::1,it's.example";
     let (code, stdout, stderr) = machine.jaynshare(&["env", "--auto", "--shell", "sh"], &[], None);
     assert_eq!(code, 0, "{stderr}");
-    let round = std::process::Command::new("/bin/sh")
-        .arg("-c")
-        .arg(r#"eval "$1"; printf "%s" "$NO_PROXY""#)
-        .arg("sh")
-        .arg(&stdout)
-        .output()
-        .expect("sh runs");
-    assert!(
-        round.status.success(),
-        "{}",
-        String::from_utf8_lossy(&round.stderr)
-    );
-    assert_eq!(
-        String::from_utf8_lossy(&round.stdout),
-        odd,
-        "the apostrophe survives"
-    );
+    if cfg!(unix) {
+        let round = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(r#"eval "$1"; printf "%s" "$NO_PROXY""#)
+            .arg("sh")
+            .arg(&stdout)
+            .output()
+            .expect("sh runs");
+        assert!(
+            round.status.success(),
+            "{}",
+            String::from_utf8_lossy(&round.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&round.stdout),
+            odd,
+            "the apostrophe survives"
+        );
+    }
     machine.set("no_proxy", "[]");
 
     // Each named shell gets its own spelling.
@@ -1210,6 +1217,7 @@ async fn env_prints_the_launch_environment_quoted_for_each_shell() {
 /// line per shell that makes `claude` run `jaynshare claude`, quoting the
 /// executable's absolute path when it is off the search path, and writes
 /// nothing; without a installation it is the refusal.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn alias_prints_one_line_per_shell_and_writes_nothing() {
     let _leak_sweep = crate::leaks::LeakGuard::default();

@@ -19,6 +19,8 @@ mod client_fx;
 mod clt;
 mod ctl;
 mod cxp_line;
+// Driven through a Unix pseudo-terminal.
+#[cfg(unix)]
 mod cxp_picker;
 mod cxp_run;
 mod cxp_settings;
