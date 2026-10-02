@@ -746,8 +746,8 @@ async fn host_access_is_operator_access() {
 
 /// The installed client files keep their protection: the client
 /// directory is 0700 and `client-secret` 0600 through the join and a
-/// `secret set` replacement, and on Windows the ACL read back with the real
-/// `icacls` grants only the installing user and `SYSTEM`.
+/// `secret set` replacement, and on Windows their ACL allows only the
+/// installing user and `SYSTEM`.
 #[tokio::test(flavor = "multi_thread")]
 async fn client_files_keep_their_protection() {
     let _leak_sweep = crate::leaks::LeakGuard::default();
@@ -780,49 +780,44 @@ async fn client_files_keep_their_protection() {
         );
     }
 
-    // On Windows the real `icacls` read-back grants only the
-    // installing user and `SYSTEM`, with no inherited entry.
+    // On Windows the ACL is protected and allows only the installing user
+    // and `SYSTEM` (`S-1-5-18`), with no inherited entry. It is read by
+    // SID, so the display language does not matter.
     if cfg!(windows) {
-        let out = std::process::Command::new("whoami")
-            .args(["/user", "/fo", "csv", "/nh"])
-            .output()
-            .expect("whoami");
-        assert!(out.status.success(), "whoami failed");
-        let row = String::from_utf8_lossy(&out.stdout);
-        let user = row.trim().trim_matches('"');
         for path in [client_dir.clone(), client_dir.join("client-secret")] {
-            let out = std::process::Command::new("icacls")
-                .arg(&path)
+            let script = format!(
+                "$acl = Get-Acl -LiteralPath '{}'\n\
+                 [Security.Principal.WindowsIdentity]::GetCurrent().User.Value\n\
+                 $acl.AreAccessRulesProtected\n\
+                 $acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]) | \
+                 ForEach-Object {{ \"$($_.IdentityReference.Value) $($_.IsInherited) $($_.AccessControlType)\" }}",
+                path.display().to_string().replace('\'', "''")
+            );
+            let out = std::process::Command::new("powershell")
+                .args(["-NoProfile", "-NonInteractive", "-Command", &script])
                 .output()
-                .expect("icacls");
+                .expect("powershell");
             assert!(
                 out.status.success(),
-                "icacls {}: {}",
+                "Get-Acl {}: {}",
                 path.display(),
                 String::from_utf8_lossy(&out.stderr)
             );
-            let readback = String::from_utf8_lossy(&out.stdout);
-            for line in readback.lines().map(str::trim) {
-                let Some(at) = line.find(":(") else {
-                    continue;
-                };
-                let principal = line[..at].trim();
-                let name_only = !user.contains('\\')
-                    && principal
-                        .rfind('\\')
-                        .map(|i| principal[i + 1..].eq_ignore_ascii_case(user))
-                        .unwrap_or(false);
+            let text = String::from_utf8_lossy(&out.stdout);
+            let mut lines = text.lines().map(str::trim).filter(|line| !line.is_empty());
+            let user = lines.next().expect("the current user's SID").to_owned();
+            assert_eq!(
+                lines.next(),
+                Some("True"),
+                "{} still inherits its parent's entries",
+                path.display()
+            );
+            let entries: Vec<&str> = lines.collect();
+            assert!(!entries.is_empty(), "{} has no entry", path.display());
+            for entry in entries {
                 assert!(
-                    principal.eq_ignore_ascii_case("NT AUTHORITY\\SYSTEM")
-                        || principal == "*S-1-5-18"
-                        || principal.eq_ignore_ascii_case(user)
-                        || name_only,
-                    "{} grants {principal}",
-                    path.display()
-                );
-                assert!(
-                    !line[at..].contains("(I)"),
-                    "{} keeps an inherited entry for {principal}",
+                    entry == format!("{user} False Allow") || entry == "S-1-5-18 False Allow",
+                    "{} has the entry {entry}",
                     path.display()
                 );
             }
