@@ -31,8 +31,10 @@ jobs:
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked --bins
       - run: cargo build --locked --release
+        env:
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: 16
       - name: acceptance tests (against the release artefact)
-        run: cargo test --locked --release --test acceptance
+        run: cargo test --locked --test acceptance -- --test-threads=8
         env:
           JAYNSHARE_BIN: target/release/jaynshare${{ runner.os == 'Windows' && '.exe' || '' }}
   deny:

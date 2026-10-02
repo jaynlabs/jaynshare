@@ -1809,7 +1809,13 @@ async fn refresh_wait_refuses_long_floors_and_waits_out_short_ones() {
 
     // A remainder at or below the bound: one inline wait, then the refresh
     // and the attempt, as if the exchange had arrived after the floor.
-    let waited = Instance::start("refresh-wait-refuses-waited").await;
+    let waited_faults = crate::faults::Faults::new();
+    let waited = Instance::start_with_faults(
+        "refresh-wait-refuses-waited",
+        Setup::default(),
+        waited_faults.clone(),
+    )
+    .await;
     waited.add_oauth_family(
         "FSUB",
         "fsub@fixture.invalid",
@@ -1839,16 +1845,10 @@ async fn refresh_wait_refuses_long_floors_and_waits_out_short_ones() {
         })
         .to_string(),
     )]);
-    tokio::time::sleep(Duration::from_secs(16)).await;
+    waited_faults.elapse(Duration::from_secs(16)).await;
 
-    let started = Instant::now();
-    let answer = send(waited.addr, messages(haiku_prompt())).await;
+    let answer = send_after_inline_refresh_wait(&waited, &waited_faults).await;
     assert_eq!(answer.status, StatusCode::OK, "{}", answer.text());
-    let elapsed = started.elapsed();
-    assert!(
-        elapsed >= Duration::from_secs(12) && elapsed < Duration::from_secs(16),
-        "one inline wait of the ~14 s remainder: {elapsed:?}"
-    );
     assert_eq!(
         waited.upstream.token_calls().len(),
         4,
@@ -1920,7 +1920,13 @@ async fn http_401_inside_the_floor_and_the_endings_after_a_wait() {
     assert_eq!(inside.events("forced_refresh").len(), 1);
 
     // After the wait, another transient failure: the 429 carries the new floor.
-    let transient = Instance::start("refresh-wait-refuses-transient").await;
+    let transient_faults = crate::faults::Faults::new();
+    let transient = Instance::start_with_faults(
+        "refresh-wait-refuses-transient",
+        Setup::default(),
+        transient_faults.clone(),
+    )
+    .await;
     transient.add_oauth_family(
         "FSUB",
         "fsub@fixture.invalid",
@@ -1935,8 +1941,8 @@ async fn http_401_inside_the_floor_and_the_endings_after_a_wait() {
 
     let answer = send(transient.addr, messages(haiku_prompt())).await;
     assert_eq!(answer.status, StatusCode::TOO_MANY_REQUESTS);
-    tokio::time::sleep(Duration::from_secs(16)).await;
-    let answer = send(transient.addr, messages(haiku_prompt())).await;
+    transient_faults.elapse(Duration::from_secs(16)).await;
+    let answer = send_after_inline_refresh_wait(&transient, &transient_faults).await;
     assert_eq!(
         answer.status,
         StatusCode::TOO_MANY_REQUESTS,
@@ -1967,7 +1973,13 @@ async fn http_401_inside_the_floor_and_the_endings_after_a_wait() {
     );
 
     // After the wait, a permanent rejection: the account errored, the 502.
-    let permanent = Instance::start("refresh-wait-refuses-permanent").await;
+    let permanent_faults = crate::faults::Faults::new();
+    let permanent = Instance::start_with_faults(
+        "refresh-wait-refuses-permanent",
+        Setup::default(),
+        permanent_faults.clone(),
+    )
+    .await;
     permanent.add_oauth_family(
         "FSUB",
         "fsub@fixture.invalid",
@@ -1985,8 +1997,8 @@ async fn http_401_inside_the_floor_and_the_endings_after_a_wait() {
 
     let answer = send(permanent.addr, messages(haiku_prompt())).await;
     assert_eq!(answer.status, StatusCode::TOO_MANY_REQUESTS);
-    tokio::time::sleep(Duration::from_secs(16)).await;
-    let answer = send(permanent.addr, messages(haiku_prompt())).await;
+    permanent_faults.elapse(Duration::from_secs(16)).await;
+    let answer = send_after_inline_refresh_wait(&permanent, &permanent_faults).await;
     assert_eq!(answer.status, StatusCode::BAD_GATEWAY, "{}", answer.text());
     assert_eq!(answer.json()["error"]["type"], "proxy_error");
     let record = permanent.last_record(2);
@@ -1994,6 +2006,24 @@ async fn http_401_inside_the_floor_and_the_endings_after_a_wait() {
     let fsub = permanent.account("FSUB");
     assert_eq!(fsub["health"]["state"], "errored", "via ");
     assert!(fsub["eligibility"]["eligible"] == Value::Bool(false));
+}
+
+async fn send_after_inline_refresh_wait(
+    instance: &Instance,
+    faults: &crate::faults::Faults,
+) -> Answer {
+    let waits = instance.events("refresh_wait_waited").len();
+    let addr = instance.addr;
+    let pending = tokio::spawn(async move { send(addr, messages(haiku_prompt())).await });
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while instance.events("refresh_wait_waited").len() == waits {
+        assert!(Instant::now() < deadline, "the inline wait started");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(!pending.is_finished(), "the request waits out the floor");
+    faults.elapse(Duration::from_secs(15)).await;
+    instance.status();
+    pending.await.expect("inline-wait request")
 }
 
 /// 8 concurrent 1 MiB uploads complete in about the time of one;

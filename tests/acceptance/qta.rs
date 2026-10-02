@@ -42,7 +42,10 @@ fn bucket<'a>(account: &'a Value, name: &str) -> &'a Value {
 #[tokio::test(flavor = "multi_thread")]
 async fn usage_scheduler_starts_immediately_and_repeats() {
     let _leak_sweep = crate::leaks::LeakGuard::default();
-    let instance = Instance::start("usage-scheduler-starts").await;
+    let faults = crate::faults::Faults::new();
+    let instance =
+        Instance::start_with_faults("usage-scheduler-starts", Setup::default(), faults.clone())
+            .await;
     instance.add_fsub();
     instance.add_fkey();
     instance.reload_with_setup(&Setup {
@@ -58,11 +61,12 @@ async fn usage_scheduler_starts_immediately_and_repeats() {
     assert!(status["usage_probe"]["last_started"].is_string());
     assert!(status["usage_probe"]["next_run"].is_string());
 
-    let calls = wait_for_usage_calls(&instance, 2, Duration::from_secs(33)).await;
-    assert!(
-        calls[1].at.duration_since(calls[0].at) >= Duration::from_secs(29),
-        "the repeat follows the configured cadence"
-    );
+    faults.elapse(Duration::from_secs(29)).await;
+    instance.status();
+    assert_eq!(instance.upstream.usage_calls().len(), 1, "not before 30 s");
+    faults.elapse(Duration::from_secs(1)).await;
+    instance.status();
+    wait_for_usage_calls(&instance, 2, Duration::from_secs(3)).await;
 }
 
 /// An operator starts exactly one ordinary sweep; an overlapping
@@ -455,12 +459,14 @@ async fn classification_log_is_credential_free_and_body_free() {
 #[tokio::test(flavor = "multi_thread")]
 async fn exhaustion_hold_exact_reset_fallback_and_clamps() {
     let _leak_sweep = crate::leaks::LeakGuard::default();
-    let instance = Instance::start_with(
+    let faults = crate::faults::Faults::new();
+    let instance = Instance::start_with_faults(
         "exhaustion-hold-exact",
         Setup {
             quota: "revalidation_floor_seconds = 2\nrevalidation_interval_seconds = 2\n".into(),
             ..Setup::default()
         },
+        faults.clone(),
     )
     .await;
     instance.add_fkey();
@@ -478,7 +484,7 @@ async fn exhaustion_hold_exact_reset_fallback_and_clamps() {
     let line = &instance.events("quota_classified")[0];
     assert_eq!(line["fields"]["buckets"], "tokens");
     assert!((event_span(line, "hold_end") - 1).abs() <= 2, "{line}");
-    tokio::time::sleep(Duration::from_millis(2_300)).await;
+    faults.elapse(Duration::from_millis(2_300)).await;
 
     // Malformed retry-after → the 60 s fallback.
     instance.upstream.script([reply_429_apikey(
@@ -493,7 +499,7 @@ async fn exhaustion_hold_exact_reset_fallback_and_clamps() {
     let line = &instance.events("quota_classified")[1];
     assert_eq!(line["fields"]["buckets"], "requests");
     assert!((event_span(line, "hold_end") - 60).abs() <= 2, "{line}");
-    tokio::time::sleep(Duration::from_millis(2_300)).await;
+    faults.elapse(Duration::from_millis(2_300)).await;
 
     // A plausible value stands.
     instance.upstream.script([reply_429_apikey(
@@ -509,7 +515,7 @@ async fn exhaustion_hold_exact_reset_fallback_and_clamps() {
     let line = &instance.events("quota_classified")[2];
     assert_eq!(line["fields"]["buckets"], "output-tokens");
     assert!((event_span(line, "hold_end") - 25).abs() <= 2, "{line}");
-    tokio::time::sleep(Duration::from_millis(2_300)).await;
+    faults.elapse(Duration::from_millis(2_300)).await;
 
     // Maximum clamp: retry-after 5000 → 3600 s.
     instance.upstream.script([reply_429_apikey(
@@ -524,16 +530,19 @@ async fn exhaustion_hold_exact_reset_fallback_and_clamps() {
     send(instance.addr, messages(haiku_prompt())).await;
     let line = &instance.events("quota_classified")[3];
     assert!((event_span(line, "hold_end") - 3600).abs() <= 2, "{line}");
-    tokio::time::sleep(Duration::from_millis(2_300)).await;
+    faults.elapse(Duration::from_millis(2_300)).await;
 
     // A future reset holds to the reset exactly, ignoring the retry-after.
     // The earlier sub-cases' counters ride along with capacity, so only
     // `tokens` proves exhaustion here (the capacity rule).
+    let reset = (faults.product_time() + time::Duration::seconds(120))
+        .unix_timestamp()
+        .to_string();
     instance.upstream.script([reply_429_apikey(
         &[
             ("tokens-limit", "100"),
             ("tokens-remaining", "0"),
-            ("tokens-reset", &reset_in(120)),
+            ("tokens-reset", &reset),
             ("requests-remaining", "40"),
             ("output-tokens-remaining", "40"),
             ("input-tokens-remaining", "40"),
