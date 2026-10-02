@@ -50,8 +50,10 @@ async fn bootstrap_installs_from_a_local_release_origin() {
     let (origin, ca) = serve_release(&served, "host.docker.internal", FIXTURE_VERSION).await;
     linux.put(&ca, "/root/release-ca.pem");
 
+    // Without recommends: ca-certificates' postinst cannot replace the root
+    // bundle the box lends read-only, and dpkg then fails.
     let (code, _, stderr) = linux.sh(
-        "command -v curl >/dev/null || { apt-get update >/dev/null && apt-get install -y curl >/dev/null; }",
+        "command -v curl >/dev/null || { apt-get update >/dev/null && apt-get install -y --no-install-recommends curl >/dev/null; }",
     );
     assert_eq!(code, 0, "install curl: {stderr}");
     let script_url = format!("{origin}/v{FIXTURE_VERSION}/install.sh");
