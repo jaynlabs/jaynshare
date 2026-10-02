@@ -36,6 +36,8 @@ pub const TARGETS: [&str; 5] = [
     "x86_64-pc-windows-msvc",
 ];
 
+const BOOTSTRAPS: [&str; 3] = ["install.ps1", "install.sh", "quickstart.sh"];
+
 /// The release key a fresh installation trusts, embedded in
 /// the verifier. Its fingerprint is printed in the release README and the
 /// install documentation.
@@ -405,6 +407,7 @@ pub async fn fetch(
 pub enum Purpose {
     Platform,
     ClientKit,
+    Bootstrap,
 }
 
 /// One client-kit member binding.
@@ -420,11 +423,11 @@ pub struct Member {
 pub struct Artifact {
     pub filename: String,
     pub purpose: Purpose,
-    /// The Rust target of a platform archive; `None` for the client kit.
+    /// The Rust target of a platform archive; `None` for other artifacts.
     pub target: Option<String>,
     pub length: u64,
     pub sha256: String,
-    /// The client kit's members; empty for a platform archive.
+    /// The client kit's members; empty for other artifacts.
     pub members: Vec<Member>,
 }
 
@@ -474,6 +477,7 @@ impl ReleaseManifest {
             let purpose = match entry["purpose"].as_str() {
                 Some("platform") => Purpose::Platform,
                 Some("client-kit") => Purpose::ClientKit,
+                Some("bootstrap") => Purpose::Bootstrap,
                 _ => return Err("release.json: an artifact has an unknown `purpose`".into()),
             };
             let mut members = Vec::new();
@@ -794,6 +798,16 @@ pub fn verify_manifest(release: &ReleaseDir, manifest: &ReleaseManifest) -> Vec<
                 format!("jaynshare-{}-{target}.{extension}", manifest.version)
             }
             Purpose::ClientKit => client_kit.clone(),
+            Purpose::Bootstrap => {
+                if !BOOTSTRAPS.contains(&artifact.filename.as_str()) {
+                    checks.push(Check::fail(
+                        "release.names",
+                        format!("{}: is not a bootstrap file name", artifact.filename),
+                    ));
+                    return checks;
+                }
+                artifact.filename.clone()
+            }
         };
         if artifact.filename != expected {
             checks.push(Check::fail(
@@ -834,9 +848,25 @@ pub fn verify_manifest(release: &ReleaseDir, manifest: &ReleaseManifest) -> Vec<
         ));
         return checks;
     }
+    for bootstrap in BOOTSTRAPS {
+        let count = manifest
+            .artifacts
+            .iter()
+            .filter(|artifact| {
+                artifact.purpose == Purpose::Bootstrap && artifact.filename == bootstrap
+            })
+            .count();
+        if count != 1 {
+            checks.push(Check::fail(
+                "release.names",
+                format!("{bootstrap}: {count} bootstrap artifacts, exactly one required"),
+            ));
+            return checks;
+        }
+    }
     checks.push(Check::pass(
         "release.names",
-        "every artifact file name follows the release layout: one archive per target and one client kit",
+        "every artifact file name follows the release layout: one archive per target, one client kit and three bootstraps",
     ));
 
     // Every file present is listed. The overlap adds the next
@@ -1193,6 +1223,16 @@ mod tests {
             "sha256": sha256_hex(&bytes),
         }));
         artifacts.push((name, bytes));
+        for name in BOOTSTRAPS {
+            let bytes = filler(name);
+            entries.push(json!({
+                "filename": name,
+                "purpose": "bootstrap",
+                "length": bytes.len(),
+                "sha256": sha256_hex(&bytes),
+            }));
+            artifacts.push((name.to_string(), bytes));
+        }
         let manifest = json!({
             "schema_version": 1,
             "version": VERSION,

@@ -192,6 +192,66 @@ async fn a_fresh_machine_joins_with_one_command() {
     validate(&schema["result"], &envelope).expect("the published join schema");
 }
 
+/// The signed macOS bootstrap downloads the official client archive, checks
+/// it, and uses that binary to join a local server.
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread")]
+async fn shell_bootstrap_joins_a_local_server() {
+    use crate::release_fx::{
+        FIXTURE_VERSION, ReleaseKey, host_target, serve_release, with_platform_archive,
+        write_release_of,
+    };
+
+    let _leak_sweep = crate::leaks::LeakGuard::default();
+    let operator = Operator::start("join-shell-bootstrap").await;
+    let invite = operator.invite("bootstrap", "Bootstrap client", &[]);
+    let root = scratch("join-shell-bootstrap-release");
+    let release = root.join("release");
+    let key = ReleaseKey::generate();
+    let executable = std::fs::read(binary()).expect("the bootstrap executable");
+    write_release_of(
+        &release,
+        &key,
+        FIXTURE_VERSION,
+        |parts| with_platform_archive(parts, host_target(), &executable),
+        |_| {},
+    );
+    let (origin, ca) = serve_release(&release, "localhost", FIXTURE_VERSION).await;
+    let home = fresh_home("join-shell-bootstrap-engineer");
+    let output = std::process::Command::new("sh")
+        .arg(release.join("install.sh"))
+        .args([
+            "--version",
+            FIXTURE_VERSION,
+            "--release-origin",
+            &origin,
+            "--tls-ca",
+            ca.to_str().expect("CA path"),
+            &invite,
+        ])
+        .envs(isolated_env(&home))
+        .env_remove("JAYNSHARE_CONFIG")
+        .env_remove("HTTPS_PROXY")
+        .env_remove("HTTP_PROXY")
+        .env_remove("NO_PROXY")
+        .env_remove("https_proxy")
+        .env_remove("http_proxy")
+        .env_remove("no_proxy")
+        .output()
+        .expect("run install.sh");
+    let transcript = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.status.success(), "{transcript}");
+    assert!(
+        transcript.contains("joined the pool as bootstrap (Bootstrap client)"),
+        "{transcript}"
+    );
+    assert!(config_root(&home).join("client/client.toml").is_file());
+}
+
 /// An invite claims once: the second machine is refused and installs
 /// nothing; one past its expiry is refused the same way.
 #[tokio::test(flavor = "multi_thread")]

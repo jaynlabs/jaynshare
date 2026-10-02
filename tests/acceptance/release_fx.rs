@@ -154,7 +154,18 @@ pub(crate) const TARGETS: [&str; 5] = [
     "x86_64-pc-windows-msvc",
 ];
 
-/// The six artifact file names of `version`, with their
+pub(crate) fn host_target() -> &'static str {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("linux", "x86_64") => "x86_64-unknown-linux-musl",
+        ("linux", "aarch64") => "aarch64-unknown-linux-musl",
+        ("macos", "x86_64") => "x86_64-apple-darwin",
+        ("macos", "aarch64") => "aarch64-apple-darwin",
+        ("windows", "x86_64") => "x86_64-pc-windows-msvc",
+        other => panic!("no release target for {other:?}"),
+    }
+}
+
+/// The nine artifact file names of `version`, with their
 /// purpose and target.
 pub(crate) fn artifact_names(version: &str) -> Vec<(String, &'static str, Option<&'static str>)> {
     let mut names: Vec<(String, &'static str, Option<&'static str>)> = TARGETS
@@ -177,6 +188,11 @@ pub(crate) fn artifact_names(version: &str) -> Vec<(String, &'static str, Option
         "client-kit",
         None,
     ));
+    names.extend([
+        ("install.ps1".into(), "bootstrap", None),
+        ("install.sh".into(), "bootstrap", None),
+        ("quickstart.sh".into(), "bootstrap", None),
+    ]);
     names
 }
 
@@ -211,7 +227,19 @@ pub(crate) fn release_parts_of(key: &ReleaseKey, version: &str) -> ReleaseParts 
     let artifacts: Vec<(String, Vec<u8>)> = artifact_names(version)
         .into_iter()
         .map(|(name, _, _)| {
-            let bytes = format!("{name}: acceptance filler\n").into_bytes();
+            let source = match name.as_str() {
+                "install.ps1" => Some("tools/release/install.ps1"),
+                "install.sh" => Some("tools/release/install.sh"),
+                "quickstart.sh" => Some("tools/quickstart.sh"),
+                _ => None,
+            };
+            let bytes = source.map_or_else(
+                || format!("{name}: acceptance filler\n").into_bytes(),
+                |path| {
+                    std::fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join(path))
+                        .unwrap_or_else(|error| panic!("{path}: {error}"))
+                },
+            );
             (name, bytes)
         })
         .collect();
@@ -283,6 +311,139 @@ pub(crate) fn write_release_of(
         std::fs::write(dir.join(&name), bytes).unwrap_or_else(|e| panic!("{name}: {e}"));
     }
     dir.to_path_buf()
+}
+
+/// A local TLS release origin serving `directory`, including its `latest`
+/// redirect. The returned CA file is for curl and `--tls-ca`.
+pub(crate) async fn serve_release(
+    directory: &Path,
+    host: &str,
+    version: &str,
+) -> (String, PathBuf) {
+    use http::Request;
+    use http_body_util::Full;
+    use hyper::body::Bytes;
+    use hyper::service::service_fn;
+    use hyper_util::rt::TokioIo;
+
+    let bind = if host == "localhost" {
+        "127.0.0.1:0"
+    } else {
+        "0.0.0.0:0"
+    };
+    let listener = tokio::net::TcpListener::bind(bind).await.expect("bind");
+    let port = listener.local_addr().expect("release host address").port();
+    let tls = directory
+        .parent()
+        .expect("release parent")
+        .join(format!("release-host-{port}"));
+    std::fs::create_dir_all(&tls).expect("release TLS directory");
+
+    let ca_key = rcgen::KeyPair::generate().expect("release CA key");
+    let mut ca_params = rcgen::CertificateParams::new(Vec::<String>::new()).expect("CA params");
+    ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+    ca_params.distinguished_name = rcgen::DistinguishedName::new();
+    ca_params
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, "jaynshare release test CA");
+    let ca = ca_params.self_signed(&ca_key).expect("release CA");
+    let leaf_key = rcgen::KeyPair::generate().expect("release leaf key");
+    let mut leaf_params =
+        rcgen::CertificateParams::new(vec![host.to_owned()]).expect("release leaf params");
+    leaf_params.distinguished_name = rcgen::DistinguishedName::new();
+    leaf_params
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, host);
+    let leaf = leaf_params
+        .signed_by(&leaf_key, &ca, &ca_key)
+        .expect("release leaf");
+    let ca_file = tls.join("ca.pem");
+    let cert_file = tls.join("cert.pem");
+    let key_file = tls.join("key.pem");
+    std::fs::write(&ca_file, ca.pem()).expect("release CA file");
+    std::fs::write(&cert_file, format!("{}{}", leaf.pem(), ca.pem()))
+        .expect("release certificate chain");
+    std::fs::write(&key_file, leaf_key.serialize_pem()).expect("release key file");
+
+    let acceptor = release_acceptor(&cert_file, &key_file);
+    let directory = directory.to_path_buf();
+    let host = host.to_owned();
+    let origin = format!("https://{host}:{port}");
+    let version = version.to_owned();
+    tokio::spawn(async move {
+        loop {
+            let Ok((plain, _)) = listener.accept().await else {
+                return;
+            };
+            let Ok(stream) = acceptor.accept(plain).await else {
+                continue;
+            };
+            let directory = directory.clone();
+            let host = host.clone();
+            let version = version.clone();
+            tokio::spawn(async move {
+                let service = service_fn(move |request: Request<_>| {
+                    let directory = directory.clone();
+                    let host = host.clone();
+                    let version = version.clone();
+                    async move {
+                        let path = request.uri().path();
+                        let prefix = format!("/v{version}/");
+                        let mut response = http::Response::builder();
+                        let bytes = if path == "/latest" {
+                            response = response.status(http::StatusCode::FOUND).header(
+                                http::header::LOCATION,
+                                format!("https://{host}:{port}/releases/tag/v{version}"),
+                            );
+                            Vec::new()
+                        } else if path == format!("/releases/tag/v{version}") {
+                            Vec::new()
+                        } else if let Some(name) = path.strip_prefix(&prefix) {
+                            if name.contains('/') {
+                                response = response.status(http::StatusCode::NOT_FOUND);
+                                Vec::new()
+                            } else {
+                                match std::fs::read(directory.join(name)) {
+                                    Ok(bytes) => bytes,
+                                    Err(_) => {
+                                        response = response.status(http::StatusCode::NOT_FOUND);
+                                        Vec::new()
+                                    }
+                                }
+                            }
+                        } else {
+                            response = response.status(http::StatusCode::NOT_FOUND);
+                            Vec::new()
+                        };
+                        Ok::<_, std::convert::Infallible>(
+                            response
+                                .body(Full::new(Bytes::from(bytes)))
+                                .expect("release response"),
+                        )
+                    }
+                });
+                let _ = hyper::server::conn::http1::Builder::new()
+                    .serve_connection(TokioIo::new(stream), service)
+                    .await;
+            });
+        }
+    });
+    (origin, ca_file)
+}
+
+fn release_acceptor(cert: &Path, key: &Path) -> tokio_rustls::TlsAcceptor {
+    use rustls_pki_types::pem::PemObject;
+
+    let key = rustls_pki_types::PrivateKeyDer::from_pem_file(key).expect("release key parses");
+    let certs: Vec<_> = rustls_pki_types::CertificateDer::pem_file_iter(cert)
+        .expect("release certificate")
+        .collect::<Result<_, _>>()
+        .expect("release certificate parses");
+    let config = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .expect("the release pair loads");
+    tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(config))
 }
 
 // A real platform archive (part C)

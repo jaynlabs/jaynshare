@@ -7,7 +7,7 @@ use crate::enrol::config_root;
 #[allow(unused_imports)]
 use crate::harness::{Value, binary, cli_raw, isolated_env, private_dir, scratch};
 #[allow(unused_imports)]
-use crate::release_fx::{FIXTURE_VERSION, ReleaseKey, write_release};
+use crate::release_fx::{FIXTURE_VERSION, ReleaseKey, host_target, write_release};
 
 use std::path::{Path, PathBuf};
 
@@ -324,7 +324,7 @@ async fn an_idle_server_makes_no_release_request() {
 // ------------------------------------------------------------------ scenarios
 
 /// One release set, one version, only the allowed files:
-/// `tools/release/build.py` produces the six artifacts plus
+/// `tools/release/build.py` produces the nine artifacts plus
 /// the three release-set files, each archive holding exactly its
 /// four entries, the host archive's executable being the binary under test,
 /// and `release verify` accepting the set under the minted key.
@@ -396,7 +396,7 @@ async fn one_release_set_one_version_only_the_allowed_files() {
         "the four placeholder targets are announced on stderr: {stderr}"
     );
 
-    // Exactly the six artifacts plus the three release-set files.
+    // Exactly the nine artifacts plus the three release-set files.
     let mut files: Vec<String> = std::fs::read_dir(&out)
         .expect("release directory")
         .map(|entry| {
@@ -424,7 +424,12 @@ async fn one_release_set_one_version_only_the_allowed_files() {
                 format!("jaynshare-{version}-{target}.tar.gz")
             }
         })
-        .chain([format!("jaynshare-{version}-client-kit.zip")])
+        .chain([
+            format!("jaynshare-{version}-client-kit.zip"),
+            "install.ps1".to_owned(),
+            "install.sh".to_owned(),
+            "quickstart.sh".to_owned(),
+        ])
         .collect::<Vec<_>>();
     artifacts.sort();
     let mut expected = artifacts.clone();
@@ -526,7 +531,7 @@ async fn one_release_set_one_version_only_the_allowed_files() {
     );
 
     // Release.json parses, agrees with SHA256SUMS, and carries the
-    // six artifacts.
+    // nine artifacts.
     let manifest: serde_json::Value = serde_json::from_slice(
         &std::fs::read(out.join("release.json")).expect("read release.json"),
     )
@@ -536,7 +541,7 @@ async fn one_release_set_one_version_only_the_allowed_files() {
     assert_eq!(manifest["commit"], commit);
     assert_eq!(
         manifest["artifacts"].as_array().expect("artifacts").len(),
-        6
+        9
     );
     let sums = std::fs::read(out.join("SHA256SUMS")).expect("read SHA256SUMS");
     assert_eq!(
@@ -559,17 +564,6 @@ async fn one_release_set_one_version_only_the_allowed_files() {
         None,
     );
     assert_eq!(code, 0, "{stdout}{stderr}");
-}
-
-/// the target for the machine the suite runs on.
-fn host_target() -> &'static str {
-    match (std::env::consts::ARCH, std::env::consts::OS) {
-        ("x86_64", "macos") => "x86_64-apple-darwin",
-        ("aarch64", "macos") => "aarch64-apple-darwin",
-        ("x86_64", "linux") => "x86_64-unknown-linux-musl",
-        ("aarch64", "linux") => "aarch64-unknown-linux-musl",
-        _ => panic!("no release target for this machine"),
-    }
 }
 
 /// `release fetch` (the explicit release-host contact): the release set,
