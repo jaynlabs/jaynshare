@@ -138,19 +138,6 @@ impl LinuxBox {
         let container = format!("jaynshare-box-{name}-{}", std::process::id());
         let _ = docker(&["rm", "-f", &container]);
         let tools = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/acceptance/fixtures/box");
-        // A real server host has a root bundle (`ca-certificates`); the slim
-        // image has none, so the host's is lent read-only. Its real path: on
-        // macOS `/etc` is a link to `/private/etc`, which only Docker
-        // Desktop's API proxy would translate.
-        let roots = ["/etc/ssl/cert.pem", "/etc/ssl/certs/ca-certificates.crt"]
-            .into_iter()
-            .find_map(|path| {
-                std::fs::canonicalize(path)
-                    .ok()
-                    .filter(|real| real.is_file())
-            })
-            .expect("a host root bundle to lend the box");
-        let roots = format!("{}:/etc/ssl/certs/ca-certificates.crt:ro", roots.display());
         let publish = published.map(|port| format!("127.0.0.1::{port}"));
         let binary_mount = format!("{}:{BOX_BIN}:ro", binary.display());
         let tools_mount = format!("{}:{BOX_TOOLS}:ro", tools.display());
@@ -175,8 +162,6 @@ impl LinuxBox {
             &binary_mount,
             "-v",
             &tools_mount,
-            "-v",
-            &roots,
         ];
         if let Some(publish) = &publish {
             run.extend(["-p", publish]);
@@ -208,6 +193,15 @@ impl LinuxBox {
         );
         let (code, _, stderr) = linux.sh(&setup);
         assert_eq!(code, 0, "box setup: {stderr}");
+        // A real server host has a root bundle (`ca-certificates`); the slim
+        // image has none, so the host's is copied in. Not mounted: through
+        // Docker Desktop's file sharing a mount's owner changes from one stat
+        // to the next, which the tree digests would report as a change.
+        let roots = ["/etc/ssl/cert.pem", "/etc/ssl/certs/ca-certificates.crt"]
+            .into_iter()
+            .find_map(|path| std::fs::read(path).ok())
+            .expect("a host root bundle to lend the box");
+        linux.write("/etc/ssl/certs/ca-certificates.crt", &roots, 0o644);
         Some(linux)
     }
 
