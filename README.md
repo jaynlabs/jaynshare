@@ -54,13 +54,13 @@ able to choose from which account to draw for your session.
 ## Try it on your Mac
 
 Before having to set up a server, you can spin up one on your own Mac easily
-using this (it downloads the latest release, runs it, enrolls a client and
+using this (it downloads the latest release, runs it, joins a client and
 prompts you to log your Claude account).
 
 It needs `python3` and Claude Code installed.
 
 ```sh
-curl -fsSLO https://raw.githubusercontent.com/jaynlabs/jaynshare/main/tools/quickstart.sh
+curl -fsSLO https://github.com/jaynlabs/jaynshare/releases/latest/download/quickstart.sh
 bash quickstart.sh          #sets up everything
 bash quickstart.sh claude   #launches claude
 ```
@@ -103,11 +103,13 @@ a product of Anthropic.
 - OAuth subscription and API-key accounts
 - An account picker at launch and a Claude Code status line naming the serving
   account
-- Private client enrollment for macOS and Windows, with a secret per client,
-  rotation and revocation
-- Private-network listeners only, optional TLS, and an audit log that never
-  holds a body or a credential
-- Signed releases and a native systemd install
+- A one-line join for macOS and Windows from a single-use invite, with a secret
+  per client, rotation and revocation
+- Claude accounts added by their owners while joining
+- Private-network listeners only, TLS pinned to the server's own identity, and
+  an audit log that never holds a body or a credential
+- Signed releases, a one-command systemd install, optional nightly updates,
+  and clients that follow their server's version
 - One Rust binary for the server and the client
 
 ## Requirements for self hosting
@@ -121,37 +123,28 @@ a product of Anthropic.
 
 ### Server
 
-From the [releases page](https://github.com/jaynlabs/jaynshare/releases),
-download and extract the archive for the server's platform, and download the
-client kit (`jaynshare-2.0.1-client-kit.zip`) beside it. As root, in the
-extracted directory:
+On the server, as a user with sudo:
 
 ```sh
-./jaynshare release fetch 2.0.1 --out ./release
-./jaynshare config new --out ./jaynshare.toml
-$EDITOR ./jaynshare.toml   # set data_plane.listen to the server's private address
-./jaynshare server preflight --config ./jaynshare.toml --from ./release
-./jaynshare server install --config ./jaynshare.toml --from ./release
+curl -fsSL https://github.com/jaynlabs/jaynshare/releases/latest/download/install.sh | sudo sh
 ```
 
-The install puts `jaynshare` on the search path. Operator commands run on the
-server as its service account:
+It installs the newest release as a systemd service on the host's Tailscale
+address (or its only private address; otherwise it asks), and ends with an
+invite for you: `jaynshare join jsi1_…`. Run it again to update. From a clone,
+`tools/install-server.sh` does the same with your own build.
+
+Operator commands run on the server as its service account:
 
 ```sh
 alias js='sudo -u jaynshare -H jaynshare'
-js account login --name alice
+js client invite bob                   # → jaynshare join jsi1_…
 js status
-
-# One engineer's enrollment bundle:
-sudo install -m 0600 -o jaynshare -g jaynshare \
-  ../jaynshare-2.0.1-client-kit.zip /var/lib/jaynshare/client-kit.zip
-sudo install -d -m 0700 -o jaynshare -g jaynshare /var/lib/jaynshare/bundles
-js client enrol bob --name "Bob" \
-  --kit /var/lib/jaynshare/client-kit.zip --out /var/lib/jaynshare/bundles
+sudo jaynshare server auto-update on   # update every night; clients follow
 ```
 
-`client enrol` writes the enrollment bundle and discloses its one-time code
-once. Send the two through separate private channels.
+An invite works once and expires after a day. Send it through a private
+channel.
 
 The [server installation notes](deploy/README-server.md) cover the operator
 trust boundary, the decision record every pooled account needs, and the
@@ -159,17 +152,30 @@ private-network rules jaynshare cannot enforce for you.
 
 ### Engineer
 
-1. Extract the enrollment bundle from your operator into an empty directory.
-2. Run its installer with the one-time code sent through a separate channel.
-3. Run `jaynshare claude` wherever you would have run `claude`.
+With the invite from your operator, on macOS:
+
+```sh
+curl -fsSL https://github.com/jaynlabs/jaynshare/releases/latest/download/install.sh | sh -s -- join jsi1_…
+```
+
+On Windows, in PowerShell:
+
+```powershell
+& ([scriptblock]::Create((irm https://github.com/jaynlabs/jaynshare/releases/latest/download/install.ps1))) jsi1_…
+```
+
+The join checks that the server is the one the invite names, installs that
+server's client and offers to add your Claude account to the pool. Then run
+`jaynshare claude` wherever you would have run `claude`. The client updates
+itself whenever the server does.
 
 `jaynshare claude` opens a picker when the pool cannot choose for you;
 `--account <name>` names the account, `--auto` lets the pool pick, and
 `--direct` runs Claude Code outside the pool under your own login. Arguments
 after `--` go to Claude Code unchanged. `jaynshare status` checks enrollment
-and connectivity, and `jaynshare alias` prints a shell alias so that `claude`
-itself goes through the pool. The bundle's `README.txt` documents installation
-in detail.
+and connectivity, `jaynshare account login` adds your account later, and
+`jaynshare alias` prints a shell alias so that `claude` itself goes through the
+pool.
 
 ## Roadmap / Ideas
 
@@ -212,8 +218,9 @@ Where things live:
 
 - `src/` — the server, the client and the CLI
 - `deploy/` — the server notes, the release key (`release-key.pub`) and the
-  client-kit installers (`kit/`)
-- `tools/release/` — cross-builds, packaging, signing and publishing
+  client kit's README (`kit/`)
+- `tools/release/` — packaging, signing, publishing and the `install.sh` /
+  `install.ps1` bootstraps
 
 Issues and pull requests are welcome; open an issue before a large change.
 Report security issues privately as described in [SECURITY.md](SECURITY.md).
