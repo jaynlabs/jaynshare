@@ -54,7 +54,14 @@ impl Control {
         if let Some(origin) = &cli.server {
             return Self::remote(cli, origin);
         }
-        let config_path = config::config_path(cli.config.as_deref());
+        Self::loopback(
+            config::config_path(cli.config.as_deref()),
+            Duration::from_secs(cli.timeout),
+        )
+    }
+
+    /// The loopback operator of the instance `config_path` configures.
+    pub(super) fn loopback(config_path: PathBuf, timeout: Duration) -> Result<Self, Failure> {
         let bytes = config::read(&config_path).map_err(|e| {
             // An operator verb needs a readable configuration or --server.
             Failure::local(
@@ -116,8 +123,8 @@ impl Control {
             origin: format!("{scheme}://{host}:{port}"),
             dial: address.map(|_| format!("{scheme}://127.0.0.1:{port}")),
             client,
-            timeout: Duration::from_secs(cli.timeout),
-            config_path: Some(config_path.clone()),
+            timeout,
+            config_path: Some(config_path),
             state_path: Some(state_path),
             bearer: None,
         })

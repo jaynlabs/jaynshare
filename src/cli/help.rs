@@ -623,7 +623,7 @@ pub(super) static DOCS: &[VerbDoc] = &[
         "server install",
         Deploy,
         None,
-        "Install the newest verified release, or a clone's build, as the native service, writing a configuration when there is none; run again, it updates",
+        "Install the newest verified release, or a clone's build, as the native service, writing a configuration when there is none and ending with an invite for you; run again, it updates",
         [3, 4, 8, 17, 18, 19, 20, 21],
         [
             "jaynshare server install",

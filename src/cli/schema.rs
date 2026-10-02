@@ -45,6 +45,26 @@ fn object(members: &[(&str, Value)]) -> Value {
     json!({ "type": "object", "required": required, "additionalProperties": false, "properties": properties })
 }
 
+/// What every deploy verb answers.
+fn deploy_members() -> Vec<(&'static str, Value)> {
+    vec![
+        ("operation", string()),
+        ("version", nullable_string()),
+        ("commit", nullable_string()),
+        ("paths", array(string())),
+        ("project", nullable_string()),
+        ("rolled_back", json!({ "type": "boolean" })),
+        (
+            "checks",
+            array(object(&[
+                ("name", string()),
+                ("passed", json!({ "type": "boolean" })),
+                ("message", string()),
+            ])),
+        ),
+    ]
+}
+
 fn open_object() -> Value {
     json!({ "type": "object" })
 }
@@ -462,14 +482,14 @@ fn defs() -> Value {
             ("fingerprint", nullable_string()),
             ("not_after", nullable_string()),
         ]),
-        "deploy_result": object(&[
-            ("operation", string()),
-            ("version", nullable_string()),
-            ("commit", nullable_string()),
-            ("paths", array(string())),
-            ("project", nullable_string()),
-            ("rolled_back", json!({ "type": "boolean" })),
-            ("checks", array(object(&[("name", string()), ("passed", json!({ "type": "boolean" })), ("message", string())]))),
+        "deploy_result": object(&deploy_members()),
+        "install_result": object(
+            &[deploy_members(), vec![("invite", nullable(reference("invite_result")))]].concat(),
+        ),
+        "invite_result": object(&[
+            ("client", reference("registry_entry")),
+            ("expires_at", string()),
+            ("invite", string()),
         ]),
         "client_result": object(&[
             ("client_id", string()),
@@ -686,11 +706,7 @@ fn result_of(path: &str) -> Option<Value> {
         // The invite travels inside `result` with `--json`, or into
         // `--disclose-to`'s file, named by `disclosure_file`.
         "client invite" | "client reissue" => json!({ "oneOf": [
-            object(&[
-                ("client", reference("registry_entry")),
-                ("expires_at", string()),
-                ("invite", string()),
-            ]),
+            reference("invite_result"),
             object(&[
                 ("client", reference("registry_entry")),
                 ("expires_at", string()),
@@ -724,6 +740,7 @@ fn result_of(path: &str) -> Option<Value> {
         p if p.starts_with("client ") || p.starts_with("operator ") || p.starts_with("ca ") => {
             open_object()
         }
+        "server install" => reference("install_result"),
         p if p.starts_with("release ") || p.starts_with("server ") || p.starts_with("service ") => {
             reference("deploy_result")
         }

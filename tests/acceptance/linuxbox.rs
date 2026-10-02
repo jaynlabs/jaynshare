@@ -113,15 +113,21 @@ impl LinuxBox {
     /// A box with systemd "booted", or `None` when there is no Docker daemon.
     /// `name` identifies the test in container names and paths.
     pub(crate) fn start(name: &str) -> Option<LinuxBox> {
-        Self::start_with(name, true)
+        Self::start_with(name, true, None)
     }
 
     /// The same without `/run/systemd/system`, so systemd is not PID 1.
     pub(crate) fn start_without_systemd(name: &str) -> Option<LinuxBox> {
-        Self::start_with(name, false)
+        Self::start_with(name, false, None)
     }
 
-    fn start_with(name: &str, systemd: bool) -> Option<LinuxBox> {
+    /// A box whose `port` is published on this machine's loopback, for a
+    /// client here to reach a server in the box ([`LinuxBox::published`]).
+    pub(crate) fn start_publishing(name: &str, port: u16) -> Option<LinuxBox> {
+        Self::start_with(name, true, Some(port))
+    }
+
+    fn start_with(name: &str, systemd: bool, published: Option<u16>) -> Option<LinuxBox> {
         if !docker_available() {
             eprintln!("skipping: linux: no Docker daemon runs a container within 120 s");
             return None;
@@ -132,20 +138,10 @@ impl LinuxBox {
         let container = format!("jaynshare-box-{name}-{}", std::process::id());
         let _ = docker(&["rm", "-f", &container]);
         let tools = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/acceptance/fixtures/box");
-        // A real server host has a root bundle (`ca-certificates`); the slim
-        // image has none, so the host's is lent read-only. Its real path: on
-        // macOS `/etc` is a link to `/private/etc`, which only Docker
-        // Desktop's API proxy would translate.
-        let roots = ["/etc/ssl/cert.pem", "/etc/ssl/certs/ca-certificates.crt"]
-            .into_iter()
-            .find_map(|path| {
-                std::fs::canonicalize(path)
-                    .ok()
-                    .filter(|real| real.is_file())
-            })
-            .expect("a host root bundle to lend the box");
-        let roots = format!("{}:/etc/ssl/certs/ca-certificates.crt:ro", roots.display());
-        let output = docker(&[
+        let publish = published.map(|port| format!("127.0.0.1::{port}"));
+        let binary_mount = format!("{}:{BOX_BIN}:ro", binary.display());
+        let tools_mount = format!("{}:{BOX_TOOLS}:ro", tools.display());
+        let mut run = vec![
             "run",
             "-d",
             "--rm",
@@ -163,16 +159,15 @@ impl LinuxBox {
             "--cap-add",
             "SYS_TIME",
             "-v",
-            &format!("{}:{BOX_BIN}:ro", binary.display()),
+            &binary_mount,
             "-v",
-            &format!("{}:{BOX_TOOLS}:ro", tools.display()),
-            "-v",
-            &roots,
-            BOX_IMAGE,
-            "sleep",
-            "infinity",
-        ])
-        .expect("docker run");
+            &tools_mount,
+        ];
+        if let Some(publish) = &publish {
+            run.extend(["-p", publish]);
+        }
+        run.extend([BOX_IMAGE, "sleep", "infinity"]);
+        let output = docker(&run).expect("docker run");
         assert!(
             output.status.success(),
             "the box would not start: {}",
@@ -198,7 +193,32 @@ impl LinuxBox {
         );
         let (code, _, stderr) = linux.sh(&setup);
         assert_eq!(code, 0, "box setup: {stderr}");
+        // A real server host has a root bundle (`ca-certificates`); the slim
+        // image has none, so the host's is copied in. Not mounted: through
+        // Docker Desktop's file sharing a mount's owner changes from one stat
+        // to the next, which the tree digests would report as a change.
+        let roots = ["/etc/ssl/cert.pem", "/etc/ssl/certs/ca-certificates.crt"]
+            .into_iter()
+            .find_map(|path| std::fs::read(path).ok())
+            .expect("a host root bundle to lend the box");
+        linux.write("/etc/ssl/certs/ca-certificates.crt", &roots, 0o644);
         Some(linux)
+    }
+
+    /// The `host:port` on this machine's loopback that reaches the box's
+    /// published `port`.
+    pub(crate) fn published(&self, port: u16) -> String {
+        let output = docker(&["port", &self.name, &format!("{port}/tcp")]).expect("docker port");
+        assert!(
+            output.status.success(),
+            "docker port: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .next()
+            .expect("the published address")
+            .to_owned()
     }
 
     /// `docker exec <box> <args>` as root, standard input `stdin`.

@@ -32,6 +32,34 @@ pub(super) fn expiry_seconds(text: &str) -> Result<u64, String> {
         .ok_or_else(|| format!("{text:?} is not a duration such as 24h"))
 }
 
+/// The client a fresh `server install` invites: the user who ran it
+/// (`SUDO_USER`, else `USER`) as a client id.
+pub(super) fn installer_client_id() -> Option<String> {
+    ["SUDO_USER", "USER"]
+        .into_iter()
+        .filter_map(|variable| std::env::var(variable).ok())
+        .find_map(|user| client_id_from(&user))
+}
+
+/// `user` lowercased, every character a client id refuses made a `-`,
+/// from its first letter or digit, at most 63 characters.
+fn client_id_from(user: &str) -> Option<String> {
+    let id: String = user
+        .to_ascii_lowercase()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .skip_while(|c| !c.is_ascii_alphanumeric())
+        .take(63)
+        .collect();
+    (!id.is_empty()).then_some(id)
+}
+
 /// The base-URL and proxy origins clients are given: the advertised ones,
 /// else the listeners' own addresses, refused beside a wildcard bind, whose
 /// address no client can reach.
@@ -245,5 +273,23 @@ mod tests {
         assert!(expiry_seconds("1w").is_err());
         assert!(expiry_seconds("h").is_err());
         assert!(expiry_seconds("-1h").is_err());
+    }
+
+    #[test]
+    fn a_user_name_becomes_a_valid_client_id() {
+        assert_eq!(client_id_from("alice").as_deref(), Some("alice"));
+        assert_eq!(
+            client_id_from("Jean.Dupont").as_deref(),
+            Some("jean-dupont")
+        );
+        assert_eq!(client_id_from("_build$").as_deref(), Some("build-"));
+        assert_eq!(client_id_from("Élodie").as_deref(), Some("lodie"));
+        assert_eq!(client_id_from(&"a".repeat(80)).map(|id| id.len()), Some(63));
+        assert_eq!(client_id_from("._-"), None);
+        assert_eq!(client_id_from(""), None);
+        for user in ["Jean.Dupont", "_build$", "Élodie"] {
+            let id = client_id_from(user).expect("an id");
+            assert!(crate::cli::bundle::validate_client_id(&id).is_ok(), "{id}");
+        }
     }
 }
