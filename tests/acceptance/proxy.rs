@@ -314,7 +314,10 @@ impl Intercepted {
     /// a row can send a foreign one.
     async fn send(&mut self, request: Request<Full<Bytes>>) -> Answer {
         let response = match &mut self.sender {
-            Sender::H1(sender) => sender.send_request(request).await,
+            Sender::H1(sender) => {
+                sender.ready().await.expect("HTTP/1.1 tunnel ready");
+                sender.send_request(request).await
+            }
             Sender::H2(sender) => sender.send_request(request).await,
         };
         collect_answer(response.expect("send inside the intercepted tunnel")).await
