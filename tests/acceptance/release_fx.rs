@@ -11,7 +11,7 @@ use base64::Engine as _;
 use ring::signature::KeyPair as _;
 use sha2::{Digest, Sha256};
 
-use crate::bundle::config_root;
+use crate::enrol::config_root;
 use crate::harness::{Value, json, private_dir};
 
 pub(crate) fn sha256_hex(bytes: &[u8]) -> String {

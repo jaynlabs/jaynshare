@@ -17,7 +17,10 @@ mod edit;
 mod engineer;
 mod env;
 mod help;
+mod invite;
+mod join;
 mod schema;
+mod search_path;
 mod tail;
 mod trust_ca;
 mod uninstall;
@@ -54,10 +57,9 @@ use help::Role;
 pub(crate) use update::follow;
 use verbs::{
     account_add, account_availability, account_list, account_login, account_remove, account_rename,
-    account_replace, account_show, api, ca_export, ca_rotate, ca_show, client_issue, client_list,
-    client_reissue, client_rename, client_revoke, client_rotate, client_show, operation_cancel,
-    operation_code, operation_show, operator_secret_remove, operator_secret_set, probe, status,
-    switch,
+    account_replace, account_show, api, ca_export, ca_rotate, ca_show, client_list, client_rename,
+    client_revoke, client_rotate, client_show, operation_cancel, operation_code, operation_show,
+    operator_secret_remove, operator_secret_set, probe, status, switch,
 };
 
 /// A failure the envelope reports: the exit code and the error object.
@@ -106,23 +108,19 @@ fn client_installation() -> (std::path::PathBuf, bool) {
 }
 
 /// An engineer verb without an installation exits 11 naming the
-/// missing file and the installer to run.
+/// missing file and how to join.
 fn engineer_context() -> Result<(), Failure> {
     let (file, exists) = client_installation();
     if exists {
         return Ok(());
     }
-    let installer = if cfg!(target_os = "windows") {
-        "install-windows.ps1"
-    } else {
-        "install-macos.sh"
-    };
     Err(Failure::local(
         11,
         "cli_not_enrolled",
         format!(
-            "this machine is not enrolled: {} is missing; run the enrollment bundle's {installer}",
-            file.display()
+            "this machine is not enrolled: {} is missing; {}",
+            file.display(),
+            crate::client::JOIN_HINT
         ),
     ))
 }
@@ -283,7 +281,7 @@ pub fn main() -> i32 {
     // configuration is read, the installation (or the bundle) is the context.
     let engineer_direct = matches!(
         verb,
-        Verb::Enrol { .. }
+        Verb::Join { .. }
             | Verb::Secret { .. }
             | Verb::Update { .. }
             | Verb::Uninstall
@@ -304,10 +302,7 @@ pub fn main() -> i32 {
             match verb {
                 Verb::Status(args) => engineer::status(&cli, args).await,
                 Verb::Api(args) => engineer::api(&cli, args).await,
-                Verb::Enrol {
-                    bundle,
-                    trust_os_store,
-                } => engineer::enrol(&cli, bundle, *trust_os_store).await,
+                Verb::Join { invite } => join::join(&cli, invite).await,
                 Verb::Secret {
                     verb: SecretVerb::Set { channel },
                 } => engineer::secret_set(&cli, channel).await,
@@ -402,35 +397,10 @@ pub fn main() -> i32 {
             Verb::Client { verb } => match verb {
                 ClientVerb::List => client_list(&control).await,
                 ClientVerb::Show { id } => client_show(&control, id).await,
-                ClientVerb::Issue {
-                    id,
-                    name,
-                    disclose_to,
-                } => client_issue(&control, &cli, id, name, disclose_to.as_deref()).await,
-                ClientVerb::Bundle { id, kit, out } => {
-                    bundle::validate_client_id(id)?;
-                    bundle::client_bundle(&control, id, kit, out).await
+                ClientVerb::Invite(args) => invite::client_invite(&control, &cli, args).await,
+                ClientVerb::Reissue { id, terms } => {
+                    invite::client_reissue(&control, &cli, id, terms).await
                 }
-                ClientVerb::Enrol { id, name, kit, out } => {
-                    bundle::client_enrol(&control, id, name, kit, out).await
-                }
-                ClientVerb::Reissue {
-                    id,
-                    kit,
-                    out,
-                    disclose_to,
-                } => match (kit, out) {
-                    // The packaging half repacks for the new
-                    // generation; the bare form is the registry call alone.
-                    (Some(kit), Some(out)) => {
-                        bundle::client_reissue(&control, &cli, id, kit, out, disclose_to.as_deref())
-                            .await
-                    }
-                    (None, None) => {
-                        client_reissue(&control, &cli, id, disclose_to.as_deref()).await
-                    }
-                    _ => unreachable!("clap requires --kit and --out together"),
-                },
                 ClientVerb::Rotate { id, disclose_to } => {
                     client_rotate(&control, &cli, id, disclose_to.as_deref()).await
                 }
@@ -487,7 +457,7 @@ fn later_verb_refusal(
         verb,
         Verb::Server {
             verb: ServerVerb::Uninstall { purge: true }
-        } | Verb::Enrol { .. }
+        }
     );
     if interactive_only {
         if cli.yes {
@@ -508,10 +478,9 @@ fn later_verb_refusal(
         }
     }
     match dual.unwrap_or(role) {
-        // `secret set` replaces an installation file, so it
-        // need one; `enrol` creates one and gates itself (its interactive
-        // check ran above); the engineer `status` form needs its files
-        // too.
+        // `secret set` replaces an installation file, so it needs one;
+        // `join` creates one and gates itself; the engineer `status` form
+        // needs its files too.
         Role::Engineer
             if matches!(
                 verb,
@@ -520,7 +489,7 @@ fn later_verb_refusal(
         {
             engineer_context().err()
         }
-        Role::Engineer if matches!(verb, Verb::Enrol { .. }) => None,
+        Role::Engineer if matches!(verb, Verb::Join { .. }) => None,
         Role::Engineer
             if matches!(verb, Verb::Status(_) | Verb::Api(_) | Verb::Account { .. })
                 && dual == Some(Role::Engineer) =>
@@ -638,9 +607,7 @@ fn verb_path(verb: &Verb) -> &'static str {
         Verb::Client { verb } => match verb {
             ClientVerb::List => "client list",
             ClientVerb::Show { .. } => "client show",
-            ClientVerb::Issue { .. } => "client issue",
-            ClientVerb::Bundle { .. } => "client bundle",
-            ClientVerb::Enrol { .. } => "client enrol",
+            ClientVerb::Invite(_) => "client invite",
             ClientVerb::Reissue { .. } => "client reissue",
             ClientVerb::Rotate { .. } => "client rotate",
             ClientVerb::Revoke { .. } => "client revoke",
@@ -698,7 +665,7 @@ fn verb_path(verb: &Verb) -> &'static str {
         Verb::Claude(_) => "claude",
         Verb::Env(_) => "env",
         Verb::Alias { .. } => "alias",
-        Verb::Enrol { .. } => "enrol",
+        Verb::Join { .. } => "join",
         Verb::Update { .. } => "update",
         Verb::TrustCa { verb } => match verb {
             TrustCaVerb::Add => "trust-ca add",

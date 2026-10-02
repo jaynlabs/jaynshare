@@ -132,7 +132,7 @@ async fn a_clone_build_is_refused_the_timer() {
     let Some((linux, key)) = release_box("auto-update-build") else {
         return;
     };
-    let kit = crate::bundle::good_kit(&linux.root, &key.pkcs8, &key.public);
+    let kit = crate::enrol::good_kit(&linux.root, &key.pkcs8, &key.public);
     linux.put(&kit, "/root/client-kit.zip");
     let (code, stdout, stderr) = linux.cli(&[
         "server",

@@ -907,6 +907,7 @@ fn snapshot(server: &Server) -> Value {
             "listen": config.data_plane.listen.to_string(),
             "tls": config.data_plane.tls.is_on(),
             "tls_pin": server.client_pin(),
+            "signing_key": crate::deploy::release::active_key().ok().map(|key| key.encoded()),
             "control_api_versions": [API_VERSION],
             "telemetry_policy": config.data_plane.telemetry_policy,
             "upstream_origin_override": server.upstream.override_active().then(|| server.upstream.origin().to_string()),

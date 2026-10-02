@@ -225,31 +225,6 @@ async fn a_remote_client_logs_in_over_the_identity_tls() {
     );
 }
 
-/// An enrollment bundle cannot carry the pin, so packaging refuses before
-/// any client is issued.
-#[tokio::test(flavor = "multi_thread")]
-async fn an_identity_server_packages_no_enrollment_bundle() {
-    let _leak_sweep = crate::leaks::LeakGuard::default();
-    let operator = crate::bundle::Operator::start_with("identity-bundle", identity_tls()).await;
-    let out = operator.instance.root.join("bundle-out");
-    private_dir(&out);
-    let (exit, stdout, stderr) = operator.cli(&[
-        "client",
-        "enrol",
-        "alpha",
-        "--name",
-        "Alpha Desk",
-        "--kit",
-        &operator.kit_path().display().to_string(),
-        "--out",
-        &out.display().to_string(),
-    ]);
-    assert_eq!(exit, 3, "{stdout}{stderr}");
-    assert!(stderr.contains("data_plane.tls"), "{stderr}");
-    let clients = operator.instance.cli_json(&["client", "list"], None);
-    assert_eq!(clients["result"]["clients"], json!([]), "{clients}");
-}
-
 /// An operator certificate serves as before, and its server names no pin, so
 /// its clients keep checking the certificate.
 #[tokio::test(flavor = "multi_thread")]

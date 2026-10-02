@@ -1378,67 +1378,6 @@ pub(super) async fn client_show(control: &Control, id: &str) -> Outcome {
     Ok((body.clone(), client_show_row(&body["client"])))
 }
 
-/// `client issue <id> --name <display-name>`: one code, disclosed once.
-pub(super) async fn client_issue(
-    control: &Control,
-    cli: &Cli,
-    id: &str,
-    name: &str,
-    disclose_to: Option<&Path>,
-) -> Outcome {
-    super::bundle::validate_client_id(id)?;
-    super::bundle::validate_display_name(name)?;
-    let body = control
-        .expect(
-            Method::POST,
-            "/control/v1/clients",
-            Some(&json!({ "id": id, "display_name": name.trim() })),
-        )
-        .await?;
-    let code = disclosed_value(&body, "enrollment_code")?;
-    let entry = client_show_row(&body["client"]);
-    let expiry = body["expires_at"].as_str().unwrap_or_default().to_string();
-    disclose(
-        cli,
-        disclose_to,
-        "enrollment_code",
-        &format!("enrollment code (disclose once; expires {expiry})"),
-        code,
-        &entry,
-        body,
-    )
-}
-
-/// `client reissue <id>` without `--kit/--out`: a new pending
-/// generation, its code disclosed once; the old code dies.
-pub(super) async fn client_reissue(
-    control: &Control,
-    cli: &Cli,
-    id: &str,
-    disclose_to: Option<&Path>,
-) -> Outcome {
-    super::bundle::validate_client_id(id)?;
-    let body = control
-        .expect(
-            Method::POST,
-            &format!("/control/v1/clients/{id}/reissue"),
-            Some(&json!({})),
-        )
-        .await?;
-    let code = disclosed_value(&body, "enrollment_code")?;
-    let entry = client_show_row(&body["client"]);
-    let expiry = body["expires_at"].as_str().unwrap_or_default().to_string();
-    disclose(
-        cli,
-        disclose_to,
-        "enrollment_code",
-        &format!("enrollment code (disclose once; expires {expiry})"),
-        code,
-        &entry,
-        body,
-    )
-}
-
 /// `client rotate <id>`: one new secret, the old dead on the next request
 /// — reminded on standard error beside the disclosure.
 pub(super) async fn client_rotate(

@@ -3,7 +3,7 @@
 //! production `release.pub` store.
 
 #[allow(unused_imports)]
-use crate::bundle::config_root;
+use crate::enrol::config_root;
 #[allow(unused_imports)]
 use crate::harness::{Value, binary, cli_raw, isolated_env, private_dir, scratch};
 #[allow(unused_imports)]
@@ -546,7 +546,7 @@ async fn one_release_set_one_version_only_the_allowed_files() {
     );
 
     // `release verify` accepts the whole set under the minted key.
-    let config = crate::bundle::config_root(&home);
+    let config = crate::enrol::config_root(&home);
     crate::harness::private_dir(&config);
     std::fs::write(
         config.join("release.pub"),
