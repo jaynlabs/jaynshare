@@ -1378,6 +1378,9 @@ async fn restart_keeps_durable_quota_and_clears_runtime_state() {
     assert_eq!(instance.account("FSUB")["probe"]["outcome"], "failed");
     assert!(instance.account("FKEY")["quota_holds"]["throttle_hold_end"].is_string());
 
+    // Windows stops the server with a kill, which skips the shutdown flush.
+    #[cfg(not(unix))]
+    await_persisted_hold(&instance, "FSUB", "weekly");
     instance.restart();
 
     assert_eq!(
@@ -1392,6 +1395,30 @@ async fn restart_keeps_durable_quota_and_clears_runtime_state() {
     assert!(probe["last_started"].is_null());
     assert!(probe["last_finished"].is_null());
     assert!(probe["next_run"].is_null());
+}
+
+/// Waits for the quota flusher to write the bucket's exhaustion hold.
+#[cfg(not(unix))]
+fn await_persisted_hold(instance: &Instance, account: &str, name: &str) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let state = instance.state_file();
+        let held = state["accounts"]
+            .as_array()
+            .expect("state accounts")
+            .iter()
+            .filter(|a| a["display_name"] == account)
+            .flat_map(|a| a["quota"].as_array().expect("quota"))
+            .any(|b| b["name"] == name && b["exhaustion_hold_until"].is_string());
+        if held {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{account}'s {name} hold was never persisted: {state}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
 }
 
 /// One snapshot distinguishes unknown, available, exhausted,
