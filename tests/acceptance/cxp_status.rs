@@ -50,6 +50,7 @@ async fn status_shows_the_allow_listed_facts_only() {
                 "server",
                 "capabilities",
                 "ca_fingerprint",
+                "ca_next_fingerprint",
                 "pool",
                 "sessions",
                 "wire_capture_enabled",
@@ -186,7 +187,9 @@ const ZERO_FINGERPRINT: &str =
 /// The probe's four outcomes:
 /// healthy, CA mismatch (the 12, `cli_ca_mismatch`), CA not trusted
 /// (`cli_ca_untrusted`), credential refused (5, `cli_refused`) and
-/// unreachable (4, `cli_unreachable`). The secret never reaches a stream.
+/// unreachable (4, `cli_unreachable`). `status --line` reports a CA the
+/// installation got wrong, and `status` fetches the server's. The secret
+/// never reaches a stream.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_probe_tells_the_four_outcomes_apart() {
     let _leak_sweep = crate::leaks::LeakGuard::default();
@@ -231,17 +234,23 @@ async fn the_probe_tells_the_four_outcomes_apart() {
         .trim_start_matches("ca_fingerprint = ")
         .to_owned();
     machine.set("ca_fingerprint", &format!("{ZERO_FINGERPRINT:?}"));
-    let (code, _, stderr) = machine.jaynshare(&["status"], &[], None);
+    let (code, _, stderr) = machine.jaynshare(&["status", "--line"], &[], None);
     assert_eq!(code, 12, "mismatch exits the 12: {stderr}");
     assert!(
         stderr.starts_with("cli_ca_mismatch:"),
         "mismatch is cli_ca_mismatch: {stderr}"
     );
     assert!(
-        stderr.contains("ca-update"),
-        "mismatch names the CA update: {stderr}"
+        stderr.contains(original.trim_matches('"')),
+        "mismatch names the presented CA: {stderr}"
     );
-    machine.set("ca_fingerprint", &original);
+    let (code, _, stderr) = machine.jaynshare(&["status"], &[], None);
+    assert_eq!(code, 0, "status takes the server's CA: {stderr}");
+    let toml = fs::read_to_string(machine.client_dir.join("client.toml")).expect("client.toml");
+    assert!(
+        toml.contains(&format!("ca_fingerprint = {original}")),
+        "{toml}"
+    );
 
     // CA not trusted: the TLS form fails against another instance's CA.
     let other = Instance::start_with(
@@ -255,13 +264,15 @@ async fn the_probe_tells_the_four_outcomes_apart() {
     let ca_pem = machine.client_dir.join("ca.pem");
     let original_ca = fs::read(&ca_pem).expect("the original ca.pem");
     fs::copy(other.root.join("state/mitm-ca.pem"), &ca_pem).expect("plant the other CA");
-    let (code, _, stderr) = machine.jaynshare(&["status"], &[], None);
+    let (code, _, stderr) = machine.jaynshare(&["status", "--line"], &[], None);
     assert_eq!(code, 12, "untrusted exits the 12: {stderr}");
     assert!(
         stderr.starts_with("cli_ca_untrusted:"),
         "untrusted is cli_ca_untrusted: {stderr}"
     );
-    fs::write(&ca_pem, original_ca).expect("restore ca.pem");
+    let (code, _, stderr) = machine.jaynshare(&["status"], &[], None);
+    assert_eq!(code, 0, "status takes the server's CA: {stderr}");
+    assert_eq!(fs::read(&ca_pem).expect("ca.pem"), original_ca);
 
     // credential refused: a proxy answering 407 on both forms.
     let proxy = FakeControl::answering(407, json!({"error": "proxy auth"}));
@@ -377,8 +388,12 @@ async fn each_status_failure_class_has_its_code() {
         .trim_start_matches("ca_fingerprint = ")
         .to_owned();
     machine.set("ca_fingerprint", &format!("{ZERO_FINGERPRINT:?}"));
-    refuse_with(&machine, 12, "cli_ca_mismatch", None);
-    machine.set("ca_fingerprint", &original);
+    read_then_repaired(&machine, "cli_ca_mismatch");
+    let toml = fs::read_to_string(machine.client_dir.join("client.toml")).expect("client.toml");
+    assert!(
+        toml.contains(&format!("ca_fingerprint = {original}")),
+        "{toml}"
+    );
 
     let other = Instance::start_with(
         "refused-credential-exit-b-other",
@@ -391,8 +406,18 @@ async fn each_status_failure_class_has_its_code() {
     let ca_pem = machine.client_dir.join("ca.pem");
     let original_ca = fs::read(&ca_pem).expect("the original ca.pem");
     fs::copy(other.root.join("state/mitm-ca.pem"), &ca_pem).expect("plant the other CA");
-    refuse_with(&machine, 12, "cli_ca_untrusted", None);
-    fs::write(&ca_pem, original_ca).expect("restore ca.pem");
+    read_then_repaired(&machine, "cli_ca_untrusted");
+    assert_eq!(fs::read(&ca_pem).expect("ca.pem"), original_ca);
+}
+
+/// A CA the installation got wrong: `status --line`, which only reads,
+/// refuses with the 12 and `slug`, and `status` then takes the server's.
+fn read_then_repaired(machine: &ClientHome, slug: &str) {
+    let (exit, _, stderr) = machine.jaynshare(&["status", "--line"], &[("NO_COLOR", "1")], None);
+    assert_eq!(exit, 12, "{slug}: {stderr}");
+    assert!(stderr.starts_with(&format!("{slug}:")), "{stderr}");
+    let (exit, _, stderr) = machine.jaynshare(&["status", "--json"], &[], None);
+    assert_eq!(exit, 0, "status takes the server's CA: {stderr}");
 }
 
 /// One failure class through the three forms of engineer `status` (the
@@ -423,7 +448,8 @@ fn three_forms_refuse(machine: &ClientHome, code: i32, slug: &str) {
 
 /// `status --line` prints exactly the status-line
 /// text, `--json` is the body plus the origins (and `probe` in MITM
-/// mode), and the four exit codes hold for every form.
+/// mode), and the exit codes hold for every form; a wrong CA is the 12 on
+/// the line, which only reads, until `status` takes the server's.
 #[tokio::test(flavor = "multi_thread")]
 async fn status_line_equals_the_status_line_text() {
     let _leak_sweep = crate::leaks::LeakGuard::default();
@@ -506,7 +532,7 @@ async fn status_line_equals_the_status_line_text() {
         "{envelope}"
     );
     machine.set("ca_fingerprint", &format!("{ZERO_FINGERPRINT:?}"));
-    three_forms_refuse(&machine, 12, "cli_ca_mismatch");
+    read_then_repaired(&machine, "cli_ca_mismatch");
 }
 
 /// The human, one-line and JSON forms

@@ -1062,214 +1062,6 @@ async fn the_bundle_carries_the_ca_certificate_and_fingerprint_and_no_key() {
     );
 }
 
-/// A copy of the CA update ZIP with one byte of `ca.pem` changed: the same
-/// members, a certificate whose digest no longer matches the manifest's.
-fn write_tampered_ca_update(path: &Path, members: &[(String, Vec<u8>)]) {
-    let file = std::fs::File::create(path).expect("create the tampered bundle");
-    let mut archive = zip::ZipWriter::new(file);
-    let options =
-        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
-    for (name, bytes) in members {
-        let mut bytes = bytes.clone();
-        if name == "ca.pem" {
-            // Flip inside the base64 body: the DER (and its digest) changes.
-            let middle = bytes.len() / 2;
-            bytes[middle] ^= 0x01;
-        }
-        use std::io::Write as _;
-        archive
-            .start_file(name.as_str(), options)
-            .expect("start member");
-        archive.write_all(&bytes).expect("write member");
-    }
-    archive.finish().expect("finish the tampered bundle");
-}
-
-/// The CA-update bundle replaces only the trust material: the
-/// certificate and the fingerprint in `client.toml` move, the client id,
-/// secret and release identity are byte-identical, the old secret still
-/// authenticates, and a tampered bundle is refused with nothing replaced.
-#[tokio::test(flavor = "multi_thread")]
-async fn the_ca_update_bundle_replaces_trust_material_only() {
-    let _leak_sweep = crate::leaks::LeakGuard::default();
-    if !client_platform() {
-        eprintln!("skipping: enrollment: no client payload for this platform");
-        return;
-    }
-    let operator = Operator::start_with(
-        "ca-update-bundle",
-        Setup {
-            mitm: true,
-            ..Setup::default()
-        },
-    )
-    .await;
-    let (home, client_secret) = enrol_one(&operator, "alpha", "Alpha Desk").await;
-    let client_dir = config_root(&home).join("client");
-
-    // A MITM enrollment carries `ca.pem`; this build enrols base-url only,
-    // so the fixture seeds it from the pre-rotation CA the pool serves.
-    let ca = operator.ctl_get("/control/v1/ca").await.json();
-    let old_pem = ca["ca"]["certificate_pem"]
-        .as_str()
-        .expect("the CA's certificate")
-        .to_string();
-    std::fs::write(client_dir.join("ca.pem"), &old_pem).expect("seed ca.pem");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(
-            client_dir.join("ca.pem"),
-            std::fs::Permissions::from_mode(0o600),
-        )
-        .expect("seed ca.pem mode");
-    }
-    let old_toml = std::fs::read_to_string(client_dir.join("client.toml")).expect("client.toml");
-    let old_secret_bytes = std::fs::read(client_dir.join("client-secret")).expect("client-secret");
-    let old_ca_bytes = std::fs::read(client_dir.join("ca.pem")).expect("ca.pem");
-
-    // The operator rotates the CA and packages the update bundle.
-    let (code, _, stderr) = operator.cli(&["ca", "rotate", "--yes"]);
-    assert_eq!(code, 0, "rotate: {stderr}");
-    let (code, stdout, stderr) = operator.cli(&[
-        "ca",
-        "update-bundle",
-        "--out",
-        &operator.out.display().to_string(),
-        "--json",
-    ]);
-    assert_eq!(code, 0, "update-bundle: {stdout}{stderr}");
-    let envelope: Value = serde_json::from_str(stdout.trim()).expect("the CLI envelope");
-    let archive = PathBuf::from(envelope["result"]["archive"].as_str().expect("archive"));
-
-    // The bundle carries the server's two origins — derived from the
-    // listeners here, as no advertised key is set.
-    let ca_update = read_zip(&archive)
-        .into_iter()
-        .find(|(name, _)| name == "ca-update.json")
-        .map(|(_, bytes)| serde_json::from_slice::<Value>(&bytes).expect("ca-update.json"))
-        .expect("ca-update.json");
-    // as amended by: the new fingerprint alone, no old member.
-    let mut members: Vec<&str> = ca_update
-        .as_object()
-        .expect("a manifest object")
-        .keys()
-        .map(String::as_str)
-        .collect();
-    members.sort_unstable();
-    assert_eq!(
-        members,
-        ["ca_sha256", "fingerprint", "issued_at", "origins", "schema"],
-        "{ca_update}"
-    );
-    let origins = ca_update["origins"].as_array().expect("origins");
-    assert_eq!(origins.len(), 2, "{ca_update}");
-    assert_eq!(origins[0], format!("http://{}", operator.instance.addr));
-    assert_eq!(
-        origins[1],
-        format!(
-            "http://{}",
-            operator.instance.mitm_addr.expect("mitm address")
-        )
-    );
-
-    // The engineer applies it; --yes is the skip for no terminal.
-    let (code, _, stderr) = cli_raw(
-        &[
-            "ca-update",
-            "--from",
-            &archive.display().to_string(),
-            "--yes",
-        ],
-        &isolated_env(&home),
-        None,
-    );
-    assert_eq!(code, 0, "ca-update: {stderr}");
-    assert!(
-        stderr.contains("current CA fingerprint") && stderr.contains("new CA fingerprint"),
-        "both fingerprints are shown: {stderr}"
-    );
-
-    // The trust material is the rotated CA, nothing else moved.
-    let new_ca = operator.ctl_get("/control/v1/ca").await.json();
-    let new_pem = new_ca["ca"]["certificate_pem"].as_str().expect("the CA");
-    let ca_bytes = std::fs::read(client_dir.join("ca.pem")).expect("ca.pem");
-    assert_ne!(ca_bytes, old_ca_bytes, "the certificate was replaced");
-    assert_eq!(ca_bytes, new_pem.as_bytes(), "it is the rotated CA");
-    #[cfg(unix)]
-    assert_eq!(mode_of(&client_dir.join("ca.pem")), 0o600, "mode unchanged");
-    let toml = std::fs::read_to_string(client_dir.join("client.toml")).expect("client.toml");
-    let fingerprint = new_ca["ca"]["fingerprint"].as_str().expect("fingerprint");
-    let mut fingerprint_lines = 0;
-    for (before, after) in old_toml.lines().zip(toml.lines()) {
-        if before.starts_with("ca_fingerprint") {
-            assert_eq!(
-                after,
-                format!("ca_fingerprint = \"{fingerprint}\""),
-                "{toml}"
-            );
-            fingerprint_lines += 1;
-        } else {
-            assert_eq!(before, after, "only the fingerprint line moved");
-        }
-    }
-    assert_eq!(fingerprint_lines, 1, "{old_toml}");
-    assert_eq!(
-        std::fs::read(client_dir.join("client-secret")).expect("client-secret"),
-        old_secret_bytes,
-        "the secret file is byte-identical"
-    );
-
-    // The old secret still authenticates; the client id is unchanged.
-    let answer = crate::harness::send(
-        operator.instance.addr,
-        crate::harness::Request::builder()
-            .method(crate::harness::Method::GET)
-            .uri("/control/v1/client/status")
-            .header("authorization", format!("Bearer {client_secret}"))
-            .body(crate::harness::Full::new(crate::harness::Bytes::new()))
-            .expect("request builds"),
-    )
-    .await;
-    assert_eq!(answer.status, StatusCode::OK, "{answer:?}");
-    assert_eq!(answer.json()["client"]["id"], json!("alpha"));
-
-    // The bundle travels trust material alone.
-    let members = read_zip(&archive);
-    for (name, bytes) in &members {
-        let text = String::from_utf8_lossy(bytes);
-        assert!(
-            !text.contains("jsc2_") && !text.contains("jse2_") && !text.contains("PRIVATE KEY"),
-            "{name} carries a secret or a key"
-        );
-    }
-
-    // A tampered bundle is refused with nothing replaced.
-    let tampered = archive.with_extension("tampered.zip");
-    write_tampered_ca_update(&tampered, &members);
-    let (code, _, stderr) = cli_raw(
-        &[
-            "ca-update",
-            "--from",
-            &tampered.display().to_string(),
-            "--yes",
-        ],
-        &isolated_env(&home),
-        None,
-    );
-    assert_eq!(code, 17, "tampered: {stderr}");
-    assert!(stderr.contains("cli_bundle_invalid"), "{stderr}");
-    assert_eq!(
-        std::fs::read(client_dir.join("ca.pem")).expect("ca.pem"),
-        ca_bytes,
-        "the tampered bundle replaced nothing"
-    );
-    assert_eq!(
-        std::fs::read_to_string(client_dir.join("client.toml")).expect("client.toml"),
-        toml,
-    );
-}
-
 /// An enrollment installs `ca.pem` alongside the
 /// client files, while a bundle from a server with
 /// MITM mode off refuses with what the enrollment lacks (every launch
@@ -1761,30 +1553,6 @@ async fn advertised_origins_drive_packaging_and_a_wildcard_needs_them() {
         manifest["origins"]["proxy"],
         "http://pool.example.internal:17422"
     );
-    let (code, stdout, stderr) = operator.cli(&[
-        "ca",
-        "update-bundle",
-        "--out",
-        &operator.out.display().to_string(),
-        "--json",
-    ]);
-    assert_eq!(code, 0, "update-bundle: {stdout}{stderr}");
-    let envelope: Value = serde_json::from_str(stdout.trim()).expect("the CLI envelope");
-    let archive = PathBuf::from(envelope["result"]["archive"].as_str().expect("archive"));
-    let ca_update = read_zip(&archive)
-        .into_iter()
-        .find(|(name, _)| name == "ca-update.json")
-        .map(|(_, bytes)| serde_json::from_slice::<Value>(&bytes).expect("ca-update.json"))
-        .expect("ca-update.json");
-    assert_eq!(
-        ca_update["origins"],
-        json!([
-            "http://pool.example.internal:17421",
-            "http://pool.example.internal:17422"
-        ]),
-        "{ca_update}"
-    );
-
     // Both keys unset beside wildcard binds: `client enrol` refuses before
     // the pending generation exists.
     let operator = Operator::start_with(
@@ -1822,18 +1590,6 @@ async fn advertised_origins_drive_packaging_and_a_wildcard_needs_them() {
     );
     let answer = operator.ctl_get("/control/v1/clients/beta").await;
     assert_eq!(answer.status, StatusCode::NOT_FOUND, "{answer:?}");
-    let (code, stdout, stderr) = operator.cli(&[
-        "ca",
-        "update-bundle",
-        "--out",
-        &operator.out.display().to_string(),
-    ]);
-    assert_eq!(code, 3, "{stdout}{stderr}");
-    assert!(
-        format!("{stdout}{stderr}").contains("clients.advertised_base_url"),
-        "{stdout}{stderr}"
-    );
-
     // A key unset with a concrete loopback listen: the origin is derived. An
     // `http` origin ignores the base-URL CA key.
     let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/acceptance/fixtures/tls");
@@ -2658,7 +2414,6 @@ async fn preparing_a_bundle_is_one_transaction() {
     // 2. Another id into the same --out: its own ZIP and code beside
     // the manual run's, all owner-only. The same id again is
     // refused and overwrites nothing.
-    use std::os::unix::fs::PermissionsExt;
     let (code, _, stderr) = operator.cli(&[
         "client",
         "enrol",
@@ -2678,13 +2433,9 @@ async fn preparing_a_bundle_is_one_transaction() {
         "jaynshare-client-desk-2-g1.zip".to_string(),
     ];
     assert_eq!(entries(), both, "one ZIP and one code file per id");
+    #[cfg(unix)]
     for name in &both {
-        let mode = std::fs::metadata(out.join(name))
-            .expect("the output")
-            .permissions()
-            .mode()
-            & 0o777;
-        assert_eq!(mode, 0o600, "{name} is owner-only");
+        assert_eq!(mode_of(&out.join(name)), 0o600, "{name} is owner-only");
     }
     let before = std::fs::read(out.join("jaynshare-client-desk-1-g1.zip")).expect("desk-1 ZIP");
     let (code, _, stderr) = operator.cli(&[
@@ -3506,17 +3257,15 @@ async fn a_tampered_bundle_is_refused_before_the_code_prompt() {
     assert_eq!(clients["clients"][0]["state"], "pending", "{clients}");
 }
 
-/// A CA update and the OS-store option change only the trust
-/// material: the bundle ZIP names its fingerprint and
-/// carries exactly the three members, `ca-update` shows the installed and
-/// the new fingerprint and refuses without a confirmed comparison, a yes
-/// replaces only `ca.pem` and the fingerprint line in `client.toml` (the
-/// secret, id, generation, release identity and the settings entries
-/// stay byte-identical), and `trust-ca add`/`remove` act on the exact
-/// confirmed fingerprint alone, never touching another certificate in the
-/// store; without a terminal the option refuses before any store call.
+/// Following a CA rotation and the OS-store option change only the trust
+/// material: `status` replaces only `ca.pem` and the fingerprint line in
+/// `client.toml` (the secret, id, generation, release identity and the
+/// settings entries stay byte-identical), and `trust-ca add`/`remove` act on
+/// the exact confirmed fingerprint alone, never touching another
+/// certificate in the store; without a terminal the option refuses before
+/// any store call.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_ca_update_and_the_os_store_touch_only_the_ca() {
+async fn following_a_rotation_and_the_os_store_touch_only_the_ca() {
     if !client_platform() {
         eprintln!("skipping: enrollment: no client payload for this platform");
         return;
@@ -3558,97 +3307,19 @@ async fn a_ca_update_and_the_os_store_touch_only_the_ca() {
     let old_ca = std::fs::read(client_dir.join("ca.pem")).expect("ca.pem");
     let old_settings =
         std::fs::read_to_string(home.join(".claude/settings.json")).expect("settings.json");
-    let installed_fingerprint = old_toml
-        .split("ca_fingerprint = \"")
-        .nth(1)
-        .and_then(|rest| rest.split('"').next())
-        .expect("client.toml names the CA fingerprint")
-        .to_string();
 
-    // The operator rotates the CA and packages the ZIP: its name is the
-    // first 12 hex of the new fingerprint and it holds exactly the three
-    // members.
-    let (code, _, stderr) = operator.cli(&["ca", "rotate", "--yes"]);
+    // The operator replaces the CA; the client's next status follows it.
+    let (code, _, stderr) = operator.cli(&["ca", "rotate", "--now", "--yes"]);
     assert_eq!(code, 0, "rotate: {stderr}");
     let new_ca = operator.ctl_get("/control/v1/ca").await.json();
     let new_pem = new_ca["ca"]["certificate_pem"]
         .as_str()
         .expect("the rotated CA");
     let new_fingerprint = new_ca["ca"]["fingerprint"].as_str().expect("fingerprint");
-    let (code, stdout, stderr) = operator.cli(&[
-        "ca",
-        "update-bundle",
-        "--out",
-        &operator.out.display().to_string(),
-        "--json",
-    ]);
-    assert_eq!(code, 0, "update-bundle: {stdout}{stderr}");
-    let envelope: Value = serde_json::from_str(stdout.trim()).expect("the CLI envelope");
-    let archive = PathBuf::from(envelope["result"]["archive"].as_str().expect("archive"));
-    let hex: String = new_fingerprint.chars().filter(|c| *c != ':').collect();
-    assert_eq!(
-        archive
-            .file_name()
-            .expect("the ZIP's name")
-            .to_string_lossy(),
-        format!("jaynshare-ca-update-{}.zip", hex[..12].to_lowercase()),
-        "the ZIP name"
-    );
-    let members = read_zip(&archive)
-        .into_iter()
-        .map(|(name, _)| name)
-        .collect::<Vec<String>>();
-    let mut members = members.iter().map(String::as_str).collect::<Vec<&str>>();
-    members.sort_unstable();
-    assert_eq!(
-        members,
-        ["README.txt", "ca-update.json", "ca.pem"],
-        "the members, nothing else"
-    );
-
-    // On a terminal `ca-update` shows the installed fingerprint (the
-    // old one, from `client.toml`) beside the new one, and answering no
-    // refuses with nothing replaced.
     let env = isolated_env(&home);
-    let (exit, transcript) = cli_pty_answers(
-        "ca-update-os-store-ca-update-refused",
-        &["ca-update", "--from", &archive.display().to_string()],
-        &env,
-        &[("independent channel", "n\n")],
-    );
-    assert_eq!(exit, 21, "the refusal: {transcript}");
-    assert!(
-        transcript.contains(&installed_fingerprint),
-        "the installed fingerprint is shown: {transcript}"
-    );
-    assert!(
-        transcript.contains(new_fingerprint),
-        "the new fingerprint is shown: {transcript}"
-    );
-    assert_eq!(
-        std::fs::read_to_string(client_dir.join("client.toml")).expect("client.toml"),
-        old_toml,
-        "the refusal replaced nothing in client.toml"
-    );
-    assert_eq!(
-        std::fs::read(client_dir.join("client-secret")).expect("client-secret"),
-        old_secret,
-        "the refusal touched no secret"
-    );
-    assert_eq!(
-        std::fs::read(client_dir.join("ca.pem")).expect("ca.pem"),
-        old_ca,
-        "the refusal replaced no certificate"
-    );
-
-    // Again, with the confirmed comparison: only the trust material moves.
-    let (exit, transcript) = cli_pty_answers(
-        "ca-update-os-store-ca-update-confirmed",
-        &["ca-update", "--from", &archive.display().to_string()],
-        &env,
-        &[("independent channel", "y\n")],
-    );
-    assert_eq!(exit, 0, "the confirmed update: {transcript}");
+    let (code, _, stderr) = cli_raw(&["status"], &env, None);
+    assert_eq!(code, 0, "status follows the rotation: {stderr}");
+    assert!(stderr.contains(new_fingerprint), "{stderr}");
     let ca_bytes = std::fs::read(client_dir.join("ca.pem")).expect("ca.pem");
     assert_eq!(ca_bytes, new_pem.as_bytes(), "ca.pem is the rotated CA");
     #[cfg(unix)]

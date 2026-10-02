@@ -13,6 +13,7 @@
 mod acc;
 mod acp;
 mod bundle;
+mod ca_follow;
 mod cfg;
 mod cli;
 mod client_fx;

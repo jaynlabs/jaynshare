@@ -430,7 +430,42 @@ async fn expiry_warning_thirty_days_out() {
     );
 }
 
-/// `ca rotate` replaces all
+/// `ca rotate` stages the next CA in its own private file beside the
+/// current material, and it stays staged across a restart.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_staged_ca_survives_a_restart() {
+    let _leak_sweep = crate::leaks::LeakGuard::default();
+    let mut instance = spawn("staged-survives-restart", None);
+    let current = ca_fingerprint(&instance.state_dir());
+    let envelope = instance.cli_json(&["ca", "rotate", "--yes"]);
+    assert_eq!(envelope["ok"], true, "{envelope}");
+    let next = envelope["result"]["next"].clone();
+    assert_eq!(
+        ca_fingerprint(&instance.state_dir()),
+        current,
+        "the current files stay"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let staged =
+            fs::metadata(instance.state_dir().join("mitm-ca-next.pem")).expect("the staged file");
+        assert_eq!(staged.permissions().mode() & 0o777, 0o600, "it holds a key");
+    }
+    instance.restart();
+    let status = instance.status();
+    assert_eq!(
+        status["mitm"]["ca"]["fingerprint"],
+        json!(current),
+        "{status}"
+    );
+    assert_eq!(
+        status["mitm"]["ca"]["next"], next,
+        "still staged, same switch: {status}"
+    );
+}
+
+/// `ca rotate --now` replaces all
 /// three files, logs one line carrying the old and the new fingerprint, and
 /// `status` shows the new one. The open-tunnel-keeps-its-leaf and
 /// new-handshake halves ride with the proxy listener scenarios.
@@ -443,7 +478,7 @@ async fn rotate_replaces_the_material_and_logs_both_fingerprints() {
         .map(|name| fs::read_to_string(instance.state_dir().join(name)).expect("old file"))
         .to_vec();
 
-    let envelope = instance.cli_json(&["ca", "rotate", "--yes"]);
+    let envelope = instance.cli_json(&["ca", "rotate", "--now", "--yes"]);
     assert_eq!(envelope["ok"], true, "the rotation applied: {envelope}");
 
     let rotated = instance

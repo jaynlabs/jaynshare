@@ -2,7 +2,7 @@
 //! upstream client and shutdown. Everything the listeners share.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
@@ -85,10 +85,9 @@ pub struct Server {
     pub client_kit: crate::control::client_kit::KitCache,
     pub started_at: OffsetDateTime,
     pub state_path: PathBuf,
-    /// The start-time verdict on the trust material, `None` when
-    /// the mode is off or the material is unusable. The rotate path
-    /// is the only thing that replaces it while serving.
-    mitm_ca: Mutex<Option<Arc<crate::mitm::ca::Ca>>>,
+    /// The MITM CAs: the start-time verdict, replaced while serving only by
+    /// a rotation and the staged CA's switch.
+    mitm_ca: Mutex<crate::mitm::ca::Authorities>,
     /// The server identity's pin, set once before the startup line.
     identity: OnceLock<String>,
     /// The open-tunnel gauges and the counters since start.
@@ -140,7 +139,7 @@ impl Server {
             client_kit: Default::default(),
             started_at,
             state_path,
-            mitm_ca: Mutex::new(None),
+            mitm_ca: Mutex::default(),
             identity: OnceLock::new(),
             mitm: Arc::new(crate::mitm::counters::Counters::default()),
             carried: Mutex::new(State {
@@ -187,15 +186,22 @@ impl Server {
         self.configuration.current()
     }
 
-    /// The start-time verdict, installed before the startup line.
-    pub fn set_mitm_ca(&self, ca: Option<Arc<crate::mitm::ca::Ca>>) {
-        *self.mitm_ca.lock().expect("mitm ca lock") = ca;
-    }
-
     /// The CA in force, or `None` when the mode is off or the material is
     /// unusable. A tunnel that already holds one keeps it.
     pub fn mitm_ca(&self) -> Option<Arc<crate::mitm::ca::Ca>> {
-        self.mitm_ca.lock().expect("mitm ca lock").clone()
+        self.mitm_ca.lock().expect("mitm ca lock").current.clone()
+    }
+
+    /// The directory of the state file, which holds the CA files.
+    pub fn state_dir(&self) -> PathBuf {
+        self.state_path
+            .parent()
+            .map_or_else(|| PathBuf::from("."), Path::to_path_buf)
+    }
+
+    /// The CAs, held while a rotation or the switch replaces them.
+    pub fn mitm_authorities(&self) -> std::sync::MutexGuard<'_, crate::mitm::ca::Authorities> {
+        self.mitm_ca.lock().expect("mitm ca lock")
     }
 
     pub fn set_identity(&self, pin: &str) {

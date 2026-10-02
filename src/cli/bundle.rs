@@ -10,9 +10,7 @@ use serde_json::{Value, json};
 
 use super::control::Control;
 use super::{Failure, Outcome};
-use crate::bundle::{
-    self, BundleInputs, BundleManifest, CaUpdateInputs, VerifiedKit, write_ca_update_zip,
-};
+use crate::bundle::{self, BundleInputs, BundleManifest, VerifiedKit};
 
 /// Validated locally before any request: a client id is 1–63
 /// ASCII lowercase letters, digits, `_` or `-`, beginning with a letter or
@@ -95,18 +93,6 @@ fn check_out(out: &Path, client_id: Option<&str>) -> Result<(), Failure> {
         }
     }
     Ok(())
-}
-
-/// The origins from the configuration read: the base-URL and proxy
-/// listener origins the manifest records, or the advertised origins
-/// the operator configured for a forwarded listener. An
-/// origin is derived when its key is unset, and refused beside a wildcard
-/// bind — an unspecified listener address embeds an origin no client can
-/// reach.
-async fn origins(control: &Control) -> Result<(String, Option<String>), Failure> {
-    origins_and_anchor(control)
-        .await
-        .map(|(base_url, proxy, _)| (base_url, proxy))
 }
 
 /// The base-URL listener trust anchor as packaging embeds it: the PEM,
@@ -475,47 +461,6 @@ pub(super) async fn client_bundle(control: &Control, id: &str, kit: &Path, out: 
     Ok((
         package_result(&archive, code_file.as_deref(), manifest_value),
         human_package(&archive, code_file.as_deref()),
-    ))
-}
-
-/// `ca update-bundle --out <dir>`: the operator half of a CA rotation —
-/// package the current CA for clients to apply after the
-/// rotation. No enrolment code: only the certificate, the fingerprint and
-/// the server identity travel. The old fingerprint that matters is the one
-/// each machine has installed, which `ca-update --from` shows.
-pub(super) async fn ca_update_bundle(control: &Control, out: &Path) -> Outcome {
-    check_out(out, None)?;
-    let ca = control.expect(Method::GET, "/control/v1/ca", None).await?;
-    let (certificate_pem, fingerprint) = match (
-        ca["ca"]["certificate_pem"].as_str(),
-        ca["ca"]["fingerprint"].as_str(),
-    ) {
-        (Some(pem), Some(fp)) => (pem.to_string(), fp.to_string()),
-        _ => {
-            return Err(Failure::local(
-                8,
-                "mitm_disabled",
-                "MITM mode is off: there is no CA to package",
-            ));
-        }
-    };
-    let (base_url, proxy) = origins(control).await?;
-    let issued_at = crate::timestamp::rfc3339(time::OffsetDateTime::now_utc());
-    let inputs = CaUpdateInputs {
-        certificate_pem: &certificate_pem,
-        fingerprint: &fingerprint,
-        origins: [&base_url, proxy.as_deref().unwrap_or_default()],
-        issued_at: &issued_at,
-    };
-    let (archive, manifest) = write_ca_update_zip(out, &inputs)
-        .map_err(|why| Failure::local(8, "cli_conflict", format!("--out {why}")))?;
-    Ok((
-        json!({
-            "archive": archive.display().to_string(),
-            "code_file": null,
-            "manifest": manifest,
-        }),
-        format!("wrote {}", archive.display()),
     ))
 }
 

@@ -16,7 +16,7 @@
 
 use std::collections::BTreeMap;
 use std::io::{Read as _, Write as _};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use base64::Engine as _;
 use serde_json::{Value, json};
@@ -732,81 +732,6 @@ pub fn write_bundle_zip(destination: &Path, inputs: &BundleInputs<'_>) -> Result
     Ok(manifest_bytes)
 }
 
-/// Everything the CA update ZIP carries. No enrolment code, no
-/// release identity — after a rotate only the certificate, the fingerprint
-/// and the server identity change.
-pub struct CaUpdateInputs<'a> {
-    pub certificate_pem: &'a str,
-    pub fingerprint: &'a str,
-    pub origins: [&'a str; 2],
-    pub issued_at: &'a str, // RFC 3339
-}
-
-/// The CA update ZIP's name — the first 12 hex of the
-/// fingerprint, colons removed, lower-case.
-pub fn ca_update_name(fingerprint: &str) -> String {
-    let hex: String = fingerprint.chars().filter(|c| *c != ':').collect();
-    format!("jaynshare-ca-update-{}.zip", hex[..12].to_lowercase())
-}
-
-/// Writes the CA update ZIP: exactly `ca-update.json` (canonical
-/// JSON), `ca.pem` and `README.txt`. The destination must not
-/// exist; on failure the partial file is removed.
-pub fn write_ca_update_zip(
-    out_dir: &Path,
-    inputs: &CaUpdateInputs<'_>,
-) -> Result<(PathBuf, Value), String> {
-    let hex: String = inputs.fingerprint.chars().filter(|c| *c != ':').collect();
-    let manifest = json!({
-        "schema": 1,
-        "origins": inputs.origins,
-        "issued_at": inputs.issued_at,
-        "ca_sha256": hex.to_lowercase(),
-        "fingerprint": inputs.fingerprint,
-    });
-    let destination = out_dir.join(ca_update_name(inputs.fingerprint));
-    let readme = "This is a Jaynshare CA update bundle: it replaces the certificate authority \
-your client trusts after the server rotated its CA.\n\
-Run `jaynshare ca-update --from <this zip>` on each enrolled machine.\n\
-Compare the fingerprint with the operator through an independent channel before your next MITM launch.\n";
-    let mut open = std::fs::OpenOptions::new();
-    open.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        open.mode(0o600);
-    }
-    let file = open.open(&destination).map_err(|e| {
-        format!(
-            "{}: cannot create the CA update bundle: {e}",
-            destination.display()
-        )
-    })?;
-    let mut zip = zip::ZipWriter::new(file);
-    let options: zip::write::SimpleFileOptions = zip::write::SimpleFileOptions::default();
-    let written = |zip: &mut zip::ZipWriter<std::fs::File>| -> Result<(), String> {
-        let mut add = |name: &str, bytes: &[u8]| -> Result<(), String> {
-            zip.start_file(name, options)
-                .and_then(|_| zip.write_all(bytes).map_err(zip::result::ZipError::from))
-                .map_err(|e| format!("archive member {name:?}: {e}"))
-        };
-        add("ca-update.json", canonical_json(&manifest).as_bytes())?;
-        add("ca.pem", inputs.certificate_pem.as_bytes())?;
-        add("README.txt", readme.as_bytes())?;
-        Ok(())
-    };
-    if let Err(e) = written(&mut zip) {
-        drop(zip);
-        let _ = std::fs::remove_file(&destination);
-        return Err(e);
-    }
-    if let Err(e) = zip.finish() {
-        let _ = std::fs::remove_file(&destination);
-        return Err(format!("cannot finish the CA update bundle: {e}"));
-    }
-    Ok((destination, manifest))
-}
-
 /// Over the extracted tree, before any member is read: every entry, at any
 /// depth, is a plain file or directory the member list names — never a
 /// symbolic link (which `read` would follow out of the bundle), never an
@@ -1072,62 +997,6 @@ mod tests {
         zip.finish().expect("finish");
         let why = read_zip(&path).expect_err("symlink");
         assert!(why.contains("link"), "{why}");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    fn ca_update_test_inputs<'a>() -> (std::path::PathBuf, CaUpdateInputs<'a>) {
-        (
-            std::env::temp_dir().join(format!("ca-update-l1-{}", std::process::id())),
-            CaUpdateInputs {
-                certificate_pem: "-----BEGIN CERTIFICATE-----\nZm9v\n-----END CERTIFICATE-----\n",
-                fingerprint: "AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89",
-                origins: ["http://127.0.0.1:8080", "127.0.0.1:8081"],
-                issued_at: "2026-09-21T00:00:00Z",
-            },
-        )
-    }
-
-    #[test]
-    fn ca_update_zip_members_order_name_and_canonical_manifest() {
-        let (dir, inputs) = ca_update_test_inputs();
-        std::fs::create_dir_all(&dir).expect("temp dir");
-        let (archive, manifest) = write_ca_update_zip(&dir, &inputs).expect("write");
-        assert_eq!(
-            archive.file_name().unwrap().to_str(),
-            Some("jaynshare-ca-update-abcdef012345.zip")
-        );
-        let mut zip =
-            zip::ZipArchive::new(std::fs::File::open(&archive).expect("open")).expect("read");
-        let names: Vec<String> = (0..zip.len())
-            .map(|i| zip.by_index(i).expect("member").name().to_string())
-            .collect();
-        assert_eq!(names, ["ca-update.json", "ca.pem", "README.txt"]);
-        let expected = json!({
-            "schema": 1,
-            "origins": inputs.origins,
-            "issued_at": inputs.issued_at,
-            "ca_sha256": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
-            "fingerprint": inputs.fingerprint,
-        });
-        assert_eq!(manifest, expected);
-        let mut written = String::new();
-        zip.by_index(0)
-            .expect("manifest")
-            .read_to_string(&mut written)
-            .expect("read");
-        assert_eq!(written, canonical_json(&expected));
-        let readme = {
-            let mut text = String::new();
-            zip.by_index(2)
-                .expect("readme")
-                .read_to_string(&mut text)
-                .expect("read");
-            text
-        };
-        assert_eq!(readme.lines().count(), 3);
-        // An existing bundle is never overwritten.
-        let why = write_ca_update_zip(&dir, &inputs).expect_err("second write");
-        assert!(why.contains("cannot create"), "{why}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -158,19 +158,22 @@ async fn run_exit_rows_before_the_replacement() {
     );
     assert!(machine.claude_ran().is_none(), "nothing ran");
 
-    // 14: the installation has no `ca.pem`, which every launch needs.
+    // 14: the installation has no `ca.pem`, which every launch needs, and
+    // the server to fetch it from does not answer.
     let ca = machine.client_dir.join("ca.pem");
-    let aside = machine.client_dir.join("ca.pem.aside");
-    fs::rename(&ca, &aside).expect("move ca.pem aside");
+    let served = fs::read(&ca).expect("ca.pem");
+    fs::remove_file(&ca).expect("remove ca.pem");
+    machine.set("base_url", "\"http://127.0.0.1:1\"");
     let (code, _, stderr) = machine.jaynshare(&["claude", "--auto"], &[], None);
     assert_eq!(code, 14, "{stderr}");
     assert!(stderr.starts_with("cli_transport_unavailable:"), "{stderr}");
-    assert!(
-        stderr.contains("ca-update"),
-        "names the way to install it: {stderr}"
-    );
+    assert!(stderr.contains("could not be fetched"), "{stderr}");
     assert!(machine.claude_ran().is_none(), "nothing ran");
-    fs::rename(&aside, &ca).expect("put ca.pem back");
+    machine.set("base_url", &format!("{:?}", machine.base_url));
+    let (code, _, stderr) = machine.jaynshare(&["claude", "--auto"], &[], None);
+    assert_eq!(code, 0, "the server's CA is fetched: {stderr}");
+    assert!(machine.claude_ran().is_some(), "Claude Code was launched");
+    assert_eq!(fs::read(&ca).expect("ca.pem"), served);
 
     // 4: the proxy the launch check goes through is unreachable.
     machine.set("proxy_url", "\"http://127.0.0.1:1\"");
@@ -345,26 +348,13 @@ async fn each_missing_client_file_is_named() {
         );
     }
 
+    // `ca.pem` is the server's to hand out: the launch fetches it.
     let ca = machine.client_dir.join("ca.pem");
     let bytes = std::fs::read(&ca).expect("ca.pem");
     std::fs::remove_file(&ca).expect("ca.pem");
     let (code, _, stderr) = machine.jaynshare(&["claude", "--auto"], &[], None);
-    assert_eq!(code, 14, ", without ca.pem: {stderr}");
-    assert!(
-        stderr.starts_with("cli_transport_unavailable:") && stderr.contains("ca.pem"),
-        "the missing file is named: {stderr}"
-    );
-    assert!(
-        stderr.contains("ca-update --from"),
-        "the CA update is named: {stderr}"
-    );
-    assert!(
-        machine.claude_ran().is_none(),
-        "Claude Code never started without ca.pem"
-    );
-    std::fs::write(&ca, &bytes).expect("ca.pem");
-    let (code, _, stderr) = machine.jaynshare(&["claude", "--auto"], &[], None);
-    assert_eq!(code, 0, "restored ca.pem: {stderr}");
+    assert_eq!(code, 0, "without ca.pem: {stderr}");
+    assert_eq!(std::fs::read(&ca).expect("ca.pem"), bytes);
     assert!(machine.claude_ran().is_some(), "launched again");
 }
 
@@ -481,14 +471,17 @@ async fn an_unreachable_listener_refuses_and_names_direct() {
     );
 
     // 6. The CA failure keeps its class: a `ca.pem` the proxy's leaf does not
-    // chain to is exit 12, not "unreachable".
+    // chain to, with no server to fetch the right one from, is exit 12, not
+    // "unreachable".
     mitm_machine.set("proxy_url", &format!("{:?}", mitm_machine.proxy));
     let ca = mitm_machine.client_dir.join("ca.pem");
     let pool_ca = fs::read(&ca).expect("ca.pem");
     let foreign = rcgen::generate_simple_self_signed(vec!["not-the-pool.invalid".into()])
         .expect("a foreign CA");
     fs::write(&ca, foreign.cert.pem()).expect("ca.pem");
+    mitm_machine.set("base_url", "\"http://127.0.0.1:1\"");
     let (code, _, stderr) = mitm_machine.jaynshare(&["claude", "--auto"], &[], None);
+    mitm_machine.set("base_url", &format!("{:?}", mitm_machine.base_url));
     assert_eq!(code, 12, "the CA failure stays distinct: {stderr}");
     assert!(
         stderr.starts_with("cli_ca_untrusted:") && stderr.contains(&mitm_machine.proxy),
@@ -1042,9 +1035,11 @@ async fn the_secret_is_in_no_argument_vector_or_message() {
     let ca = machine.client_dir.join("ca.pem");
     let aside = machine.client_dir.join("ca.pem.aside");
     fs::rename(&ca, &aside).expect("move ca.pem aside");
+    machine.set("base_url", "\"http://127.0.0.1:1\"");
     let (exit, stdout, stderr) = machine.jaynshare(&["claude", "--auto"], &[], None);
-    assert_eq!(exit, 14, "no ca.pem: {stderr}");
+    assert_eq!(exit, 14, "no ca.pem to fetch: {stderr}");
     assert!(!leaks(&stdout) && !leaks(&stderr));
+    machine.set("base_url", &format!("{:?}", machine.base_url));
     fs::rename(&aside, &ca).expect("put ca.pem back");
 
     machine.set("proxy_url", "\"http://127.0.0.1:1\"");
@@ -1409,30 +1404,13 @@ async fn every_launch_is_mitm_mode() {
     assert_eq!(code, 2, "{stderr}");
     assert!(stdout.is_empty(), "nothing printed: {stdout}");
 
-    // An enrollment from before the change: a recorded base-URL mode and no CA.
+    // An enrollment from before the change: a recorded base-URL mode and no
+    // CA. The launch fetches the CA, and the recorded mode is ignored: a
+    // MITM launch.
     let toml = machine.client_dir.join("client.toml");
     let text = fs::read_to_string(&toml).expect("client.toml");
     fs::write(&toml, format!("{text}mode = \"base-url\"\n")).expect("client.toml");
-    let ca = machine.client_dir.join("ca.pem");
-    let bytes = fs::read(&ca).expect("ca.pem");
-    fs::remove_file(&ca).expect("ca.pem");
-    let (code, _, stderr) = machine.jaynshare(&["claude", "--auto"], &[], None);
-    assert_eq!(code, 14, "{stderr}");
-    assert!(
-        stderr.starts_with("cli_transport_unavailable:"),
-        "the slug on stderr: {stderr}"
-    );
-    assert!(
-        stderr.contains("ca.pem") && stderr.contains("ca-update --from"),
-        "names the file and the CA update: {stderr}"
-    );
-    assert!(
-        machine.claude_ran().is_none(),
-        "refused before Claude Code started"
-    );
-
-    // With the CA installed the recorded mode is ignored: a MITM launch.
-    fs::write(&ca, &bytes).expect("ca.pem");
+    fs::remove_file(machine.client_dir.join("ca.pem")).expect("ca.pem");
     let (code, _, stderr) = machine.jaynshare(&["claude", "--auto"], &[], None);
     assert_eq!(code, 0, "{stderr}");
     let seen = machine.claude_ran().expect("Claude Code was launched");
