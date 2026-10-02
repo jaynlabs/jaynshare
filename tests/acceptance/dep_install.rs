@@ -125,7 +125,7 @@ async fn a_fresh_install_invites_the_user_who_ran_it() {
     assert!(!stderr.contains("warning"), "{stderr}");
     let envelope: Value = serde_json::from_str(stdout.trim()).expect("the envelope");
     assert_eq!(envelope["result"]["invite"], Value::Null, "{envelope}");
-    validate(&schema, &envelope["result"]).expect("the published install schema");
+    validate(&schema, &envelope).expect("the published install schema");
     assert_eq!(clients(&linux), invited);
 
     // The releases removed by hand, the state kept: the next install is
