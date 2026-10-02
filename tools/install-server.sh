@@ -1,7 +1,8 @@
 #!/bin/sh
 # Builds this clone and installs it as the native server; run it again after
 # `git pull` to update. It builds as you and installs with sudo, with the
-# official client kit of the build's version. Arguments go to
+# official client kit of the build's version; a first install ends with an
+# invite named after you (sudo passes SUDO_USER). Arguments go to
 # `jaynshare server install`, e.g. --kit <zip> for a kit your fork's CI built,
 # or --listen <ip>.
 set -eu

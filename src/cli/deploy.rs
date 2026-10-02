@@ -1,12 +1,15 @@
-//! The deploy verbs: file-backed on the machine that runs them, no
-//! control connection, the behaviour in `crate::deploy`. Each prints what it
-//! is about to do on standard error first, and its `--json` result is the
-//! deploy object.
+//! The deploy verbs: file-backed on the machine that runs them, the
+//! behaviour in `crate::deploy`; only a fresh install's invite goes through
+//! the server it installed. Each prints what it is about to do on standard
+//! error first, and its `--json` result is the deploy object.
 
-use serde_json::json;
+use std::time::Duration;
 
-use super::args::{ReleaseVerb, ServerVerb, ServiceVerb, Switch, Verb};
-use super::{Cli, Failure, Outcome};
+use serde_json::{Value, json};
+
+use super::args::{InviteArgs, InviteTerms, ReleaseVerb, ServerVerb, ServiceVerb, Switch, Verb};
+use super::control::Control;
+use super::{Cli, Failure, Outcome, invite};
 use crate::deploy::result::DeployResult;
 use crate::deploy::systemd::{self, ServiceOp};
 use crate::deploy::{auto_update, native};
@@ -142,6 +145,7 @@ pub(super) fn dispatch(cli: &Cli, verb: &Verb) -> Option<Outcome> {
                     native::Source::Published(version.as_deref())
                 }
             };
+            let fresh = std::fs::symlink_metadata(native::CURRENT).is_err();
             let result = native::install(&native::InstallInputs {
                 source,
                 config: cli.config.as_deref(),
@@ -151,7 +155,14 @@ pub(super) fn dispatch(cli: &Cli, verb: &Verb) -> Option<Outcome> {
                 ask: &interactive_confirm,
                 firewall_record: &|config| firewall_record(Some(config)),
             });
-            Some(finish(result, manager_row))
+            Some(finish(result, manager_row).map(|(mut installed, text)| {
+                installed["invite"] = Value::Null;
+                if fresh {
+                    invite_installer(cli, installed, text)
+                } else {
+                    (installed, text)
+                }
+            }))
         }
         Verb::Server {
             verb:
@@ -257,6 +268,57 @@ pub(super) fn dispatch(cli: &Cli, verb: &Verb) -> Option<Outcome> {
         }
         _ => None,
     }
+}
+
+/// A fresh install's last step: `client invite` for the user who ran it,
+/// through the installed server. The install stands without it, so a
+/// refusal is a warning.
+fn invite_installer(cli: &Cli, mut installed: Value, text: String) -> (Value, String) {
+    match installer_invite(cli) {
+        Ok((invite, human)) => {
+            installed["invite"] = invite;
+            (installed, format!("{text}\n\n{human}"))
+        }
+        Err(why) => {
+            eprintln!("warning: no invite was issued: {why}");
+            (installed, text)
+        }
+    }
+}
+
+fn installer_invite(cli: &Cli) -> Result<(Value, String), String> {
+    let config = native::service_config_path();
+    let operator = format!("jaynshare --config {}", config.display());
+    let id = invite::installer_client_id().ok_or_else(|| {
+        format!("neither SUDO_USER nor USER names a client; run `{operator} client invite <id>`")
+    })?;
+    let message = |failure: Failure| {
+        failure.error["message"]
+            .as_str()
+            .unwrap_or("the invite failed")
+            .to_owned()
+    };
+    let control = Control::loopback(config, Duration::from_secs(cli.timeout)).map_err(message)?;
+    let args = InviteArgs {
+        id: id.clone(),
+        name: None,
+        terms: InviteTerms {
+            expires: None,
+            no_account: false,
+            disclose_to: None,
+        },
+    };
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime")
+        .block_on(invite::client_invite(&control, cli, &args))
+        .map_err(|failure| match failure.error["code"].as_str() {
+            Some("conflict") => format!(
+                "the client {id} already exists and was left as it is; `{operator} client reissue {id}` invites it again"
+            ),
+            _ => message(failure),
+        })
 }
 
 /// Where the host firewall cannot be inspected, an operator on a

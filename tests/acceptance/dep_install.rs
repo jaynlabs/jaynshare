@@ -1,12 +1,18 @@
 //! The one-command native install: with no configuration given it writes
-//! one, running it again updates, and a clone's build installs with its
-//! client kit. Each runs the real installer as root inside a `LinuxBox`
-//! (see `linuxbox`), which skips explicitly without a Docker daemon.
+//! one, a fresh install ends with an invite, running it again updates, and a
+//! clone's build installs with its client kit. Each runs the real installer
+//! as root inside a `LinuxBox` (see `linuxbox`), which skips explicitly
+//! without a Docker daemon.
 
+use serde_json::{Value, json};
+
+use crate::enrol::{client_platform, decode_invite, encode_invite, join_from};
+use crate::harness::{private_dir, scratch, validate};
 use crate::linuxbox::{BOX_BIN, LinuxBox};
 use crate::release_fx::{FIXTURE_VERSION, ReleaseKey, serve_release};
 
 const SERVICE_CFG: &str = "/var/lib/jaynshare/.config/jaynshare/config.toml";
+const DATA_PLANE_PORT: u16 = 17421;
 
 /// An input chain that drops what no rule admits, so every private
 /// listener passes the firewall check.
@@ -32,6 +38,113 @@ fn owner_and_mode(linux: &LinuxBox, path: &str) -> String {
     let (code, stat, stderr) = linux.sh(&format!("stat -c '%U %a' '{path}'"));
     assert_eq!(code, 0, "stat {path}: {stderr}");
     stat.trim().to_owned()
+}
+
+/// `server install <args>` as root through sudo by `user`.
+fn install_as(linux: &LinuxBox, user: &str, args: &[&str]) -> (i32, String, String) {
+    let sudo_user = format!("SUDO_USER={user}");
+    let mut command = vec!["env", sudo_user.as_str(), BOX_BIN, "server", "install"];
+    command.extend_from_slice(args);
+    linux.exec(&command)
+}
+
+/// The `result` of one `--json` run of the installer's `args`.
+fn result_of(linux: &LinuxBox, args: &[&str]) -> Value {
+    let (code, stdout, stderr) = linux.cli(&[&["--json"], args].concat());
+    assert_eq!(code, 0, "{args:?}: {stdout}\n{stderr}");
+    let envelope: Value = serde_json::from_str(stdout.trim()).expect("the envelope");
+    envelope["result"].clone()
+}
+
+fn clients(linux: &LinuxBox) -> Value {
+    result_of(linux, &["--config", SERVICE_CFG, "client", "list"])["clients"].clone()
+}
+
+/// A fresh install ends with an invite for the user who ran it, which a
+/// machine joins with; installing again updates and invites no one; and a
+/// fresh install over state that already holds that client leaves it as it is.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_fresh_install_invites_the_user_who_ran_it() {
+    let _leak_sweep = crate::leaks::LeakGuard::default();
+    let Some(linux) = LinuxBox::start_publishing("install-invites", DATA_PLANE_PORT) else {
+        return;
+    };
+    let key = ReleaseKey::generate();
+    linux.plant_key(&key);
+    let v070 = linux.release(&key, FIXTURE_VERSION);
+    let v071 = linux.release(&key, "0.7.1-acceptance");
+    linux.set_ruleset(DROP_INPUT);
+    let ip = box_ip(&linux);
+
+    let (code, stdout, stderr) = install_as(&linux, "Alice.Smith", &["--from", &v070]);
+    assert_eq!(code, 0, "install: {stdout}\n{stderr}");
+    assert!(!stderr.contains("warning"), "{stderr}");
+    let invite = stdout
+        .lines()
+        .last()
+        .and_then(|line| line.strip_prefix("jaynshare join "))
+        .unwrap_or_else(|| panic!("the last line runs the join: {stdout}"));
+    let fields = decode_invite(invite);
+    crate::leaks::register_needle("enrollment-code", fields["code"].as_str().expect("code"));
+    let status = &result_of(&linux, &["--config", SERVICE_CFG, "status"])["status"];
+    assert_eq!(fields["client_id"], "alice-smith", "{fields}");
+    assert_eq!(
+        fields["base_url"],
+        format!("https://{ip}:{DATA_PLANE_PORT}"),
+        "{fields}"
+    );
+    assert_eq!(fields["identity"], status["server"]["tls_pin"], "{fields}");
+    assert_eq!(
+        fields["signing_key"], status["server"]["signing_key"],
+        "{fields}"
+    );
+
+    if client_platform() {
+        // This machine reaches the box's listener through the published
+        // port; the pin, not the address, names the server.
+        let mut through = fields.clone();
+        through["base_url"] = json!(format!("https://{}", linux.published(DATA_PLANE_PORT)));
+        let home = scratch("install-invites-engineer").join("home");
+        private_dir(&home);
+        let (exit, transcript) = join_from(&home, &encode_invite(&through), &[]);
+        assert_eq!(exit, 0, "{transcript}");
+        assert!(
+            transcript.contains("joined the pool as alice-smith"),
+            "{transcript}"
+        );
+        assert_eq!(clients(&linux)[0]["state"], "active");
+    } else {
+        eprintln!("skipping the join: no client payload for this platform");
+    }
+    let invited = clients(&linux);
+    assert_eq!(invited.as_array().map(Vec::len), Some(1), "{invited}");
+
+    let schema = result_of(&linux, &["schema", "server", "install"]);
+    let (code, stdout, stderr) = install_as(&linux, "bob", &["--from", &v071, "--json"]);
+    assert_eq!(code, 0, "update: {stdout}\n{stderr}");
+    assert!(!stderr.contains("warning"), "{stderr}");
+    let envelope: Value = serde_json::from_str(stdout.trim()).expect("the envelope");
+    assert_eq!(envelope["result"]["invite"], Value::Null, "{envelope}");
+    validate(&schema, &envelope["result"]).expect("the published install schema");
+    assert_eq!(clients(&linux), invited);
+
+    // The releases removed by hand, the state kept: the next install is
+    // fresh, and the client it would invite already exists.
+    let (code, _, stderr) = linux.sh("systemctl stop jaynshare.service");
+    assert_eq!(code, 0, "stop: {stderr}");
+    let (code, stdout, stderr) = linux.cli(&["server", "uninstall"]);
+    assert_eq!(code, 0, "uninstall: {stdout}\n{stderr}");
+    let (code, _, stderr) = linux.sh("rm -rf /opt/jaynshare");
+    assert_eq!(code, 0, "{stderr}");
+    let (code, stdout, stderr) = install_as(&linux, "alice.smith", &["--from", &v070, "--json"]);
+    assert_eq!(code, 0, "reinstall: {stdout}\n{stderr}");
+    assert!(
+        stderr.contains("warning: no invite was issued: the client alice-smith already exists and was left as it is"),
+        "{stderr}"
+    );
+    let envelope: Value = serde_json::from_str(stdout.trim()).expect("the envelope");
+    assert_eq!(envelope["result"]["invite"], Value::Null, "{envelope}");
+    assert_eq!(clients(&linux), invited);
 }
 
 /// The published shell bootstrap discovers the local origin's latest
