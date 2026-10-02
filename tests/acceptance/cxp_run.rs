@@ -1503,9 +1503,9 @@ async fn windows_paths_profile_prerequisites_and_no_fallback() {
     assert!(machine.claude_ran().is_none());
 
     // No fallback to the engineer's own login when the pool is unreachable.
-    let base = Instance::start_client("windows-paths-profile-base").await;
+    let mut base = Instance::start_client("windows-paths-profile-base").await;
     let machine = install_client(&base).await;
-    machine.set("base_url", "\"http://127.0.0.1:1\"");
+    base.stop();
     let (code, _, stderr) = machine.jaynshare(&["claude", "--auto"], &[], None);
     assert_eq!(code, 4, "{stderr}");
     assert!(stderr.contains("--direct"), "{stderr}");
