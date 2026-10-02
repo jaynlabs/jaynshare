@@ -235,7 +235,6 @@ fn relative_paths_resolve_to_the_config_directory_without_expansion() {
 #[test]
 fn platform_paths_with_no_override() {
     let _leak_sweep = crate::leaks::LeakGuard::default();
-    let _leak_sweep = crate::leaks::LeakGuard::default();
     let home = scratch("platform-paths-no-override").join("home");
     private_dir(&home);
     let env = isolated_env(&home);
@@ -254,6 +253,11 @@ fn platform_paths_with_no_override() {
         expect("state", "Application Support/Jaynshare/state.json");
         expect("log_directory", "Logs/Jaynshare");
         expect("client_directory", "Application Support/Jaynshare/client");
+    } else if cfg!(windows) {
+        expect("configuration", r"AppData\Roaming\Jaynshare\config.toml");
+        expect("state", r"AppData\Local\Jaynshare\state.json");
+        expect("log_directory", r"AppData\Local\Jaynshare\log");
+        expect("client_directory", r"AppData\Roaming\Jaynshare\client");
     } else {
         expect("configuration", "jaynshare/config.toml");
         expect("state", "jaynshare/state.json");
@@ -356,8 +360,8 @@ step_interval_ms = 1
 window_seconds = 1
 [data_plane]
 listen = "127.0.0.1:18421"
-tls_certificate_file = "{}"
-tls_private_key_file = "{}"
+tls_certificate_file = {}
+tls_private_key_file = {}
 upstream_origin = "http://127.0.0.1:9"
 max_connections = 1
 first_byte_timeout_seconds = 1
@@ -379,8 +383,8 @@ wire_capture_directory = "./capture-custom"
 enabled = true
 listen = "127.0.0.1:18422"
 "#,
-            certificate.display(),
-            private_key.display()
+            toml_path(&certificate),
+            toml_path(&private_key)
         ),
     );
 

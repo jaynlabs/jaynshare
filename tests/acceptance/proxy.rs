@@ -1012,6 +1012,10 @@ async fn unreachable_targets_are_502_and_504_before_any_200() {
     // TEST-NET-1 is documentation space (RFC 5737) and reaches no service;
     // A host whose network answers it outright has no 30 s wait to observe,
     // and that half is checked by hand.
+    if cfg!(windows) {
+        eprintln!("skipping: Windows gives up a connection at about 21 s, before the 30 s");
+        return;
+    }
     let unroutable: SocketAddr = "192.0.2.1:443".parse().expect("TEST-NET-1");
     let answered_fast = tokio::task::spawn_blocking(move || {
         let at = Instant::now();

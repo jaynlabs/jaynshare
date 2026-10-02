@@ -43,7 +43,10 @@ pub(crate) fn config_root(home: &Path) -> PathBuf {
 /// Where a join under `home` installs the client executable.
 pub(crate) fn installed_binary(home: &Path) -> PathBuf {
     if cfg!(windows) {
-        crate::profile_fx::local_app_data(home).join("Programs/Jaynshare/jaynshare.exe")
+        crate::profile_fx::local_app_data(home)
+            .join("Programs")
+            .join("Jaynshare")
+            .join("jaynshare.exe")
     } else {
         config_root(home).join("bin/jaynshare")
     }
@@ -541,7 +544,10 @@ async fn secret_set_takes_every_channel_and_writes_one_file() {
         );
     }
 
-    // The hidden prompt, on a terminal.
+    // The hidden prompt, on a terminal: a Unix pseudo-terminal.
+    if cfg!(windows) {
+        return;
+    }
     let rotated = operator.rotate("alpha");
     let (exit, transcript) = cli_pty(
         "secret-set-takes-channel-prompt",
@@ -1019,7 +1025,11 @@ async fn following_a_rotation_and_the_os_store_touch_only_the_ca() {
     );
 
     // Over the fake OS store: `trust-ca add` explains the broader
-    // effect and adds exactly the confirmed certificate, once.
+    // effect and adds exactly the confirmed certificate, once. The
+    // confirmations are typed on a Unix pseudo-terminal.
+    if cfg!(windows) {
+        return;
+    }
     let keychain = |home: &Path| {
         home.join("Library/Keychains/login.keychain-db")
             .display()

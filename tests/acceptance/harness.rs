@@ -2177,7 +2177,9 @@ pub(crate) async fn try_send(
     let driver = tokio::spawn(async move {
         let _ = connection.await;
     });
-    let answer = async {
+    // Bounded: a request the server never answers fails its scenario instead
+    // of hanging the run. The longest awaited answer is about 50 s.
+    let answer = tokio::time::timeout(Duration::from_secs(120), async {
         let response = sender
             .send_request(request)
             .await
@@ -2199,8 +2201,9 @@ pub(crate) async fn try_send(
             headers: parts.headers,
             frames,
         })
-    }
-    .await;
+    })
+    .await
+    .expect("an answer or a closed connection within 120 s");
     driver.abort();
     answer
 }
@@ -2685,8 +2688,10 @@ fn claim_scenario_root(scenario: &str) -> PathBuf {
         "two scenarios claim the root `target/acceptance/{scenario}`; \
          give each one its own name"
     );
+    // Joined part by part, so a Windows path has only native separators.
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("target/acceptance")
+        .join("target")
+        .join("acceptance")
         .join(scenario);
     let _ = fs::remove_dir_all(&root);
     private_dir(&root);

@@ -2101,6 +2101,10 @@ async fn one_portable_object_three_channels_last_source_wins() {
     );
 
     // (d) A 0644 server file is refused naming the mode; the pool is unchanged.
+    // Only Unix refuses a file by its mode.
+    if cfg!(windows) {
+        return;
+    }
     let open = instance.root.join("open.json");
     fs::write(&open, &portable).expect("write the open file");
     crate::leaks::register_planted(&open);

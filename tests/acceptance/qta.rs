@@ -1267,6 +1267,8 @@ async fn persisted_quota_follows_identity_not_array_order() {
 
 /// A clean stop flushes a fresh header observation, while a
 /// request and token-count update by itself schedules no state write.
+// The clean stop is SIGTERM; the harness can only kill a Windows server.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn clean_stop_flushes_quota_but_counters_do_not_write() {
     let _leak_sweep = crate::leaks::LeakGuard::default();

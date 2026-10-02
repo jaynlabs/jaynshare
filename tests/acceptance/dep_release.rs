@@ -184,7 +184,9 @@ async fn the_active_key_and_the_rotation_overlap() {
     );
     let (bytes, mode) = store(&home);
     assert_eq!(bytes, key_b.public_file(), ": B is admitted");
-    assert_eq!(mode, 0o644, "the admitted key's mode");
+    if cfg!(unix) {
+        assert_eq!(mode, 0o644, "the admitted key's mode");
+    }
 
     // After the admission B alone is the active key.
     let release = write_release(&dir("after-overlap-b"), &key_b, |_| {}, |_| {});
@@ -496,10 +498,15 @@ async fn one_release_set_one_version_only_the_allowed_files() {
     }
 
     // The host archive's executable is the binary under test
-    // and reports the same `version`.
+    // and reports the same `version`. Windows' own `tar` reads a ZIP too.
     let extract = root.join("extract");
     std::fs::create_dir_all(&extract).expect("extract directory");
-    let host_archive = out.join(format!("jaynshare-{version}-{host}.tar.gz"));
+    let (host_extension, host_executable) = if cfg!(windows) {
+        ("zip", "jaynshare.exe")
+    } else {
+        ("tar.gz", "jaynshare")
+    };
+    let host_archive = out.join(format!("jaynshare-{version}-{host}.{host_extension}"));
     let extracted = std::process::Command::new("tar")
         .args([
             "xzf",
@@ -512,7 +519,7 @@ async fn one_release_set_one_version_only_the_allowed_files() {
     assert!(extracted.success(), "tar xzf the host archive");
     let extracted_bin = extract
         .join(format!("jaynshare-{version}-{host}"))
-        .join("jaynshare")
+        .join(host_executable)
         .canonicalize()
         .expect("the extracted executable");
     let shipped = std::process::Command::new(&extracted_bin)

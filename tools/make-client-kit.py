@@ -203,7 +203,8 @@ def build(payload_dir: str, key_path: str, out_path: str,
     for root, _, files in os.walk(payload_dir):
         for name in files:
             path = os.path.join(root, name)
-            member = os.path.relpath(path, payload_dir)
+            # A ZIP member name separates with `/` on every platform.
+            member = os.path.relpath(path, payload_dir).replace(os.sep, "/")
             with open(path, "rb") as handle:
                 members[member] = handle.read()
     required = [

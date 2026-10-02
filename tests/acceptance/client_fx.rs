@@ -288,9 +288,23 @@ impl ClientHome {
         for name in ["argv.json", "env.json"] {
             let _ = fs::remove_file(self.out.join(name));
         }
+        let mut env: BTreeMap<String, String> = serde_json::from_str(&env).expect("env.json");
+        // A Windows variable name has no case: the child holds one
+        // `HTTPS_PROXY` however it was spelled, so it reads in either case.
+        if cfg!(windows) {
+            env = env
+                .into_iter()
+                .flat_map(|(name, value)| {
+                    [
+                        (name.to_lowercase(), value.clone()),
+                        (name.to_uppercase(), value),
+                    ]
+                })
+                .collect();
+        }
         Some(FakeClaudeRun {
             argv: serde_json::from_str(&argv).expect("argv.json"),
-            env: serde_json::from_str(&env).expect("env.json"),
+            env,
         })
     }
 

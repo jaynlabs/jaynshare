@@ -1149,14 +1149,16 @@ async fn env_prints_the_launch_environment_quoted_for_each_shell() {
     }
     machine.set("no_proxy", "[]");
 
-    // Each named shell gets its own spelling.
+    // Each named shell gets its own spelling. Fish's single quotes still
+    // escape a backslash.
     let (code, fish_out, stderr) =
         machine.jaynshare(&["env", "--auto", "--shell", "fish"], &[], None);
     assert_eq!(code, 0, "{stderr}");
+    let fish_ca = ca.replace('\\', r"\\");
     assert!(
         fish_out
             .lines()
-            .any(|l| l == format!("set -gx NODE_EXTRA_CA_CERTS '{ca}'")),
+            .any(|l| l == format!("set -gx NODE_EXTRA_CA_CERTS '{fish_ca}'")),
         "fish's set line: {fish_out}"
     );
     let (code, ps_out, stderr) =

@@ -6,13 +6,14 @@
 
 use std::fs;
 use std::io::Write as _;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use crate::client_fx::{ClientHome, install_client, statusline_payload};
 use crate::enrol::{
-    KIT_MEMBERS, client_platform, config_root, kit_member_bytes, native_payload, write_kit_members,
+    KIT_MEMBERS, client_platform, installed_binary, kit_member_bytes, native_payload,
+    write_kit_members,
 };
 use crate::harness::{
     Instance, Method, Setup, StatusCode, Value, binary, control, enroll, scratch, validate,
@@ -177,15 +178,6 @@ async fn the_server_offers_only_a_kit_it_verifies() {
     );
     let download = client_get(&instance, "/control/v1/client/kit", &client.secret).await;
     assert_eq!(download.status, StatusCode::NOT_FOUND);
-}
-
-/// Where the client installation keeps its executable under `home`.
-fn installed_binary(home: &Path) -> PathBuf {
-    if cfg!(windows) {
-        home.join("AppData/Local/Programs/Jaynshare/jaynshare.exe")
-    } else {
-        config_root(home).join("bin/jaynshare")
-    }
 }
 
 fn install_executable(path: &Path, bytes: &[u8]) {

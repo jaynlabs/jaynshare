@@ -491,6 +491,8 @@ async fn two_streams_quiet_and_one_document() {
 
 /// Colour appears only on a terminal; `NO_COLOR`, `--no-color`
 /// and a pipe each remove every escape sequence and leave the same facts.
+// Driven through a Unix pseudo-terminal.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn colour_only_on_a_terminal_and_the_same_facts_without() {
     let _leak_sweep = crate::leaks::LeakGuard::default();
@@ -1247,6 +1249,8 @@ async fn every_exit_row_once_and_novel_slugs_by_class() {
 /// world-readable file is refused; 64 KiB + 1 on standard input is refused;
 /// no terminal and no channel is exit 2 naming the three; the secret appears
 /// in no argv, file the CLI writes, log or message.
+// Driven through a Unix pseudo-terminal.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn secret_channels_and_no_leak() {
     let _leak_sweep = crate::leaks::LeakGuard::default();
@@ -1525,6 +1529,8 @@ async fn references_resolve_before_use() {
 /// where allowed and no terminal without it is 21; the interactive-only
 /// verbs refuse `--yes` (21) and exit 21 without a terminal. The
 /// half: `account remove` live, the others at the grammar.
+// Driven through a Unix pseudo-terminal.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn confirmations_refused_skipped_and_interactive_only() {
     let _leak_sweep = crate::leaks::LeakGuard::default();
@@ -1999,29 +2005,31 @@ async fn operator_secret_loopback_only_and_confirmed() {
     );
     assert_eq!(instance.state_digest(), before, "nothing rotated");
 
-    // The confirmation on a terminal: a refused answer changes nothing.
-    let (code, transcript) = cli_pty(
-        "operator-secret-loopback-no",
-        &["--config", &config, "operator", "secret", "set"],
-        &env,
-        Some(("[y/N]", "n\n")),
-    );
-    assert_eq!(code, 21, "{transcript}");
-    assert_eq!(instance.state_digest(), before, "a no answers nothing");
-    assert!(
-        !transcript.contains("jso2_"),
-        "no disclosure happened: {transcript}"
-    );
+    // The confirmation on a terminal (a Unix pseudo-terminal): a refused
+    // answer changes nothing, a yes discloses a new secret once.
+    if cfg!(unix) {
+        let (code, transcript) = cli_pty(
+            "operator-secret-loopback-no",
+            &["--config", &config, "operator", "secret", "set"],
+            &env,
+            Some(("[y/N]", "n\n")),
+        );
+        assert_eq!(code, 21, "{transcript}");
+        assert_eq!(instance.state_digest(), before, "a no answers nothing");
+        assert!(
+            !transcript.contains("jso2_"),
+            "no disclosure happened: {transcript}"
+        );
 
-    // Answered yes (or --yes): a new secret, disclosed once.
-    let (code, transcript) = cli_pty(
-        "operator-secret-loopback-yes",
-        &["--config", &config, "operator", "secret", "set"],
-        &env,
-        Some(("[y/N]", "y\n")),
-    );
-    assert_eq!(code, 0, "{transcript}");
-    assert!(transcript.contains("operator secret"), "{transcript}");
+        let (code, transcript) = cli_pty(
+            "operator-secret-loopback-yes",
+            &["--config", &config, "operator", "secret", "set"],
+            &env,
+            Some(("[y/N]", "y\n")),
+        );
+        assert_eq!(code, 0, "{transcript}");
+        assert!(transcript.contains("operator secret"), "{transcript}");
+    }
     let envelope = instance.cli_json(&["operator", "secret", "set", "--yes"], None);
     assert_eq!(envelope["ok"], true, "{envelope}");
     assert!(
