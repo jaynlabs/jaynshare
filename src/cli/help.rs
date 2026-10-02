@@ -80,21 +80,18 @@ pub(super) static DOCS: &[VerbDoc] = &[
         ["jaynshare alias", "jaynshare alias --shell powershell"]
     ),
     verb!(
-        "enrol",
+        "join",
         Engineer,
         None,
-        "Claim an enrollment bundle and install this client (also spelt `enroll`)",
-        [12, 14, 17, 21],
-        [
-            "jaynshare enrol --bundle <extracted-dir>",
-            "jaynshare enrol --bundle <extracted-dir> --trust-os-store"
-        ]
+        "Join a pool with the operator's invite and install its client",
+        [4, 5, 8, 10, 14, 17, 18],
+        ["jaynshare join <invite>"]
     ),
     verb!(
         "update",
         Engineer,
         None,
-        "Apply a client kit or bundle update to this installation",
+        "Apply a client kit to this installation",
         [11, 17, 20],
         [
             "jaynshare update --from <client-kit.zip>",
@@ -415,38 +412,22 @@ pub(super) static DOCS: &[VerbDoc] = &[
         ["jaynshare client show <id>"]
     ),
     verb!(
-        "client issue",
+        "client invite",
         Operator,
         None,
-        "Issue a client id and disclose its enrollment code once",
-        [3, 4, 5, 8, 9, 10],
+        "Invite a machine: a client id and its single-use invite, disclosed once",
+        [3, 4, 5, 8, 9, 10, 14, 17],
         [
-            "jaynshare client issue <id> --name <display-name>",
-            "jaynshare client issue <id> --name <display-name> --disclose-to <path>"
+            "jaynshare client invite <id>",
+            "jaynshare client invite <id> --name <display-name> --expires 1h --no-account"
         ]
-    ),
-    verb!(
-        "client bundle",
-        Operator,
-        None,
-        "Package an enrollment bundle for an already-issued pending entry",
-        [3, 4, 5, 6, 8, 10, 17],
-        ["jaynshare client bundle <id> --kit <client-kit.zip> --out <dir>"]
-    ),
-    verb!(
-        "client enrol",
-        Operator,
-        None,
-        "Issue and package in one transaction (also spelt `enroll`)",
-        [3, 4, 5, 8, 9, 10, 17],
-        ["jaynshare client enrol <id> --name <display-name> --kit <client-kit.zip> --out <dir>"]
     ),
     verb!(
         "client reissue",
         Operator,
         None,
-        "Replace a lost or expired code; repack when --kit and --out are given",
-        [3, 4, 5, 6, 8, 10, 17],
+        "Replace a lost or expired invite; the previous one stops working",
+        [3, 4, 5, 6, 8, 10, 14, 17],
         ["jaynshare client reissue <id>"]
     ),
     verb!(
@@ -1040,7 +1021,7 @@ mod tests {
         for doc in DOCS {
             assert!(help.contains(doc.path), "{} missing from help", doc.path);
         }
-        // The kept product words, and only `enrol`/`enroll` as a pair.
+        // The kept product words.
         for word in [
             "status", "switch", "claude", "env", "probe", "route", "client", "service", "api",
             "alias",

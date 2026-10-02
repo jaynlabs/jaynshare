@@ -275,7 +275,7 @@ impl Ca {
     }
 
     /// The CA certificate as PEM — what a client imports and
-    /// what the enrollment bundle carries. It holds no secret.
+    /// what a claim answers. It holds no secret.
     pub fn certificate_pem(&self) -> String {
         let body = base64::engine::general_purpose::STANDARD.encode(self.ca_certificate.as_ref());
         let mut out = String::from("-----BEGIN CERTIFICATE-----\n");

@@ -111,7 +111,7 @@ pub(crate) fn roaming(home: &Path) -> PathBuf {
 
 /// Enrol one client on `instance` (issue + claim over the control API) and
 /// write its files under `<instance root>/engineer/home` exactly as
-/// `enrol --bundle` leaves them: `client.toml`, `client-secret` (`0600`) and
+/// `join` leaves them: `client.toml`, `client-secret` (`0600`) and
 /// `ca.pem` with its fingerprint — the instance must run with
 /// `Setup { mitm: true.. }` (`Instance::start_client`). The fake `claude` is
 /// placed on `PATH`.

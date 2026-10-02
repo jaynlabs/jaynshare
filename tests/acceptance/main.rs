@@ -12,7 +12,6 @@
 
 mod acc;
 mod acp;
-mod bundle;
 mod cfg;
 mod cli;
 mod client_fx;
@@ -23,17 +22,18 @@ mod cxp_picker;
 mod cxp_run;
 mod cxp_settings;
 mod cxp_status;
-mod dep_client;
 mod dep_install;
 mod dep_native;
 mod dep_net;
 mod dep_release;
 mod dpl;
+mod enrol;
 mod fake_tools;
 mod faults;
 mod follow;
 mod harness;
 mod idt;
+mod join;
 mod leaks;
 mod linux_fx;
 mod linuxbox;

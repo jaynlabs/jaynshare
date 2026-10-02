@@ -10,10 +10,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use crate::bundle::{
+use crate::client_fx::{ClientHome, install_client, statusline_payload};
+use crate::enrol::{
     KIT_MEMBERS, client_platform, config_root, kit_member_bytes, native_payload, write_kit_members,
 };
-use crate::client_fx::{ClientHome, install_client, statusline_payload};
 use crate::harness::{
     Instance, Method, Setup, StatusCode, Value, binary, control, enroll, scratch, validate,
 };

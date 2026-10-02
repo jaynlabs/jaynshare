@@ -197,8 +197,8 @@ pub struct ClientSettings {
     /// own addresses, as behind a forwarded port.
     pub advertised_base_url: Option<String>,
     pub advertised_proxy_url: Option<String>,
-    /// The base-URL listener's PEM trust anchor, packaged as
-    /// `base-url-ca.pem` when the advertised base URL is `https`.
+    /// Read by nothing since enrollment bundles went; kept so a
+    /// configuration that sets it still loads.
     pub base_url_ca_certificate_file: Option<PathBuf>,
     /// The client kit the server offers its clients to follow.
     pub kit_file: PathBuf,

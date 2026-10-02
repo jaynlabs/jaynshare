@@ -42,7 +42,7 @@ fn sibling(path: &Path, suffix: &str) -> PathBuf {
 /// `path`, so the old file stands until the replacement is complete. A
 /// running Windows executable cannot be replaced, only renamed, so it moves
 /// to `<path>.old` first.
-fn replace_atomically(path: &Path, bytes: &[u8]) -> Result<(), String> {
+pub(super) fn replace_atomically(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let staged = sibling(path, "new");
     std::fs::write(&staged, bytes).map_err(|e| format!("{}: {e}", staged.display()))?;
     #[cfg(unix)]

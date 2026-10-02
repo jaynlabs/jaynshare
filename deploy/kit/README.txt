@@ -1,35 +1,23 @@
 Jaynshare client kit
 
 This archive is the client half of a Jaynshare release: the client
-executable for each supported platform and the installer that enrols this
-machine with a pool. Your operator packages it into an enrollment bundle
-for you; you never use the kit directly.
+executable for each supported platform. `jaynshare join` fetches it from
+your pool's server and installs the one for this machine; you never use
+the kit directly.
 
 Prerequisite: Claude Code must already be installed on this machine; the
 pool serves Claude Code; it never installs it or replaces your own login.
 
-To enrol, extract the bundle you received into an empty directory, open a
-terminal in that directory and run its installer. On macOS:
+To join a pool, run the line your operator sends you:
 
-  /bin/sh ./install-macos.sh
+  jaynshare join jsi1_...
 
-On Windows, from PowerShell or the Command Prompt:
-
-  powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install-windows.ps1
-
-The bypass applies to that one PowerShell process and changes no machine
-or user policy. If PowerShell still refuses the script, a policy managed by
-your organisation forbids it, and that setup is not supported.
-
-The installer shows the client id, the display name, both server origins,
-the pending expiry, the CA fingerprints (the interception CA and, for an
-HTTPS base URL, the base-URL CA) and the release, then asks for your
-confirmation and reads the one-time enrollment code at a hidden prompt. Your
-operator sends the code separately from the bundle; enter it only there.
+The invite works once and expires. It names the server, the identity that
+server must present and the key its client is signed with, so the join
+refuses any other server and any other client.
 
 Members:
   release.json, release.json.minisig, SHA256SUMS   the signed release set
-  install-*.sh|ps1, uninstall-*.sh|ps1            the installers
   payload/<platform>/jaynshare[.exe]              the client executable
 
 Using the pool

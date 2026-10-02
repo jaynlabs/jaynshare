@@ -63,9 +63,8 @@ async fn the_kit_documentation_states_what_is_recorded() {
     }
 }
 
-use crate::bundle::{
-    Operator, client_platform, config_root, enrol_into, enrol_refused_after_confirm,
-    native_payload, try_enrol_into,
+use crate::enrol::{
+    Operator, client_platform, config_root, enrol_into, native_payload, try_enrol_into,
 };
 
 /// An enrollment
@@ -150,14 +149,13 @@ async fn settings_install_keeps_keys_is_idempotent_and_backed_up() {
         "the backup holds the bytes as they were before the install"
     );
 
-    // An invalid file stops the install before the code prompt.
+    // An invalid file stops the join before the claim.
     let home2 = scratch("settings-install-keeps-keys-invalid").join("home");
     private_dir(&home2);
     let settings2 = home2.join(".claude/settings.json");
     std::fs::create_dir_all(settings2.parent().unwrap()).unwrap();
     std::fs::write(&settings2, "{\"theme\": ").unwrap();
-    let (exit, transcript) =
-        enrol_refused_after_confirm(&operator, "beta", "Beta Desk", &home2).await;
+    let (exit, transcript) = try_enrol_into(&operator, "beta", "Beta Desk", &home2).await;
     assert_ne!(exit, 0, "the install stops: {transcript}");
     assert!(transcript.contains("settings.json"), "{transcript}");
     assert!(transcript.contains("not valid JSON"), "{transcript}");

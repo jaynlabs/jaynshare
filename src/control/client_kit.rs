@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, ready};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use bytes::Bytes;
 use http::header::{CONTENT_LENGTH, CONTENT_TYPE};
@@ -103,6 +103,27 @@ pub fn offer(server: &Arc<Server>) -> Option<Offer> {
     None
 }
 
+/// How long a kit download waits for a verification in progress.
+const VERIFICATION_WAIT: Duration = Duration::from_secs(30);
+
+fn verifying(server: &Server) -> bool {
+    let verdicts = server.client_kit.0.lock().expect("kit cache lock");
+    verdicts.verifying.is_some()
+}
+
+/// The offer once a verification in progress has finished, so a client
+/// joining right after the kit changed gets the kit rather than none.
+async fn settled_offer(server: &Arc<Server>) -> Option<Offer> {
+    let deadline = tokio::time::Instant::now() + VERIFICATION_WAIT;
+    loop {
+        let offer = offer(server);
+        if offer.is_some() || !verifying(server) || tokio::time::Instant::now() >= deadline {
+            return offer;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 fn verify(path: &Path) -> Option<Offer> {
     match read_offer(path) {
         Ok(offer) => {
@@ -132,7 +153,7 @@ fn read_offer(path: &Path) -> Result<Offer, String> {
 /// `GET /control/v1/client/kit`: the offered kit, streamed as it is on disk.
 pub(super) async fn download(server: &Arc<Server>) -> Response<ResponseBody> {
     let path = server.config().config.clients.kit_file.clone();
-    let file = match offer(server) {
+    let file = match settled_offer(server).await {
         Some(_) => tokio::fs::File::open(&path).await.ok(),
         None => None,
     };

@@ -11,7 +11,7 @@ Writes into `--out`:
 - the five platform archives (`.tar.gz`, windows `.zip`), each
   rooted in one directory named like the archive without its extension and
   holding exactly the executable, LICENSE, NOTICE.md and a README.txt;
-- `jaynshare-<version>-client-kit.zip`, with the installers of
+- `jaynshare-<version>-client-kit.zip`, with the README of
   `deploy/kit/` plus the client executables;
 - `SHA256SUMS`, canonical `release.json` and `release.json.minisig`;
 - with `--next-key`, the key-rotation overlap: `release.json` names the
@@ -157,13 +157,7 @@ def client_kit(version: str, commit: str, seed_path: str, bins: dict, allow: boo
         payload = os.path.join(work, "payload")
         os.makedirs(payload)
         kit_dir = os.path.join(REPO, "deploy", "kit")
-        for name in [
-            "README.txt",
-            "install-macos.sh",
-            "uninstall-macos.sh",
-            "install-windows.ps1",
-            "uninstall-windows.ps1",
-        ]:
+        for name in ["README.txt"]:
             with open(os.path.join(kit_dir, name), "rb") as source:
                 data = source.read()
             with open(os.path.join(payload, name), "wb") as sink:

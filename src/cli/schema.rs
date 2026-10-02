@@ -230,6 +230,7 @@ fn defs() -> Value {
                 ("listen", string()),
                 ("tls", json!({ "type": "boolean" })),
                 ("tls_pin", nullable_string()),
+                ("signing_key", nullable_string()),
                 ("control_api_versions", array(json!({ "type": "integer" }))),
                 ("telemetry_policy", string()),
                 ("upstream_origin_override", nullable_string()),
@@ -461,7 +462,6 @@ fn defs() -> Value {
                 "archive": string(),
                 "code_file": nullable_string(),
                 "manifest": open_object(),
-                "enrollment_code": string(),
             },
         },
         "deploy_result": object(&[
@@ -501,6 +501,7 @@ fn defs() -> Value {
             ("activated_at", nullable_string()),
             ("revoked_at", nullable_string()),
             ("hash_algorithm", string()),
+            ("no_account", json!({ "type": "boolean" })),
         ]),
     })
 }
@@ -688,26 +689,20 @@ fn result_of(path: &str) -> Option<Value> {
                 json!({ "oneOf": [string(), object(&[("base64", string())])] }),
             ),
         ]),
-        "client bundle" | "client enrol" => {
-            json!({ "oneOf": [reference("package_result"), open_object()] })
-        }
         "ca update-bundle" => json!({ "oneOf": [reference("package_result"), open_object()] }),
-        // The disclosure travels inside `result` with `--json` and
-        // into `--disclose-to`'s file otherwise, so the body's secret member
-        // is replaced by `disclosure_file` there.
-        "client issue" | "client reissue" => json!({ "oneOf": [
-            mutation(&[
+        // The invite travels inside `result` with `--json`, or into
+        // `--disclose-to`'s file, named by `disclosure_file`.
+        "client invite" | "client reissue" => json!({ "oneOf": [
+            object(&[
                 ("client", reference("registry_entry")),
-                ("enrollment_code", string()),
                 ("expires_at", string()),
+                ("invite", string()),
             ]),
-            mutation(&[
+            object(&[
                 ("client", reference("registry_entry")),
                 ("expires_at", string()),
                 ("disclosure_file", string()),
             ]),
-            reference("package_result"),
-            open_object(),
         ] }),
         "client rotate" => json!({ "oneOf": [
             mutation(&[
@@ -740,7 +735,18 @@ fn result_of(path: &str) -> Option<Value> {
             reference("deploy_result")
         }
         "ca-update" => reference("ca_update_result"),
-        "enrol" | "update" | "trust-ca add" | "trust-ca remove" | "uninstall" | "secret set" => {
+        "join" => object(&[
+            ("client_id", string()),
+            ("display_name", string()),
+            (
+                "origins",
+                object(&[("base_url", string()), ("proxy", nullable_string())]),
+            ),
+            ("ca_fingerprint", nullable_string()),
+            ("files", array(string())),
+            ("version", string()),
+        ]),
+        "update" | "trust-ca add" | "trust-ca remove" | "uninstall" | "secret set" => {
             reference("client_result")
         }
         _ => open_object(),

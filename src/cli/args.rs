@@ -128,16 +128,12 @@ pub(super) enum Verb {
         #[arg(long, value_enum, value_name = "shell")]
         shell: Option<Shell>,
     },
-    #[command(alias = "enroll")]
-    Enrol {
-        /// The extracted enrollment bundle directory.
-        #[arg(long, value_name = "extracted-dir")]
-        bundle: PathBuf,
-        #[arg(long)]
-        trust_os_store: bool,
+    Join {
+        /// The invite the operator's `client invite` printed (jsi1_…).
+        invite: String,
     },
     Update {
-        /// A client kit or bundle archive; without it, the newest release's
+        /// A client kit archive; without it, the newest release's
         /// client kit is fetched from the origin (`--version` names one).
         #[arg(long, value_name = "zip")]
         from: Option<PathBuf>,
@@ -535,38 +531,11 @@ pub(super) enum ClientVerb {
     Show {
         id: String,
     },
-    Issue {
-        id: String,
-        #[arg(long, value_name = "display-name")]
-        name: String,
-        #[arg(long, value_name = "path")]
-        disclose_to: Option<PathBuf>,
-    },
-    Bundle {
-        id: String,
-        #[arg(long, value_name = "client-kit.zip")]
-        kit: PathBuf,
-        #[arg(long, value_name = "dir")]
-        out: PathBuf,
-    },
-    #[command(alias = "enroll")]
-    Enrol {
-        id: String,
-        #[arg(long, value_name = "display-name")]
-        name: String,
-        #[arg(long, value_name = "client-kit.zip")]
-        kit: PathBuf,
-        #[arg(long, value_name = "dir")]
-        out: PathBuf,
-    },
+    Invite(InviteArgs),
     Reissue {
         id: String,
-        #[arg(long, value_name = "client-kit.zip", requires = "out")]
-        kit: Option<PathBuf>,
-        #[arg(long, value_name = "dir", requires = "kit")]
-        out: Option<PathBuf>,
-        #[arg(long, value_name = "path")]
-        disclose_to: Option<PathBuf>,
+        #[command(flatten)]
+        terms: InviteTerms,
     },
     Rotate {
         id: String,
@@ -580,6 +549,28 @@ pub(super) enum ClientVerb {
         id: String,
         display_name: String,
     },
+}
+
+#[derive(Args)]
+pub(super) struct InviteArgs {
+    pub(super) id: String,
+    /// The display name; the id when omitted.
+    #[arg(long, value_name = "display-name")]
+    pub(super) name: Option<String>,
+    #[command(flatten)]
+    pub(super) terms: InviteTerms,
+}
+
+#[derive(Args)]
+pub(super) struct InviteTerms {
+    /// How long the invite works: seconds, or a number and s, m, h or d.
+    #[arg(long, value_name = "duration", value_parser = super::invite::expiry_seconds)]
+    pub(super) expires: Option<u64>,
+    /// The joining machine adds no Claude account of its own.
+    #[arg(long)]
+    pub(super) no_account: bool,
+    #[arg(long, value_name = "path")]
+    pub(super) disclose_to: Option<PathBuf>,
 }
 
 #[derive(Subcommand)]

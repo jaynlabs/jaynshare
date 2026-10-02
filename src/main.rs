@@ -11,6 +11,7 @@ mod control;
 mod data_plane;
 mod deploy;
 mod identity;
+mod invite;
 mod launch;
 mod logfile;
 mod logging;

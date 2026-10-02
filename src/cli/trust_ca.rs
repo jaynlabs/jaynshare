@@ -24,8 +24,9 @@ fn installed_ca() -> Result<(std::path::PathBuf, String), Failure> {
             11,
             "cli_not_enrolled",
             format!(
-                "the client installation is incomplete: {} is missing; run the enrollment bundle's installer",
-                ca.display()
+                "the client installation is incomplete: {} is missing; uninstall, then {}",
+                ca.display(),
+                client::JOIN_HINT
             ),
         ));
     }

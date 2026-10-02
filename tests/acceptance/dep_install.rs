@@ -113,12 +113,12 @@ async fn a_clone_build_installs_with_its_client_kit() {
     let key = ReleaseKey::generate();
     linux.plant_key(&key);
     linux.set_ruleset(DROP_INPUT);
-    let good = crate::bundle::good_kit(&linux.root, &key.pkcs8, &key.public);
+    let good = crate::enrol::good_kit(&linux.root, &key.pkcs8, &key.public);
     linux.put(&good, "/root/client-kit.zip");
     let other = ReleaseKey::generate();
     let foreign_dir = linux.root.join("foreign");
     std::fs::create_dir_all(&foreign_dir).expect("foreign kit directory");
-    let foreign = crate::bundle::good_kit(&foreign_dir, &other.pkcs8, &other.public);
+    let foreign = crate::enrol::good_kit(&foreign_dir, &other.pkcs8, &other.public);
     linux.put(&foreign, "/root/foreign-kit.zip");
 
     let (code, stdout, stderr) = linux.cli(&[

@@ -1,6 +1,6 @@
-//! The enrolled client's side of the wall: the installation files, the claim transaction the
-//! engineer's `enrol --bundle` performs, and the client-authenticated reads
-//! (`status`, the post-rotation check).
+//! The enrolled client's side of the wall: the installation files `join`
+//! writes, and the client-authenticated reads (`status`, the post-rotation
+//! check).
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -31,22 +31,25 @@ pub struct ClientInstallation {
     pub no_proxy: Vec<String>,
 }
 
-/// The base-URL listener's trust anchor, installed exactly
-/// when the base-URL origin is `https`.
+/// The trust anchor `join --tls-ca` keeps for a server without a pin.
 pub const BASE_URL_CA_FILE: &str = "base-url-ca.pem";
 
+/// What a machine without an installation does.
+pub const JOIN_HINT: &str =
+    "join a pool with the invite your operator gives you: `jaynshare join <invite>`";
+
 impl ClientInstallation {
-    /// The trust anchor every installed client HTTP call adds for the
-    /// base-URL origin: `base-url-ca.pem` for an unpinned `https`
-    /// origin, nothing otherwise.
+    /// The trust anchor every installed client HTTP call adds to the system
+    /// store for an unpinned `https` origin, when the installation has one.
     pub fn base_url_ca(&self) -> Option<PathBuf> {
         (self.server_identity.is_none() && self.base_url.starts_with("https://"))
             .then(|| self.directory.join(BASE_URL_CA_FILE))
+            .filter(|anchor| anchor.is_file())
     }
 }
 
-/// A missing installation file is named. An `https` base URL requires
-/// `base-url-ca.pem` or a `server_identity` pin. `ca.pem` is the launcher's
+/// A missing installation file is named, and so is a missing
+/// `base-url-ca.pem` that `client.toml` records. `ca.pem` is the launcher's
 /// to require: an enrollment from before base-URL mode was removed lacks it,
 /// while `status` and `ca-update` must still read the installation. Its
 /// `mode` key, if any, is ignored.
@@ -57,7 +60,7 @@ pub fn read_installation() -> Result<ClientInstallation, (i32, String)> {
         (
             11,
             format!(
-                "this machine is not enrolled: {} is missing; run the enrollment bundle's installer",
+                "this machine is not enrolled: {} is missing; {JOIN_HINT}",
                 toml_path.display()
             ),
         )
@@ -77,7 +80,7 @@ pub fn read_installation() -> Result<ClientInstallation, (i32, String)> {
         return Err((
             11,
             format!(
-                "the client installation is incomplete: {} is missing; run the enrollment bundle's installer",
+                "the client installation is incomplete: {} is missing; uninstall, then {JOIN_HINT}",
                 secret.display()
             ),
         ));
@@ -103,17 +106,15 @@ pub fn read_installation() -> Result<ClientInstallation, (i32, String)> {
             ),
         ));
     }
-    if base_url.starts_with("https://") && server_identity.is_none() {
-        let anchor = directory.join(BASE_URL_CA_FILE);
-        if !anchor.is_file() {
-            return Err((
-                11,
-                format!(
-                    "the client installation is incomplete: {} is missing; run the enrollment bundle's installer",
-                    anchor.display()
-                ),
-            ));
-        }
+    let anchor = directory.join(BASE_URL_CA_FILE);
+    if parsed.contains_key("base_url_ca_fingerprint") && !anchor.is_file() {
+        return Err((
+            11,
+            format!(
+                "the client installation is incomplete: {} is missing; uninstall, then {JOIN_HINT}",
+                anchor.display()
+            ),
+        ));
     }
     Ok(ClientInstallation {
         directory,
@@ -153,36 +154,26 @@ pub fn read_secret(installation: &ClientInstallation) -> Result<String, (i32, St
     Ok(trimmed)
 }
 
-/// The `client.toml` document. `ca_fingerprint` is present when the
-/// bundle named one. `base_url_ca_fingerprint` is the base-URL anchor's,
-/// written only for an `https` base URL.
-pub fn client_toml(
-    client_id: &str,
-    display_name: &str,
-    base_url: &str,
-    proxy: Option<&str>,
-    ca_fingerprint: Option<&str>,
-    base_url_ca_fingerprint: Option<&str>,
-    no_proxy: &[String],
-) -> String {
+/// The `client.toml` document of an installation.
+pub fn client_toml(installation: &ClientInstallation) -> String {
     let mut out = String::new();
-    out.push_str(&format!("client_id = {client_id:?}\n"));
-    out.push_str(&format!("display_name = {display_name:?}\n"));
-    out.push_str(&format!("base_url = {base_url:?}\n"));
-    match proxy {
-        Some(url) => out.push_str(&format!("proxy_url = {url:?}\n")),
-        None => out.push_str("proxy_url = \"\"\n"),
-    }
-    match ca_fingerprint {
-        Some(fp) => out.push_str(&format!("ca_fingerprint = {fp:?}\n")),
-        None => out.push_str("ca_fingerprint = \"\"\n"),
-    }
-    if let Some(fp) = base_url_ca_fingerprint {
-        out.push_str(&format!("base_url_ca_fingerprint = {fp:?}\n"));
+    out.push_str(&format!("client_id = {:?}\n", installation.client_id));
+    out.push_str(&format!("display_name = {:?}\n", installation.display_name));
+    out.push_str(&format!("base_url = {:?}\n", installation.base_url));
+    let proxy = installation.proxy.as_deref().unwrap_or_default();
+    out.push_str(&format!("proxy_url = {proxy:?}\n"));
+    let fingerprint = installation.ca_fingerprint.as_deref().unwrap_or_default();
+    out.push_str(&format!("ca_fingerprint = {fingerprint:?}\n"));
+    if let Some(pin) = &installation.server_identity {
+        out.push_str(&format!("server_identity = {pin:?}\n"));
     }
     // The engineer's no-proxy members survive every rewrite (a CA
     // update replaces the fingerprint only).
-    let members: Vec<String> = no_proxy.iter().map(|m| format!("{m:?}")).collect();
+    let members: Vec<String> = installation
+        .no_proxy
+        .iter()
+        .map(|m| format!("{m:?}"))
+        .collect();
     out.push_str(&format!("no_proxy = [{}]\n", members.join(", ")));
     out
 }
@@ -224,55 +215,31 @@ fn failure_message(failure: crate::cli::Failure) -> String {
         .to_string()
 }
 
-/// Stage the executable and the non-secret client files under an
-/// owner-only directory, before the claim. Everything staged lands under the
-/// platform roots (`bin/`, `client/`); the caller removes it on rollback.
-pub fn stage(
-    toml: &str,
-    payload: &[u8],
-    ca_pem: Option<&[u8]>,
-    base_url_ca_pem: Option<&[u8]>,
-) -> Result<PathBuf, String> {
-    let directory = platform::client_directory();
-    crate::state::ensure_private_dir(&directory)
+/// Write the non-secret client files under the owner-only client
+/// directory; the caller removes them on rollback.
+pub fn stage(installation: &ClientInstallation, ca_pem: &[u8]) -> Result<(), String> {
+    let directory = &installation.directory;
+    crate::state::ensure_private_dir(directory)
         .map_err(|e| format!("{}: {e}", directory.display()))?;
-    let bin = platform::client_binary();
-    if let Some(parent) = bin.parent() {
-        crate::state::ensure_private_dir(parent)
-            .map_err(|e| format!("{}: {e}", parent.display()))?;
-    }
-    std::fs::write(&bin, payload).map_err(|e| format!("{}: {e}", bin.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700))
-            .map_err(|e| format!("{}: {e}", bin.display()))?;
-    }
     let toml_path = directory.join("client.toml");
-    std::fs::write(&toml_path, toml).map_err(|e| format!("{}: {e}", toml_path.display()))?;
-    if let Some(ca) = ca_pem {
-        let ca_path = directory.join("ca.pem");
-        std::fs::write(&ca_path, ca).map_err(|e| format!("{}: {e}", ca_path.display()))?;
-    }
-    if let Some(anchor) = base_url_ca_pem {
-        let path = directory.join(BASE_URL_CA_FILE);
-        std::fs::write(&path, anchor).map_err(|e| format!("{}: {e}", path.display()))?;
-    }
-    Ok(directory)
+    std::fs::write(&toml_path, client_toml(installation))
+        .map_err(|e| format!("{}: {e}", toml_path.display()))?;
+    let ca_path = directory.join("ca.pem");
+    std::fs::write(&ca_path, ca_pem).map_err(|e| format!("{}: {e}", ca_path.display()))
 }
 
-/// Write the claimed secret into the staged protected file, then erase
-/// every trace of the staging decision. The atomic replacement is
-/// `state::write_private_atomic` (mode 0600, same directory, rename).
+/// Write the claimed secret into its protected file. The atomic
+/// replacement is `state::write_private_atomic` (mode 0600, same directory,
+/// rename).
 pub fn commit_secret(directory: &Path, secret: &str) -> Result<(), String> {
     let path = directory.join("client-secret");
     crate::state::write_private_atomic(&path, secret.as_bytes())
         .map_err(|e| format!("{}: {e}", path.display()))
 }
 
-/// Remove everything this claim staged (the installation never
-/// committed). The staged binary and directory only exist when we created
-/// them; `enrol` refuses an existing installation, so removal is safe.
+/// Remove everything a join staged (the installation never committed).
+/// The staged binary and directory only exist when it created them: `join`
+/// refuses an existing installation.
 pub fn remove_staged() {
     let _ = std::fs::remove_file(platform::client_binary());
     let _ = std::fs::remove_dir_all(platform::client_directory());
@@ -736,11 +703,24 @@ mod tests {
 
     #[test]
     fn client_toml_holds_the_installation_facts() {
-        let toml = client_toml("mac-1", "Mac One", "http://h:1", None, None, None, &[]);
-        let parsed: Table = toml.parse().expect("parses");
+        let installation = ClientInstallation {
+            directory: PathBuf::new(),
+            client_id: "mac-1".into(),
+            display_name: "Mac One".into(),
+            base_url: "https://h:1".into(),
+            proxy: None,
+            ca_fingerprint: None,
+            server_identity: Some("sha256/pin".into()),
+            no_proxy: vec![],
+        };
+        let parsed: Table = client_toml(&installation).parse().expect("parses");
         assert_eq!(parsed["client_id"], toml::Value::String("mac-1".into()));
         assert!(parsed.get("mode").is_none());
         assert_eq!(parsed["proxy_url"], toml::Value::String(String::new()));
+        assert_eq!(
+            parsed["server_identity"],
+            toml::Value::String("sha256/pin".into())
+        );
         assert_eq!(parsed["no_proxy"], toml::Value::Array(vec![]));
     }
 }

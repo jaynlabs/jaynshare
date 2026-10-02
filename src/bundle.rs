@@ -1,18 +1,15 @@
-//! The enrollment bundle: client-kit verification against the pinned
-//! minisign key, the bundle ZIP tree, its canonical manifest and the
-//! owner-only outputs. Library over a verified kit: the kit is
-//! produced by a repository tool (`tools/make-client-kit.py`) and by the
-//! signed release pipeline; this code does not change between the two.
+//! The client kit: its verification against the pinned minisign key, the
+//! minisign and canonical-JSON primitives the release verifier shares, and
+//! the CA update ZIP. The kit is produced by a repository tool
+//! (`tools/make-client-kit.py`) and by the signed release pipeline; this
+//! code does not change between the two.
 //!
 //! # Kit self-containment
-//! The bundle copies `release.json`, its signature and
-//! `SHA256SUMS` byte-for-byte from a release set that also digests the kit
-//! itself — circular inside a self-contained kit. The kit carries its
-//! own `release.json` whose client-kit entry digests every member; the entry's
-//! file-level length/digest are `null` (they are the outer release's concern),
-//! and `SHA256SUMS` agrees with `release.json` (its bytes hash to the recorded
-//! digest) while carrying the outer artifacts the kit does not build. The
-//! signed release set swaps in without touching this module's checks.
+//! The kit carries its own `release.json`, whose client-kit entry digests
+//! every member; the entry's file-level length/digest are `null` (they are
+//! the outer release's concern), and `SHA256SUMS` agrees with `release.json`
+//! (its bytes hash to the recorded digest) while carrying the outer
+//! artifacts the kit does not build.
 
 use std::collections::BTreeMap;
 use std::io::{Read as _, Write as _};
@@ -22,39 +19,13 @@ use base64::Engine as _;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-/// The bundle root holds exactly these members, in this order.
-pub const BUNDLE_MEMBERS: [&str; 13] = [
-    "manifest.json",
-    "ca.pem",
-    "release.json",
-    "release.json.minisig",
-    "SHA256SUMS",
-    "README.txt",
-    "install-macos.sh",
-    "uninstall-macos.sh",
-    "install-windows.ps1",
-    "uninstall-windows.ps1",
-    "payload/macos-x86_64/jaynshare",
-    "payload/macos-aarch64/jaynshare",
-    "payload/windows-x86_64/jaynshare.exe",
-];
-
-/// The member present exactly when the base URL is `https`,
-/// after `ca.pem` — the base-URL listener trust anchor.
-pub const BASE_URL_CA_MEMBER: &str = "base-url-ca.pem";
-
-/// The release-set members a bundle copies byte-for-byte; the rest
-/// come from the client kit.
+/// The release-set members of a kit.
 const RELEASE_SET_MEMBERS: [&str; 3] = ["release.json", "release.json.minisig", "SHA256SUMS"];
 
-/// The kit members that are not the release set (executables,
-/// installers, uninstallers and platform instructions).
-const KIT_ONLY_MEMBERS: [&str; 8] = [
+/// The kit members that are not the release set: the platform
+/// instructions and the executables.
+const KIT_ONLY_MEMBERS: [&str; 4] = [
     "README.txt",
-    "install-macos.sh",
-    "uninstall-macos.sh",
-    "install-windows.ps1",
-    "uninstall-windows.ps1",
     "payload/macos-x86_64/jaynshare",
     "payload/macos-aarch64/jaynshare",
     "payload/windows-x86_64/jaynshare.exe",
@@ -80,16 +51,6 @@ pub fn native_platform() -> Option<&'static str> {
 
 pub fn native_payload() -> Option<&'static str> {
     native().map(|(_, member)| member)
-}
-
-/// The bundle ZIP's name.
-pub fn bundle_name(client_id: &str, generation: u64) -> String {
-    format!("jaynshare-client-{client_id}-g{generation}.zip")
-}
-
-/// The separate one-time code file's name beside it.
-pub fn code_file_name(client_id: &str, generation: u64) -> String {
-    format!("jaynshare-client-{client_id}-g{generation}.code")
 }
 
 // ------------------------------------------------------------------ the pinned key and minisign
@@ -121,6 +82,23 @@ impl PinnedKey {
     /// The minisign key id, 8 bytes.
     pub fn key_id(&self) -> [u8; 8] {
         self.id
+    }
+
+    /// The key as a minisign public-key file's second line spells it.
+    pub fn encoded(&self) -> String {
+        let mut bytes = b"Ed".to_vec();
+        bytes.extend_from_slice(&self.id);
+        bytes.extend_from_slice(&self.key);
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    }
+
+    /// The minisign public-key file holding this key.
+    pub fn file_text(&self) -> String {
+        format!(
+            "untrusted comment: minisign public key {}\n{}\n",
+            key_id_hex(&self.id),
+            self.encoded()
+        )
     }
 
     /// The active release key: `<config root>/release.pub` when
@@ -365,20 +343,12 @@ pub struct MemberBinding {
 /// A client kit that passed signature verification.
 #[derive(Debug)]
 pub struct VerifiedKit {
-    /// The release version and source commit (carried into the manifest).
     pub version: String,
-    pub commit: String,
-    /// The kit's own file name and digest, which the bundle manifest
-    /// records so a bundle names the kit it was packaged from.
-    pub file: String,
-    pub sha256: String,
     /// Bytes of every kit member, keyed by path.
     pub members: BTreeMap<String, Vec<u8>>,
 }
 
 impl VerifiedKit {
-    /// The bundle copies release-set members byte-for-byte and the
-    /// rest byte-for-byte from the kit.
     pub fn member(&self, path: &str) -> Option<&[u8]> {
         self.members.get(path).map(Vec::as_slice)
     }
@@ -524,212 +494,8 @@ pub fn verify_kit_zip(path: &Path, key: &PinnedKey) -> Result<VerifiedKit, Strin
     }
     Ok(VerifiedKit {
         version: release["version"].as_str().unwrap_or_default().to_string(),
-        commit: release["commit"].as_str().unwrap_or_default().to_string(),
-        file: path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default(),
-        sha256: std::fs::read(path)
-            .map(|bytes| sha256_hex(&bytes))
-            .map_err(|e| {
-                format!(
-                    "{}: cannot re-read the kit to digest it: {e}",
-                    path.display()
-                )
-            })?,
         members,
     })
-}
-
-// ------------------------------------------------------------------ the bundle manifest
-
-/// The bundle manifest's facts, as written and as read back.
-#[derive(Debug, Clone)]
-pub struct BundleManifest {
-    pub client_id: String,
-    pub display_name: String,
-    pub generation: u64,
-    pub base_url: String,
-    pub proxy: Option<String>,
-    pub pending_expires_at: Option<String>,
-    /// SHA-256 of the `ca.pem` member; `None` when the pool has no CA
-    /// (MITM never enabled) and the member is written empty.
-    pub ca_sha256: Option<String>,
-    pub ca_fingerprint: Option<String>,
-    /// `base-url-ca.pem`'s SHA-256 and certificate
-    /// fingerprint, present exactly when the base URL is `https`.
-    pub base_url_ca_sha256: Option<String>,
-    pub base_url_ca_fingerprint: Option<String>,
-    pub release_version: String,
-    pub release_commit: String,
-    /// The client kit this bundle was packaged from.
-    pub kit_file: String,
-    pub kit_sha256: String,
-    /// `(target, path)` of every supported client payload.
-    pub payloads: Vec<(String, String)>,
-}
-
-impl BundleManifest {
-    pub fn to_value(&self, kit: &VerifiedKit) -> Value {
-        let payload_entries: Vec<Value> = self
-            .payloads
-            .iter()
-            .map(|(target, path)| {
-                let digest = kit.member(path).map(sha256_hex).unwrap_or_default();
-                json!({ "target": target, "path": path, "sha256": digest })
-            })
-            .collect();
-        let mut value = json!({
-            "schema_version": 1,
-            "client_id": self.client_id,
-            "display_name": self.display_name,
-            "generation": self.generation,
-            "origins": { "base_url": self.base_url, "proxy": self.proxy },
-            "pending_expires_at": self.pending_expires_at,
-            "ca": { "sha256": self.ca_sha256, "fingerprint": self.ca_fingerprint },
-            "release": { "version": self.release_version, "commit": self.release_commit },
-            "kit": { "file": self.kit_file, "sha256": self.kit_sha256 },
-            "payloads": payload_entries,
-        });
-        if self.base_url_ca_sha256.is_some() || self.base_url_ca_fingerprint.is_some() {
-            value["base_url_ca"] = json!({
-                "sha256": self.base_url_ca_sha256,
-                "fingerprint": self.base_url_ca_fingerprint,
-            });
-        }
-        value
-    }
-
-    pub fn from_value(value: &Value) -> Result<Self, String> {
-        let string = |pointer: &str| {
-            value
-                .pointer(pointer)
-                .and_then(Value::as_str)
-                .ok_or_else(|| format!("manifest.json: {pointer} missing"))
-                .map(String::from)
-        };
-        Ok(Self {
-            client_id: string("/client_id")?,
-            display_name: value["display_name"]
-                .as_str()
-                .unwrap_or_default()
-                .to_string(),
-            generation: value["generation"]
-                .as_u64()
-                .ok_or("manifest.json: /generation missing")?,
-            base_url: string("/origins/base_url")?,
-            proxy: value["origins"]["proxy"].as_str().map(String::from),
-            pending_expires_at: value["pending_expires_at"].as_str().map(String::from),
-            ca_sha256: value["ca"]["sha256"].as_str().map(String::from),
-            ca_fingerprint: value["ca"]["fingerprint"].as_str().map(String::from),
-            base_url_ca_sha256: value["base_url_ca"]["sha256"].as_str().map(String::from),
-            base_url_ca_fingerprint: value["base_url_ca"]["fingerprint"]
-                .as_str()
-                .map(String::from),
-            release_version: value["release"]["version"]
-                .as_str()
-                .unwrap_or_default()
-                .to_string(),
-            release_commit: value["release"]["commit"]
-                .as_str()
-                .unwrap_or_default()
-                .to_string(),
-            kit_file: value["kit"]["file"]
-                .as_str()
-                .unwrap_or_default()
-                .to_string(),
-            kit_sha256: string("/kit/sha256")?,
-            payloads: value["payloads"]
-                .as_array()
-                .cloned()
-                .unwrap_or_default()
-                .iter()
-                .filter_map(|p| {
-                    Some((
-                        p["target"].as_str()?.to_string(),
-                        p["path"].as_str()?.to_string(),
-                    ))
-                })
-                .collect(),
-        })
-    }
-}
-
-// ------------------------------------------------------------------ packaging and extraction
-
-/// Everything that goes into the bundle ZIP besides the code file.
-pub struct BundleInputs<'a> {
-    pub manifest: &'a BundleManifest,
-    pub kit: &'a VerifiedKit,
-    /// The CA certificate PEM, when the pool has one; `None` writes the
-    /// member empty (MITM never enabled, so the CA facts are null).
-    pub ca_pem: Option<&'a str>,
-    /// The base-URL trust anchor PEM, for an `https` base URL only.
-    pub base_url_ca_pem: Option<&'a str>,
-}
-
-/// Writes the bundle ZIP to `destination` (which must not exist) and returns
-/// the manifest bytes as they were written. The caller owns the owner-only
-/// directory, the code file and the rollback.
-pub fn write_bundle_zip(destination: &Path, inputs: &BundleInputs<'_>) -> Result<Vec<u8>, String> {
-    let manifest_value = inputs.manifest.to_value(inputs.kit);
-    let manifest_bytes = canonical_json(&manifest_value).into_bytes();
-    // The archive is owner-only from the moment it exists, so
-    // the bytes are never briefly readable by another user on the host.
-    let mut open = std::fs::OpenOptions::new();
-    open.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        open.mode(0o600);
-    }
-    let file = open
-        .open(destination)
-        .map_err(|e| format!("{}: cannot create the bundle: {e}", destination.display()))?;
-    let mut zip = zip::ZipWriter::new(file);
-    let options: zip::write::SimpleFileOptions = zip::write::SimpleFileOptions::default();
-    let written = |zip: &mut zip::ZipWriter<std::fs::File>| -> Result<(), String> {
-        let mut add = |name: &str, bytes: &[u8]| -> Result<(), String> {
-            zip.start_file(name, options)
-                .and_then(|_| zip.write_all(bytes).map_err(zip::result::ZipError::from))
-                .map_err(|e| format!("archive member {name:?}: {e}"))
-        };
-        add("manifest.json", &manifest_bytes)?;
-        // The pool has no CA (MITM never enabled), so the member is empty.
-        add("ca.pem", inputs.ca_pem.unwrap_or_default().as_bytes())?;
-        if let Some(anchor) = inputs.base_url_ca_pem {
-            add(BASE_URL_CA_MEMBER, anchor.as_bytes())?;
-        }
-        for name in ["release.json", "release.json.minisig", "SHA256SUMS"] {
-            let bytes = inputs
-                .kit
-                .member(name)
-                .ok_or_else(|| format!("the verified kit lost {name:?}"))?;
-            add(name, bytes)?;
-        }
-        for name in BUNDLE_MEMBERS {
-            if name == "manifest.json" || name == "ca.pem" || RELEASE_SET_MEMBERS.contains(&name) {
-                continue;
-            }
-            let bytes = inputs
-                .kit
-                .member(name)
-                .ok_or_else(|| format!("the verified kit lost {name:?}"))?;
-            add(name, bytes)?;
-        }
-        Ok(())
-    };
-    if let Err(e) = written(&mut zip) {
-        drop(zip);
-        let _ = std::fs::remove_file(destination);
-        return Err(e);
-    }
-    // The central directory; the underlying file is closed when the writer drops.
-    if let Err(e) = zip.finish() {
-        let _ = std::fs::remove_file(destination);
-        return Err(format!("cannot finish the bundle: {e}"));
-    }
-    Ok(manifest_bytes)
 }
 
 /// Everything the CA update ZIP carries. No enrolment code, no
@@ -805,182 +571,6 @@ Compare the fingerprint with the operator through an independent channel before 
         return Err(format!("cannot finish the CA update bundle: {e}"));
     }
     Ok((destination, manifest))
-}
-
-/// Over the extracted tree, before any member is read: every entry, at any
-/// depth, is a plain file or directory the member list names — never a
-/// symbolic link (which `read` would follow out of the bundle), never an
-/// extra file.
-fn check_bundle_tree(directory: &Path) -> Result<(), String> {
-    let files: Vec<&str> = BUNDLE_MEMBERS
-        .iter()
-        .copied()
-        .chain([BASE_URL_CA_MEMBER])
-        .collect();
-    let mut pending = vec![(directory.to_path_buf(), String::new())];
-    while let Some((dir, prefix)) = pending.pop() {
-        let entries = std::fs::read_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-        for entry in entries {
-            let entry = entry.map_err(|e| format!("{}: {e}", dir.display()))?;
-            let name = format!("{prefix}{}", entry.file_name().to_string_lossy());
-            let kind = entry
-                .file_type()
-                .map_err(|e| format!("{}: {e}", entry.path().display()))?;
-            if kind.is_symlink() {
-                return Err(format!(
-                    "the extracted bundle's {name:?} is a symbolic link"
-                ));
-            }
-            if kind.is_dir() && files.iter().any(|f| f.starts_with(&format!("{name}/"))) {
-                pending.push((entry.path(), format!("{name}/")));
-            } else if !(kind.is_file() && files.contains(&name.as_str())) {
-                return Err(format!(
-                    "the extracted bundle carries unlisted file {name:?}"
-                ));
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Verification against an extracted bundle directory: exactly the listed members, the
-/// signature, the SHA256SUMS agreement, every static file against its member
-/// map, every payload against `manifest.json`, and the CA digest and
-/// fingerprint against the included certificate — and, for an `https` base
-/// URL, `base-url-ca.pem` against its own. Returns the manifest facts.
-pub fn verify_bundle_dir(directory: &Path, key: &PinnedKey) -> Result<BundleManifest, String> {
-    check_bundle_tree(directory)?;
-    let mut files = BTreeMap::new();
-    for name in BUNDLE_MEMBERS {
-        let path = directory.join(name);
-        let bytes = std::fs::read(&path)
-            .map_err(|_| format!("the extracted bundle is missing {name:?}"))?;
-        files.insert(name.to_string(), bytes);
-    }
-    verify_release_signature(&files["release.json"], &files["release.json.minisig"], key)?;
-    let release: Value =
-        serde_json::from_slice(&files["release.json"]).map_err(|e| format!("release.json: {e}"))?;
-    let sums_digest = release["sha256sums_sha256"]
-        .as_str()
-        .ok_or("release.json: sha256sums_sha256 missing")?;
-    if sha256_hex(&files["SHA256SUMS"]) != sums_digest {
-        return Err("SHA256SUMS: disagrees with release.json".into());
-    }
-    let bindings: Vec<MemberBinding> = release["artifacts"]
-        .as_array()
-        .and_then(|a| {
-            a.iter()
-                .find(|e| e["purpose"] == json!("client-kit"))
-                .cloned()
-        })
-        .and_then(|e| e["members"].as_array().cloned())
-        .unwrap_or_default()
-        .iter()
-        .filter_map(|m| {
-            Some(MemberBinding {
-                path: m["path"].as_str()?.to_string(),
-                length: m["length"].as_u64()?,
-                sha256: m["sha256"].as_str()?.to_string(),
-            })
-        })
-        .collect();
-    for name in KIT_ONLY_MEMBERS {
-        let Some(binding) = bindings.iter().find(|b| b.path == name) else {
-            continue; // the release set binds what it binds; the map is complete
-        };
-        let bytes = &files[name];
-        if bytes.len() as u64 != binding.length || sha256_hex(bytes) != binding.sha256 {
-            return Err(format!("{name}: does not match the signed member map"));
-        }
-    }
-    let manifest: Value = serde_json::from_slice(&files["manifest.json"])
-        .map_err(|e| format!("manifest.json: {e}"))?;
-    let facts = BundleManifest::from_value(&manifest)?;
-    for (target, path) in &facts.payloads {
-        let Some(bytes) = files.get(path.as_str()) else {
-            return Err(format!(
-                "manifest.json: payload {path:?} for {target} is absent"
-            ));
-        };
-        let expected = manifest["payloads"]
-            .as_array()
-            .and_then(|a| {
-                a.iter()
-                    .find(|p| p["path"] == json!(path))
-                    .and_then(|p| p["sha256"].as_str())
-            })
-            .unwrap_or_default();
-        if sha256_hex(bytes) != expected {
-            return Err(format!(
-                "{path}: payload does not match the manifest's digest"
-            ));
-        }
-    }
-    // The CA digest and fingerprint against the included certificate.
-    let ca = String::from_utf8_lossy(&files["ca.pem"]);
-    match (facts.ca_sha256.as_deref(), facts.ca_fingerprint.as_deref()) {
-        (None, None) => {
-            if !ca.trim().is_empty() {
-                return Err("ca.pem: the manifest names no CA but the bundle carries one".into());
-            }
-        }
-        (Some(digest), recorded_fingerprint) => {
-            if sha256_hex(ca.as_bytes()) != digest {
-                return Err("ca.pem: digest does not match the manifest's".into());
-            }
-            if let Some(expected) = recorded_fingerprint
-                && fingerprint(&ca).is_ok_and(|got| got != expected)
-            {
-                return Err("ca.pem: fingerprint does not match the manifest's".into());
-            }
-        }
-        _ => return Err("manifest.json: the CA digest and fingerprint are half-specified".into()),
-    }
-    // The base-URL anchor exactly when the base URL is `https`.
-    let anchor = std::fs::read(directory.join(BASE_URL_CA_MEMBER)).ok();
-    let https = facts.base_url.starts_with("https://");
-    match (https, anchor) {
-        (false, None) => {
-            if facts.base_url_ca_sha256.is_some() || facts.base_url_ca_fingerprint.is_some() {
-                return Err("manifest.json: an http base URL carries no base-URL CA facts".into());
-            }
-        }
-        (false, Some(_)) => {
-            return Err(format!(
-                "the extracted bundle carries unlisted file {BASE_URL_CA_MEMBER:?}"
-            ));
-        }
-        (true, None) => {
-            return Err(format!(
-                "the extracted bundle is missing {BASE_URL_CA_MEMBER:?}"
-            ));
-        }
-        (true, Some(bytes)) => {
-            let (Some(digest), Some(recorded)) = (
-                facts.base_url_ca_sha256.as_deref(),
-                facts.base_url_ca_fingerprint.as_deref(),
-            ) else {
-                return Err(
-                    "manifest.json: the base-URL CA digest and fingerprint are missing".into(),
-                );
-            };
-            if sha256_hex(&bytes) != digest {
-                return Err(format!(
-                    "{BASE_URL_CA_MEMBER}: digest does not match the manifest's"
-                ));
-            }
-            if fingerprint(&String::from_utf8_lossy(&bytes))
-                .ok()
-                .as_deref()
-                != Some(recorded)
-            {
-                return Err(format!(
-                    "{BASE_URL_CA_MEMBER}: fingerprint does not match the manifest's"
-                ));
-            }
-        }
-    }
-    Ok(facts)
 }
 
 #[cfg(test)]

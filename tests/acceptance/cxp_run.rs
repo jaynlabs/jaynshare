@@ -15,9 +15,9 @@ use std::time::Duration;
 use std::time::Instant;
 
 /// No launch points Claude Code at the base URL: Claude Code trusts
-/// only the proxy's CA, replacing an inherited anchor, while an `https` base
-/// URL still needs the `base-url-ca.pem` for the launcher's own calls,
-/// and without it the enrollment is incomplete.
+/// only the proxy's CA, replacing an inherited anchor, while an unpinned
+/// `https` base URL trusts the `base-url-ca.pem` for the launcher's own
+/// calls, and without it the system store alone.
 #[tokio::test(flavor = "multi_thread")]
 async fn claude_code_never_gets_the_base_url() {
     let _leak_sweep = crate::leaks::LeakGuard::default();
@@ -76,13 +76,11 @@ async fn claude_code_never_gets_the_base_url() {
         "base-url-ca.pem is the launcher's anchor, not Claude Code's"
     );
 
-    // Without the anchor the https enrollment is
-    // incomplete, and the refusal names the missing file.
+    // Without the anchor only the system store is trusted, which does not
+    // know the front's CA.
     std::fs::remove_file(&anchor).expect("move the anchor aside");
-    let (code, _, stderr) =
-        machine.jaynshare(&["claude", "--auto", "--", "-p", "hello"], &[], None);
-    assert_eq!(code, 11, "{stderr}");
-    assert!(stderr.contains("base-url-ca.pem"), "{stderr}");
+    let (code, _, stderr) = machine.jaynshare(&["status", "--client"], &[], None);
+    assert_eq!(code, 4, "{stderr}");
 }
 
 /// Two intent flags in one launch are refused by
@@ -295,7 +293,7 @@ async fn no_claude_on_the_path_refuses() {
 }
 
 /// Each missing file is named
-/// with the installer to re-run, and the secret never appears; restoring the
+/// with the join to run, and the secret never appears; restoring the
 /// file launches again. Without `ca.pem` the launch is impossible
 /// (exit 14) and the refusal names the file and the CA update that installs
 /// it.
@@ -316,8 +314,8 @@ async fn each_missing_client_file_is_named() {
         );
         assert!(stderr.contains(name), "the missing file is named: {stderr}");
         assert!(
-            stderr.contains("install"),
-            "the installer is named: {stderr}"
+            stderr.contains("jaynshare join"),
+            "the join is named: {stderr}"
         );
         assert!(
             !stderr.contains(&machine.client.secret),
