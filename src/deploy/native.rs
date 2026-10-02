@@ -892,11 +892,11 @@ fn ask_listen(
 /// identity, and the service's state file named outright, so root reading
 /// this configuration finds the identity key the service wrote.
 fn configuration_text(listen: SocketAddr, how: &str) -> String {
+    let state_file = state_root().join("state.json").display().to_string();
     format!(
         "# Written by `jaynshare server install`. Listener address: {how}.\n\
          version = 1\n\n[data_plane]\nlisten = \"{listen}\"\ntls = \"identity\"\n\n\
-         [storage]\nstate_file = \"{}\"\n",
-        state_root().join("state.json").display()
+         [storage]\nstate_file = {state_file:?}\n"
     )
 }
 
