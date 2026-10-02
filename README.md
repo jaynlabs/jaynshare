@@ -213,7 +213,10 @@ cargo fmt --all -- --check
 
 CI runs the above; see `.github/workflows/ci.yml`. The acceptance tests that
 need Linux run in Docker and are skipped where no Docker daemon answers.
-CI builds the Linux musl binary through the Cargo cache and sets
+CI caches Cargo's registry and build directories, including incremental
+compiler data but excluding acceptance outputs. Its optimized test binaries
+disable LTO; published releases keep the release profile in `Cargo.toml`.
+CI builds the Linux musl binary through this cache and sets
 `JAYNSHARE_LINUX_BIN` to reuse it in Docker. Locally, set that variable to an
 existing musl build to avoid the container build. A focused
 `cargo test --test acceptance <scenario>` uses the debug binary without
