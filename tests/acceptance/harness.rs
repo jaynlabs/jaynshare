@@ -1494,7 +1494,7 @@ impl Instance {
             .env("PATH", self.root.join("no-browser-on-path"))
             // The managed store the server reads is this root's
             // home, never the developer's.
-            .env("HOME", self.root.join("home"));
+            .envs(platform_home(&self.root.join("home")));
         for (name, value) in &self.server_env {
             command.env(name, value);
         }
@@ -1853,11 +1853,11 @@ impl Instance {
             // The developer's editor never opens on a fixture file.
             .env_remove("VISUAL")
             .env_remove("EDITOR")
-            // The platform paths resolve under `$HOME`, so an
-            // inherited one puts the developer's own client directory under a
-            // verb that writes it — `secret set` did exactly that. The
-            // scenario's own home is the floor; `isolated_env` still overrides.
-            .env("HOME", self.root.join("home"))
+            // An inherited home puts the developer's own client directory
+            // under a verb that writes it — `secret set` did exactly that.
+            // The scenario's own home is the floor; `isolated_env` still
+            // overrides.
+            .envs(platform_home(&self.root.join("home")))
             .envs(env.iter().copied())
             .stdin(if stdin.is_some() {
                 Stdio::piped()
@@ -2688,10 +2688,10 @@ fn claim_scenario_root(scenario: &str) -> PathBuf {
     root
 }
 
-/// The environment that isolates a CLI run from the developer's machine:
-/// a scratch home (so the platform paths resolve under it, the Windows
-/// profile included) and no `JAYNSHARE_CONFIG` unless the scenario sets one.
-pub(crate) fn isolated_env(home: &Path) -> Vec<(String, String)> {
+/// Every variable the platform paths resolve from, pointed under `home`:
+/// an inherited `XDG_CONFIG_HOME` or `APPDATA` would otherwise send a
+/// server or a CLI run to the developer's own directories.
+pub(crate) fn platform_home(home: &Path) -> Vec<(String, String)> {
     let mut env = vec![
         ("HOME".into(), home.display().to_string()),
         (
@@ -2705,6 +2705,18 @@ pub(crate) fn isolated_env(home: &Path) -> Vec<(String, String)> {
     ];
     if cfg!(windows) {
         env.extend(crate::profile_fx::windows_profile(home));
+    }
+    env
+}
+
+/// The environment that isolates a CLI run from the developer's machine:
+/// a scratch home (so the platform paths resolve under it, the Windows
+/// profile included), the fake Windows `Path` editor, and no
+/// `JAYNSHARE_CONFIG` unless the scenario sets one.
+pub(crate) fn isolated_env(home: &Path) -> Vec<(String, String)> {
+    let mut env = platform_home(home);
+    if cfg!(windows) {
+        env.extend(crate::profile_fx::path_editor(home).env());
     }
     env
 }

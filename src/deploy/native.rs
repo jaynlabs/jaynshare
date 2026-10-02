@@ -2709,7 +2709,10 @@ mod tests {
             .expect("the generated configuration is valid");
         assert_eq!(config.data_plane.listen, listen);
         assert_eq!(config.data_plane.tls, crate::config::ListenerTls::Identity);
-        assert_eq!(config.storage.state_file, state_root().join("state.json"));
+        assert_eq!(
+            config.storage.state_file,
+            crate::config::absolute(&state_root().join("state.json"))
+        );
         assert!(config.mitm.enabled);
         assert_eq!(config.mitm.listen.to_string(), "100.101.102.103:17422");
         let ipv6: SocketAddr = "[fd00::5]:17421".parse().unwrap();

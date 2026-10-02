@@ -1484,7 +1484,7 @@ fn serve_once(root: &std::path::Path, listen: u16, proxy: Option<u16>) -> (i32, 
     let output = Command::new(binary())
         .args(["--config", &config.display().to_string(), "serve"])
         .env("PATH", root.join("no-browser-on-path"))
-        .env("HOME", root.join("home"))
+        .envs(crate::harness::platform_home(&root.join("home")))
         .stdin(Stdio::null())
         .output()
         .expect("start the binary under test");

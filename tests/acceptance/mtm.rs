@@ -64,7 +64,7 @@ fn spawn(scenario: &str, faults: Option<std::sync::Arc<crate::faults::Faults>>) 
     command
         .args(["--config", &config.display().to_string(), "serve"])
         .env("PATH", root.join("no-browser-on-path"))
-        .env("HOME", root.join("home"))
+        .envs(crate::harness::platform_home(&root.join("home")))
         .stdout(Stdio::from(
             fs::File::create(root.join("stdout.txt")).expect("stdout file"),
         ))
@@ -147,7 +147,7 @@ impl MitmInstance {
         command
             .args(["--config", &self.config.display().to_string(), "serve"])
             .env("PATH", self.root.join("no-browser-on-path"))
-            .env("HOME", self.root.join("home"))
+            .envs(crate::harness::platform_home(&self.root.join("home")))
             .stdout(Stdio::from(
                 fs::File::create(self.root.join("stdout.txt")).expect("stdout file"),
             ))

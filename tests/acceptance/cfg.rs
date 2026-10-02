@@ -47,7 +47,7 @@ fn write_config(root: &Path, extra: &str) -> PathBuf {
 fn serve_fails(root: &Path, config: &Path) -> (i32, String) {
     let output = Command::new(binary())
         .args(["--config", &config.display().to_string(), "serve"])
-        .env("HOME", root.join("home"))
+        .envs(crate::harness::platform_home(&root.join("home")))
         .env("PATH", root.join("no-browser-on-path"))
         .output()
         .expect("run serve");
@@ -63,7 +63,7 @@ fn run(root: &Path, config: &Path, args: &[&str]) -> (i32, String, String) {
     full.extend_from_slice(args);
     let output = Command::new(binary())
         .args(&full)
-        .env("HOME", root.join("home"))
+        .envs(crate::harness::platform_home(&root.join("home")))
         .env_remove("JAYNSHARE_CONFIG")
         .env_remove("VISUAL")
         .env_remove("EDITOR")
@@ -1745,7 +1745,7 @@ fn spawn_serve(root: &Path, config: &Path) -> std::process::Child {
     let err = fs::File::create(root.join("stderr.txt")).expect("stderr");
     let mut child = Command::new(binary())
         .args(["--config", &config.display().to_string(), "serve"])
-        .env("HOME", root.join("home"))
+        .envs(crate::harness::platform_home(&root.join("home")))
         .env("PATH", root.join("no-browser-on-path"))
         .stdout(Stdio::from(out))
         .stderr(Stdio::from(err))

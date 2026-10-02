@@ -17,7 +17,7 @@ pub(crate) fn path_editor(home: &Path) -> FakeTools {
 
 /// The Windows variables that move the profile under `home`.
 pub(crate) fn windows_profile(home: &Path) -> Vec<(String, String)> {
-    let profile = vec![
+    vec![
         ("USERPROFILE".into(), home.display().to_string()),
         (
             "APPDATA".into(),
@@ -27,8 +27,7 @@ pub(crate) fn windows_profile(home: &Path) -> Vec<(String, String)> {
             "LOCALAPPDATA".into(),
             local_app_data(home).display().to_string(),
         ),
-    ];
-    [profile, path_editor(home).env()].concat()
+    ]
 }
 
 /// The profile's local folder (`LOCALAPPDATA`).
