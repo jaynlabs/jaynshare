@@ -15,7 +15,7 @@ use crate::enrol::{
 use crate::fake_tools::FakeTools;
 use crate::harness::{
     Duration, Instant, Setup, StatusCode, Value, binary, cli_pty_answers, cli_raw, isolated_env,
-    json, private_dir, pty_answers, scratch, send, validate,
+    json, private_dir, scratch, send, validate,
 };
 use crate::own::callback_request;
 use crate::profile_fx::path_editor;
@@ -229,12 +229,14 @@ async fn shell_bootstrap_joins_a_local_server() {
 }
 
 /// A release carrying this build, served with its `install.sh`.
+#[cfg(target_os = "macos")]
 struct Bootstrap {
     script: PathBuf,
     origin: String,
     ca: PathBuf,
 }
 
+#[cfg(target_os = "macos")]
 impl Bootstrap {
     async fn serve(scenario: &str) -> Self {
         use crate::release_fx::{
@@ -291,7 +293,7 @@ async fn a_piped_shell_bootstrap_asks_on_the_terminal() {
     .concat();
     let no_proxy = ["HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"]
         .map(|name| (name.to_string(), String::new()));
-    let (exit, transcript) = pty_answers(
+    let (exit, transcript) = crate::harness::pty_answers(
         "join-piped-bootstrap-terminal",
         &argv,
         &[isolated_env(&home), no_proxy.to_vec()].concat(),

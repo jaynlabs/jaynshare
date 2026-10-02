@@ -504,6 +504,7 @@ mod tests {
             c.diagnostics.wire_capture_directory.as_deref(),
             Some(cwd.join("../capture-custom").as_path())
         );
+        #[cfg(unix)]
         assert_eq!(
             absolute(Path::new("/etc/jaynshare")),
             PathBuf::from("/etc/jaynshare")
@@ -620,7 +621,7 @@ max_bytes = 1024
         let c = parse_str("version = 1\n[storage]\nstate_file = \"~/state.json\"\n").unwrap();
         assert_eq!(
             c.storage.state_file,
-            PathBuf::from("/etc/jaynshare/~/state.json")
+            absolute(Path::new("/etc/jaynshare")).join("~/state.json")
         );
     }
 

@@ -1292,7 +1292,7 @@ mod tests {
         );
         assert!(checks.iter().all(|c| c.passed), "{checks:?}");
         assert!(
-            checks[4].message.contains("6 artifacts verified"),
+            checks[4].message.contains("9 artifacts verified"),
             "{checks:?}"
         );
     }
