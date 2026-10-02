@@ -237,7 +237,7 @@ pub fn mode_summary(path: &Path) -> Option<String> {
 pub fn protect_windows(path: &Path) -> Result<(), String> {
     let (user_name, user_sid) = windows_user()?;
     let flags = if path.is_dir() { ":(OI)(CI)F" } else { ":F" };
-    let user_flags = format!("{user_sid}{flags}");
+    let user_flags = format!("*{user_sid}{flags}");
     let system_flags = format!("*S-1-5-18{flags}");
     let out = icacls(&[
         path.as_os_str(),
