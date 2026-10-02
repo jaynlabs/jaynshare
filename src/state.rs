@@ -322,14 +322,7 @@ fn judge_acl(readback: &str, user_sid: &str, user_name: &str) -> Result<(), Stri
     fn tail(s: &str) -> &str {
         s.rfind('\\').map(|i| &s[i + 1..]).unwrap_or(s)
     }
-    let user_allowed = |principal: &str| {
-        principal.eq_ignore_ascii_case(user_sid)
-            || principal.eq_ignore_ascii_case(user_name)
-            || tail(principal).eq_ignore_ascii_case(tail(user_name))
-    };
-    let system_allowed = |principal: &str| {
-        principal.eq_ignore_ascii_case("NT AUTHORITY\\SYSTEM") || principal == "*S-1-5-18"
-    };
+    let mut first_entry = true;
     for line in readback.lines() {
         let line = line.trim();
         if line.is_empty() {
@@ -338,15 +331,29 @@ fn judge_acl(readback: &str, user_sid: &str, user_name: &str) -> Result<(), Stri
         if line.starts_with("Successfully processed") {
             break;
         }
-        // ACE lines end the principal with `:(`; the first line is the path.
+        // An entry ends its principal with `:(`. icacls prints the first
+        // entry after the path, on the path's line, so there the principal
+        // is what the line ends with.
         let Some(at) = line.find(":(") else {
             continue;
         };
         let principal = line[..at].trim();
+        let after_path = std::mem::replace(&mut first_entry, false);
+        let names = |name: &str| {
+            principal.eq_ignore_ascii_case(name)
+                || after_path
+                    && principal
+                        .to_ascii_lowercase()
+                        .ends_with(&format!(" {}", name.to_ascii_lowercase()))
+        };
         if line[at..].contains("(I)") {
             return Err(format!("an inherited access entry for {principal} remains"));
         }
-        if !user_allowed(principal) && !system_allowed(principal) {
+        let user = names(user_sid)
+            || names(user_name)
+            || tail(principal).eq_ignore_ascii_case(tail(user_name));
+        let system = names("NT AUTHORITY\\SYSTEM") || principal == "*S-1-5-18";
+        if !user && !system {
             return Err(format!("the ACL grants access to {principal}"));
         }
     }
@@ -465,10 +472,10 @@ mod tests {
 
     // unix-runnable: the `icacls` read-back judge accepts
     // exactly the user and `NT AUTHORITY\SYSTEM`, and names anything else.
+    // icacls prints the first entry on the path's line, the rest under it.
     const PRIVATE_READBACK: &str = concat!(
-        "C:\\Users\\max\\AppData\\Jaynshare\\client\\client-secret\n",
-        "DESKTOP-ABC\\max:(F)\n",
-        "NT AUTHORITY\\SYSTEM:(F)\n",
+        "C:\\Users\\max\\My Files\\client-secret NT AUTHORITY\\SYSTEM:(F)\n",
+        "                                       DESKTOP-ABC\\max:(F)\n",
         "\n",
         "Successfully processed 1 files; Failed processing 0 files\n",
     );
@@ -480,6 +487,9 @@ mod tests {
         // The bare user name (no host prefix) is the same principal.
         judge_acl(PRIVATE_READBACK, "S-1-5-21-1-2-3-1001", "max")
             .expect("the user is the same principal without the host");
+        let user_first = "C:\\x\\client-secret DESKTOP-ABC\\max:(F)\n   NT AUTHORITY\\SYSTEM:(F)\n";
+        judge_acl(user_first, "S-1-5-21-1-2-3-1001", "DESKTOP-ABC\\max")
+            .expect("either entry may come first");
     }
 
     #[test]
@@ -489,6 +499,10 @@ mod tests {
             PRIVATE_READBACK.replace("\nSuccessfully", &format!("\n{open}\nSuccessfully"));
         let err = judge_acl(&readback, "S-1-5-21-1-2-3-1001", "DESKTOP-ABC\\max")
             .expect_err("BUILTIN\\Users is an extra principal");
+        assert!(err.contains("BUILTIN\\Users"), "{err}");
+        let first = format!("C:\\x\\client-secret {open}\n   DESKTOP-ABC\\max:(F)\n");
+        let err = judge_acl(&first, "S-1-5-21-1-2-3-1001", "DESKTOP-ABC\\max")
+            .expect_err("an extra principal on the path's line too");
         assert!(err.contains("BUILTIN\\Users"), "{err}");
     }
 
