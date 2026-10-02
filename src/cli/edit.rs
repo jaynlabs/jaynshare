@@ -1250,6 +1250,7 @@ mod tests {
         assert_eq!(result["path"], out.display().to_string());
         assert!(line.contains("server install"));
         assert_eq!(std::fs::read(&out).expect("bytes"), TEMPLATE.as_bytes());
+        #[cfg(unix)]
         assert_eq!(state::mode_summary(&out), Some("0600".into()));
 
         let refusal = new(&out).unwrap_err().error;
