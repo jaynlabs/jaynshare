@@ -1245,10 +1245,10 @@ async fn every_exit_row_once_and_novel_slugs_by_class() {
     );
 }
 
-/// A secret enters by hidden prompt, `--stdin` and `--file`; a
-/// world-readable file is refused; 64 KiB + 1 on standard input is refused;
-/// no terminal and no channel is exit 2 naming the three; the secret appears
-/// in no argv, file the CLI writes, log or message.
+/// A secret enters by hidden prompt, `--stdin` and `--file`; 64 KiB + 1 on
+/// standard input is refused; no terminal and no channel is exit 2 naming
+/// the three; the secret appears in no argv, file the CLI writes, log or
+/// message.
 // Driven through a Unix pseudo-terminal.
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
@@ -1328,37 +1328,6 @@ async fn secret_channels_and_no_leak() {
         );
     }
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let open = instance.root.join("open-key");
-        fs::write(&open, &file_key).expect("write");
-        crate::leaks::register_planted(&open);
-        fs::set_permissions(&open, fs::Permissions::from_mode(0o644)).expect("chmod");
-        let before = instance.state_digest();
-        let (code, _, stderr) = instance.cli(
-            &[
-                "account",
-                "add",
-                "--api-key",
-                "--name",
-                "OPEN",
-                "--file",
-                &open.display().to_string(),
-            ],
-            None,
-        );
-        assert_eq!(
-            code, 2,
-            "a world-readable file is refused before any read: {stderr}"
-        );
-        assert!(
-            stderr.contains("644") || stderr.contains("mode"),
-            "names the mode: {stderr}"
-        );
-        assert_eq!(instance.state_digest(), before);
-    }
-
     // 64 KiB + 1 on standard input is refused, nothing else read.
     let oversized = "k".repeat(64 * 1024 + 1);
     let (code, _, stderr) = instance.cli(
@@ -1419,30 +1388,6 @@ async fn secret_channels_and_no_leak() {
         seen[0]
     );
 
-    // A world-readable --operator-secret-file is refused before any read.
-    let open = instance.root.join("open-op-secret");
-    fs::write(&open, "jso2_open").expect("write");
-    crate::leaks::register_planted(&open);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&open, fs::Permissions::from_mode(0o644)).expect("chmod");
-    }
-    let (code, _, stderr) = cli_raw(
-        &[
-            "--server",
-            &fake.origin(),
-            "--operator-secret-file",
-            &open.display().to_string(),
-            "account",
-            "list",
-        ],
-        &env,
-        None,
-    );
-    assert_eq!(code, 2, "a world-readable file is refused: {stderr}");
-    assert_eq!(fake.seen().len(), 1, "the file was refused before a read");
-
     // (into the leak sweep below)
     let (_, stdout, stderr) = instance.cli(&["status"], None);
     surfaces.push(stdout);
@@ -1457,6 +1402,61 @@ async fn secret_channels_and_no_leak() {
             );
         }
     }
+}
+
+/// A secret file others can read is refused before it is read, on both
+/// channels that take one: `--file` and `--operator-secret-file`. The
+/// refusal names the access: the Unix mode, or Windows' `Users` group.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_secret_file_others_can_read_is_refused() {
+    let _leak_sweep = crate::leaks::LeakGuard::default();
+    let instance = Instance::start("secret-file-others-read").await;
+    let env = isolated_env(&instance.root.join("home"));
+
+    let open = secret_file(
+        &instance.root,
+        "open-key",
+        &needle("open API key", "api03-open"),
+    );
+    let named = widen(&open);
+    let before = instance.state_digest();
+    let (code, _, stderr) = instance.cli(
+        &[
+            "account",
+            "add",
+            "--api-key",
+            "--name",
+            "OPEN",
+            "--file",
+            &open.display().to_string(),
+        ],
+        None,
+    );
+    assert_eq!(code, 2, "refused before any read: {stderr}");
+    assert!(stderr.contains(named), "names the access: {stderr}");
+    assert_eq!(instance.state_digest(), before);
+
+    let fake = FakeControl::answering(
+        200,
+        json!({ "control_api_version": 1, "captured_at": "2026-01-01T00:00:00Z", "accounts": [] }),
+    );
+    let open = secret_file(&instance.root, "open-op-secret", "jso2_open");
+    let named = widen(&open);
+    let (code, _, stderr) = cli_raw(
+        &[
+            "--server",
+            &fake.origin(),
+            "--operator-secret-file",
+            &open.display().to_string(),
+            "account",
+            "list",
+        ],
+        &env,
+        None,
+    );
+    assert_eq!(code, 2, "refused: {stderr}");
+    assert!(stderr.contains(named), "names the access: {stderr}");
+    assert!(fake.seen().is_empty(), "refused before any request");
 }
 
 /// A reference matching nothing is exit 6 listing the display

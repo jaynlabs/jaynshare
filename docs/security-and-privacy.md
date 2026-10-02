@@ -123,6 +123,10 @@ when the server offers no kit.
   digest of the secret. Client secrets and the
   optional remote-operator secret are separate and can be rotated or revoked
   independently.
+- **Secret files:** a secret read from a file must be its owner's alone: mode
+  `0600` on Linux and macOS, and on Windows no access for anyone but you,
+  SYSTEM and Administrators. A broader file is refused before it is read, as
+  are the server's configuration, state, logs and keys at startup.
 - **Audit log:** one record per exchange with metadata only: time, duration,
   client, source address, session id, method, path without its query, model,
   serving account, status, attempts, failover and error class. No body and no
