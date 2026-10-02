@@ -56,7 +56,7 @@ changes are less invasive.
   <picture>
     <source media="(prefers-color-scheme: dark)"
       srcset="docs/assets/overview-dark.png">
-    <img src="docs/assets/overview-light.png" width="710" height="400"
+    <img src="docs/assets/overview-light.png" width="710" height="334"
       alt="jaynshare routes each prompt to an account with quota left">
   </picture>
 </p>
