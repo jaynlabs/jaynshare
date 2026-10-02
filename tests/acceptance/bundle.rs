@@ -2414,7 +2414,6 @@ async fn preparing_a_bundle_is_one_transaction() {
     // 2. Another id into the same --out: its own ZIP and code beside
     // the manual run's, all owner-only. The same id again is
     // refused and overwrites nothing.
-    use std::os::unix::fs::PermissionsExt;
     let (code, _, stderr) = operator.cli(&[
         "client",
         "enrol",
@@ -2434,13 +2433,9 @@ async fn preparing_a_bundle_is_one_transaction() {
         "jaynshare-client-desk-2-g1.zip".to_string(),
     ];
     assert_eq!(entries(), both, "one ZIP and one code file per id");
+    #[cfg(unix)]
     for name in &both {
-        let mode = std::fs::metadata(out.join(name))
-            .expect("the output")
-            .permissions()
-            .mode()
-            & 0o777;
-        assert_eq!(mode, 0o600, "{name} is owner-only");
+        assert_eq!(mode_of(&out.join(name)), 0o600, "{name} is owner-only");
     }
     let before = std::fs::read(out.join("jaynshare-client-desk-1-g1.zip")).expect("desk-1 ZIP");
     let (code, _, stderr) = operator.cli(&[
