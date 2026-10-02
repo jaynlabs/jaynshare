@@ -7,7 +7,6 @@ use std::path::Path;
 
 use http::Method;
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 
 use super::args::{ApiArgs, Cli, SecretChannel, StatusArgs};
 use super::verbs::{api_request, api_response, confirm, read_input};
@@ -428,102 +427,6 @@ pub(super) async fn secret_set(cli: &Cli, channel: &SecretChannel) -> Outcome {
     }
 }
 
-// ------------------------------------------------------------------ ca update
-
-/// The CA update ZIP carries exactly these members, no more, no fewer.
-const CA_UPDATE_MEMBERS: [&str; 3] = ["ca-update.json", "ca.pem", "README.txt"];
-
-/// `ca-update --from <zip>`: verify the bundle's certificate
-/// and digests, show both fingerprints, require the independent comparison,
-/// then atomically replace only `ca.pem` and the fingerprint in `client.toml`
-/// — the client id, generation, secret and release identity are untouched.
-pub(super) async fn ca_update(cli: &Cli, from: &Path) -> Outcome {
-    let invalid = |why: String| {
-        local(
-            17,
-            "cli_bundle_invalid",
-            format!("{}: {why}", from.display()),
-        )
-    };
-    let members = bundle::read_zip(from).map_err(invalid)?;
-    for required in CA_UPDATE_MEMBERS {
-        if !members.contains_key(required) {
-            return Err(invalid(format!(
-                "the CA update bundle is missing {required:?}"
-            )));
-        }
-    }
-    if let Some(extra) = members
-        .keys()
-        .find(|name| !CA_UPDATE_MEMBERS.contains(&name.as_str()))
-    {
-        return Err(invalid(format!(
-            "the CA update bundle carries an unexpected member {extra:?}"
-        )));
-    }
-    let manifest: Value = serde_json::from_slice(&members["ca-update.json"])
-        .map_err(|e| invalid(format!("ca-update.json: {e}")))?;
-    let manifest_fingerprint = manifest["fingerprint"]
-        .as_str()
-        .ok_or_else(|| invalid("ca-update.json: fingerprint missing".to_string()))?;
-    let manifest_sha256 = manifest["ca_sha256"]
-        .as_str()
-        .ok_or_else(|| invalid("ca-update.json: ca_sha256 missing".to_string()))?;
-    let (_, pem) = x509_parser::pem::parse_x509_pem(&members["ca.pem"])
-        .map_err(|e| invalid(format!("ca.pem: {e}")))?;
-    pem.parse_x509()
-        .map_err(|e| invalid(format!("ca.pem: {e}")))?;
-    let digest = Sha256::digest(&pem.contents);
-    let bare: String = digest.iter().map(|b| format!("{b:02x}")).collect();
-    let colon = digest
-        .iter()
-        .map(|b| format!("{b:02X}"))
-        .collect::<Vec<_>>()
-        .join(":");
-    if colon != manifest_fingerprint || bare != manifest_sha256 {
-        return Err(invalid(
-            "ca.pem: its digest does not match the manifest's".to_string(),
-        ));
-    }
-    let installation = installation()?;
-    eprintln!(
-        "current CA fingerprint: {}",
-        installation.ca_fingerprint.as_deref().unwrap_or("none")
-    );
-    eprintln!("new CA fingerprint:     {manifest_fingerprint}");
-    if !cli.yes
-        && !confirm(
-            "compare the new fingerprint with the operator's `ca show` through an independent channel; matches? [y/N] ",
-        )?
-    {
-        return Err(local(
-            21,
-            "cli_confirmation_required",
-            "the update was refused; nothing was replaced",
-        ));
-    }
-    let new_fingerprint = manifest_fingerprint.to_string();
-    crate::state::write_private_atomic(&installation.directory.join("ca.pem"), &members["ca.pem"])
-        .map_err(|why| local(1, "cli_internal", format!("replacing ca.pem failed: {why}")))?;
-    client::set_toml(
-        &installation.directory,
-        &[("ca_fingerprint", &new_fingerprint)],
-    )
-    .map_err(|why| {
-        local(
-            1,
-            "cli_internal",
-            format!("rewriting client.toml failed: {why}"),
-        )
-    })?;
-    let result = json!({
-        "previous_fingerprint": installation.ca_fingerprint,
-        "fingerprint": new_fingerprint,
-        "directory": installation.directory.display().to_string(),
-    });
-    Ok((result, format!("updated the CA: {new_fingerprint}")))
-}
-
 // ------------------------------------------------------------------ status
 
 /// The client read plus the origins the installation
@@ -534,7 +437,7 @@ pub(super) async fn status(cli: &Cli, args: &StatusArgs) -> Outcome {
         // The exit code is the answer; the verb refuses --json with --check.
         return Ok((Value::Null, String::new()));
     }
-    let installation = installation()?;
+    let mut installation = installation()?;
     let secret_value = secret(&installation)?;
     let mut path = "/control/v1/client/status".to_string();
     if let Some(session) = &args.session {
@@ -570,6 +473,7 @@ pub(super) async fn status(cli: &Cli, args: &StatusArgs) -> Outcome {
     }
     client::keep_identity(&installation, &body);
     if !args.line {
+        crate::client_ca::follow(&mut installation, &secret_value, &body).await;
         super::follow(&installation, &secret_value, &body).await;
     }
     let mut result = body;

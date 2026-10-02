@@ -148,10 +148,6 @@ pub(super) enum Verb {
         #[arg(long, value_name = "https-origin")]
         release_origin: Option<String>,
     },
-    CaUpdate {
-        #[arg(long, value_name = "zip")]
-        from: PathBuf,
-    },
     TrustCa {
         #[command(subcommand)]
         verb: TrustCaVerb,
@@ -606,10 +602,10 @@ pub(super) enum CaVerb {
         #[arg(long, value_name = "path")]
         out: Option<PathBuf>,
     },
-    Rotate,
-    UpdateBundle {
-        #[arg(long, value_name = "dir")]
-        out: PathBuf,
+    Rotate {
+        /// Replace the CA at once instead of staging the next one.
+        #[arg(long)]
+        now: bool,
     },
 }
 

@@ -1753,15 +1753,15 @@ pub(super) async fn api_response(
     ))
 }
 
-/// Rotate the MITM certificate authority. Every enrolled
-/// client needs the CA-update bundle afterwards, so the confirmation
-/// says so before the old CA stops being the one clients trust.
-pub(super) async fn ca_rotate(control: &Control, cli: &Cli) -> Outcome {
-    if !cli.yes
-        && !confirm(
-            "rotate the MITM CA? every enrolled client needs the CA-update bundle before its next launch [y/N] ",
-        )?
-    {
+/// `ca rotate`: stage the next CA, which clients fetch on their next launch
+/// and the proxy presents after the overlap; `--now` replaces it at once.
+pub(super) async fn ca_rotate(control: &Control, cli: &Cli, now: bool) -> Outcome {
+    let prompt = if now {
+        "replace the MITM CA now? Claude Code sessions already running lose the pool until restarted [y/N] "
+    } else {
+        "stage the next MITM CA? clients fetch it on their next launch, and the proxy presents it after a week [y/N] "
+    };
+    if !cli.yes && !confirm(prompt)? {
         return Err(Failure::local(
             21,
             "cli_confirmation_required",
@@ -1769,33 +1769,51 @@ pub(super) async fn ca_rotate(control: &Control, cli: &Cli) -> Outcome {
         ));
     }
     let result = control
-        .expect(Method::POST, "/control/v1/mitm/ca/rotate", Some(&json!({})))
+        .expect(
+            Method::POST,
+            "/control/v1/mitm/ca/rotate",
+            Some(&json!({ "now": now })),
+        )
         .await?;
-    let line = format!(
-        "rotated the CA; previous fingerprint {}, new fingerprint {} valid until {}",
-        result["previous_fingerprint"].as_str().unwrap_or("(none)"),
-        result["fingerprint"].as_str().unwrap_or(""),
-        result["not_after"].as_str().unwrap_or(""),
-    );
-    // After the fingerprints, the reminder on standard error — in
-    // `--json` mode too, where standard output is the envelope alone.
-    eprintln!(
-        "every enrolled client needs the CA-update bundle before its next MITM launch: ca update-bundle --out <dir>"
-    );
+    let text = |value: &Value| value.as_str().unwrap_or("").to_string();
+    let next = &result["next"];
+    let line = if next.is_null() {
+        format!(
+            "rotated the CA; previous fingerprint {}, new fingerprint {} valid until {}; clients fetch it on their next launch",
+            result["previous_fingerprint"].as_str().unwrap_or("(none)"),
+            text(&result["fingerprint"]),
+            text(&result["not_after"]),
+        )
+    } else {
+        format!(
+            "staged CA {} valid until {}; clients fetch it on their next launch, and the proxy presents it from {}",
+            text(&next["fingerprint"]),
+            text(&next["not_after"]),
+            text(&next["switch_at"]),
+        )
+    };
     Ok((result, line))
 }
 
-/// `ca show`: the CA's fingerprint, expiry and state, without the
-/// PEM; all `null` while MITM has never been enabled.
+/// `ca show`: the CA's fingerprint, expiry and state, and the staged CA,
+/// without the PEMs; all `null` while MITM has never been enabled.
 pub(super) async fn ca_show(control: &Control) -> Outcome {
     let body = control.expect(Method::GET, "/control/v1/ca", None).await?;
     let ca = &body["ca"];
+    let next = &ca["next"];
     let result = json!({
         "fingerprint": ca["fingerprint"],
         "not_after": ca["not_after"],
         "state": ca["state"],
+        "next": if next.is_null() { Value::Null } else {
+            json!({
+                "fingerprint": next["fingerprint"],
+                "not_after": next["not_after"],
+                "switch_at": next["switch_at"],
+            })
+        },
     });
-    let line = match ca["fingerprint"].as_str() {
+    let mut line = match ca["fingerprint"].as_str() {
         Some(fingerprint) => format!(
             "CA {fingerprint}, valid until {} ({})",
             ca["not_after"].as_str().unwrap_or(""),
@@ -1803,6 +1821,12 @@ pub(super) async fn ca_show(control: &Control) -> Outcome {
         ),
         None => "MITM mode was never enabled: no CA".to_string(),
     };
+    if let Some(fingerprint) = next["fingerprint"].as_str() {
+        line.push_str(&format!(
+            "; next CA {fingerprint} from {}",
+            next["switch_at"].as_str().unwrap_or("")
+        ));
+    }
     Ok((result, line))
 }
 

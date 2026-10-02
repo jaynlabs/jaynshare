@@ -263,6 +263,14 @@ fn defs() -> Value {
                         ("fingerprint", nullable_string()),
                         ("not_after", nullable_string()),
                         ("state", nullable_string()),
+                        (
+                            "next",
+                            nullable(object(&[
+                                ("fingerprint", string()),
+                                ("not_after", string()),
+                                ("switch_at", string()),
+                            ])),
+                        ),
                     ]),
                 ),
                 (
@@ -480,11 +488,6 @@ fn defs() -> Value {
             ("ca_fingerprint", nullable_string()),
             ("files", array(string())),
         ]),
-        "ca_update_result": object(&[
-            ("previous_fingerprint", nullable_string()),
-            ("fingerprint", string()),
-            ("directory", string()),
-        ]),
         "path_entry": object(&[
             ("path", string()),
             ("selected_by", json!({ "enum": ["flag", "variable", "configuration", "platform-default", null] })),
@@ -544,6 +547,7 @@ fn result_of(path: &str) -> Option<Value> {
             ]),
             "capabilities": array(string()),
             "ca_fingerprint": nullable_string(),
+            "ca_next_fingerprint": nullable_string(),
             "pool": object(&[
                 ("accounts_configured", json!({ "type": "integer" })),
                 ("accounts_selectable", json!({ "type": "integer" })),
@@ -691,7 +695,6 @@ fn result_of(path: &str) -> Option<Value> {
         "client bundle" | "client enrol" => {
             json!({ "oneOf": [reference("package_result"), open_object()] })
         }
-        "ca update-bundle" => json!({ "oneOf": [reference("package_result"), open_object()] }),
         // The disclosure travels inside `result` with `--json` and
         // into `--disclose-to`'s file otherwise, so the body's secret member
         // is replaced by `disclosure_file` there.
@@ -739,7 +742,6 @@ fn result_of(path: &str) -> Option<Value> {
         p if p.starts_with("release ") || p.starts_with("server ") || p.starts_with("service ") => {
             reference("deploy_result")
         }
-        "ca-update" => reference("ca_update_result"),
         "enrol" | "update" | "trust-ca add" | "trust-ca remove" | "uninstall" | "secret set" => {
             reference("client_result")
         }

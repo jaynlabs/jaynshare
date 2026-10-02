@@ -285,7 +285,6 @@ pub fn main() -> i32 {
         verb,
         Verb::Enrol { .. }
             | Verb::Secret { .. }
-            | Verb::CaUpdate { .. }
             | Verb::Update { .. }
             | Verb::Uninstall
             | Verb::TrustCa { .. }
@@ -312,7 +311,6 @@ pub fn main() -> i32 {
                 Verb::Secret {
                     verb: SecretVerb::Set { channel },
                 } => engineer::secret_set(&cli, channel).await,
-                Verb::CaUpdate { from } => engineer::ca_update(&cli, from).await,
                 Verb::Update {
                     from,
                     version,
@@ -450,15 +448,12 @@ pub fn main() -> i32 {
                 OperatorSecretVerb::Remove => operator_secret_remove(&control).await,
             },
             Verb::Ca {
-                verb: CaVerb::Rotate,
-            } => ca_rotate(&control, &cli).await,
+                verb: CaVerb::Rotate { now },
+            } => ca_rotate(&control, &cli, *now).await,
             Verb::Ca { verb: CaVerb::Show } => ca_show(&control).await,
             Verb::Ca {
                 verb: CaVerb::Export { out },
             } => ca_export(&control, out.as_deref()).await,
-            Verb::Ca {
-                verb: CaVerb::UpdateBundle { out },
-            } => bundle::ca_update_bundle(&control, out).await,
             Verb::Route { verb } => edit::route(&control, &cli, verb).await,
             Verb::Priority { verb } => edit::priority(&control, verb).await,
             Verb::Block { verb } => edit::block(&control, verb).await,
@@ -513,18 +508,14 @@ fn later_verb_refusal(
         }
     }
     match dual.unwrap_or(role) {
-        // `secret set` and `ca-update` replace installation files, so they
+        // `secret set` replaces an installation file, so it
         // need one; `enrol` creates one and gates itself (its interactive
         // check ran above); the engineer `status` form needs its files
         // too.
         Role::Engineer
             if matches!(
                 verb,
-                Verb::Secret { .. }
-                    | Verb::CaUpdate { .. }
-                    | Verb::Update { .. }
-                    | Verb::Uninstall
-                    | Verb::TrustCa { .. }
+                Verb::Secret { .. } | Verb::Update { .. } | Verb::Uninstall | Verb::TrustCa { .. }
             ) =>
         {
             engineer_context().err()
@@ -664,8 +655,7 @@ fn verb_path(verb: &Verb) -> &'static str {
         Verb::Ca { verb } => match verb {
             CaVerb::Show => "ca show",
             CaVerb::Export { .. } => "ca export",
-            CaVerb::Rotate => "ca rotate",
-            CaVerb::UpdateBundle { .. } => "ca update-bundle",
+            CaVerb::Rotate { .. } => "ca rotate",
         },
         Verb::Config { verb } => match verb {
             ConfigVerb::Paths => "config paths",
@@ -709,7 +699,6 @@ fn verb_path(verb: &Verb) -> &'static str {
         Verb::Alias { .. } => "alias",
         Verb::Enrol { .. } => "enrol",
         Verb::Update { .. } => "update",
-        Verb::CaUpdate { .. } => "ca-update",
         Verb::TrustCa { verb } => match verb {
             TrustCaVerb::Add => "trust-ca add",
             TrustCaVerb::Remove => "trust-ca remove",
@@ -1017,23 +1006,25 @@ fn serve_inner(cli: &Cli) -> Result<i32, (i32, String)> {
         // stops the start: base-URL mode and tunnelled targets keep serving
         // and intercepted targets answer 503.
         let started = OffsetDateTime::now_utc();
-        let ca = match mitm.enabled {
-            true => match crate::mitm::ca::Ca::load_or_generate(&state_dir, started) {
-                Ok(ca) => {
-                    ca.warn_expiry(started);
-                    Some(Arc::new(ca))
+        let authorities = match mitm.enabled {
+            true => match mitm::ca::Authorities::load(&state_dir, started) {
+                Ok(authorities) => {
+                    if let (Some(current), None) = (&authorities.current, &authorities.next) {
+                        current.warn_expiry(started);
+                    }
+                    authorities
                 }
                 Err(e) => {
                     tracing::error!(event = "ca_unusable", error = %e, "the CA trust material is unusable; intercepted targets answer 503");
-                    None
+                    mitm::ca::Authorities::default()
                 }
             },
-            false => None,
+            false => mitm::ca::Authorities::default(),
         };
         let listen = listener.local_addr().map_err(|e| (1, e.to_string()))?;
         let (path, digest) = (loaded.path.clone(), loaded.digest.clone());
         let server = Arc::new(Server::new(loaded, durable, pool, audit, capture, upstream));
-        server.set_mitm_ca(ca);
+        *server.mitm_authorities() = authorities;
         server.set_identity(identity.pin());
         if restored_quota_changed {
             server.mark_quota_dirty();
@@ -1064,6 +1055,7 @@ fn serve_inner(cli: &Cli) -> Result<i32, (i32, String)> {
 
         tokio::spawn(quota_flusher(Arc::clone(&server)));
         tokio::spawn(probe::scheduler(Arc::clone(&server)));
+        tokio::spawn(mitm::ca::switch_when_due(Arc::clone(&server)));
         tokio::spawn(signals(Arc::clone(&server), signal_set));
         tokio::spawn(mitm::listener::serve(
             Arc::clone(&server),

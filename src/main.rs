@@ -6,6 +6,7 @@ mod bundle;
 mod capture;
 mod cli;
 mod client;
+mod client_ca;
 mod config;
 mod control;
 mod data_plane;

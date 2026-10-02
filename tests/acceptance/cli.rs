@@ -2133,8 +2133,8 @@ async fn status_renders_every_section_including_clients() {
 /// The CA verbs: with MITM off, `ca rotate` is the server's
 /// exit 8, and `ca show`/`ca export` answer that there is no CA; with MITM
 /// on, `ca show` names the CA, `ca export` prints the PEM or writes it into
-/// A fresh `0644` file (exit 8 on an existing one), and `ca rotate` prints
-/// old and new fingerprints with the `ca update-bundle` reminder.
+/// A fresh `0644` file (exit 8 on an existing one), `ca rotate` stages the
+/// next CA, which `ca show` names, and `ca rotate --now` replaces the CA.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_ca_verbs() {
     let _leak_sweep = crate::leaks::LeakGuard::default();
@@ -2199,40 +2199,40 @@ async fn the_ca_verbs() {
     let envelope = instance.cli_json(&["ca", "export", "--out", &out_str], None);
     assert_eq!(envelope["error"]["code"], "cli_output_exists", "{envelope}");
 
-    // Rotate: old and new fingerprints, and the reminder.
+    // Rotate: the next CA is staged, the current one still presented.
     let envelope = instance.cli_json(&["ca", "rotate", "--yes"], None);
     assert_eq!(envelope["ok"], true, "{envelope}");
+    assert_eq!(envelope["result"]["fingerprint"], old_fingerprint.as_str());
+    let staged = envelope["result"]["next"]["fingerprint"]
+        .as_str()
+        .expect("the staged fingerprint")
+        .to_string();
+    assert_ne!(staged, old_fingerprint, "{envelope}");
+    let envelope = instance.cli_json(&["ca", "show"], None);
+    assert_eq!(envelope["result"]["fingerprint"], old_fingerprint.as_str());
+    assert_eq!(envelope["result"]["next"]["fingerprint"], staged.as_str());
+    let (code, stdout, stderr) = instance.cli(&["ca", "show"], None);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains(&format!("next CA {staged}")), "{stdout}");
+    let (code, _, stderr) = instance.cli(&["ca", "rotate", "--yes"], None);
+    assert_eq!(code, 8, "one staged CA at a time: {stderr}");
+
+    // Rotate now: old and new fingerprints, the staged CA dropped.
+    let (code, stdout, stderr) = instance.cli(&["ca", "rotate", "--now", "--yes"], None);
+    assert_eq!(code, 0, "{stderr}");
+    let envelope = instance.cli_json(&["ca", "show"], None);
     let new_fingerprint = envelope["result"]["fingerprint"]
         .as_str()
         .expect("fingerprint")
         .to_string();
-    assert_ne!(old_fingerprint, new_fingerprint, "{envelope}");
-    assert_eq!(
-        envelope["result"]["previous_fingerprint"]
-            .as_str()
-            .unwrap_or(""),
-        old_fingerprint,
+    assert!(
+        new_fingerprint != old_fingerprint && new_fingerprint != staged,
         "{envelope}"
     );
-    // `ca show` afterwards names the new one.
-    let envelope = instance.cli_json(&["ca", "show"], None);
-    assert_eq!(
-        envelope["result"]["fingerprint"].as_str().unwrap_or(""),
-        new_fingerprint,
-        "{envelope}"
-    );
-    // The human output carries both fingerprints; the reminder is on
-    // standard error, after them.
-    let (code, stdout, stderr) = instance.cli(&["ca", "rotate", "--yes"], None);
-    assert_eq!(code, 0, "{stderr}");
-    assert!(stdout.contains(&new_fingerprint), "{stdout}{stderr}");
+    assert_eq!(envelope["result"]["next"], Value::Null, "{envelope}");
     assert!(
-        stdout.contains(envelope["result"]["fingerprint"].as_str().unwrap_or("?")),
-        "the previous fingerprint too: {stdout}"
-    );
-    assert!(
-        stderr.contains("ca update-bundle") && !stdout.contains("ca update-bundle"),
-        "the reminder on standard error: {stdout}{stderr}"
+        stdout.contains(&old_fingerprint) && stdout.contains(&new_fingerprint),
+        "both fingerprints: {stdout}"
     );
     instance.stop();
 }
