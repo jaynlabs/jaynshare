@@ -1994,8 +1994,8 @@ async fn operator_writes_win_over_an_in_flight_refresh() {
 /// --stdin`, through `--portable --file <0600 path>` and through `--server-file
 /// <0600 path>` stays one account with one handle; `source` reads
 /// `portable-json`, `portable-json`, `explicit-file` in turn, the last import
-/// wins in `status`. A `0644` server file is refused naming the mode, with the
-/// state file unchanged.
+/// wins in `status`. A server file others can read is refused naming its
+/// access, with the state file unchanged.
 #[tokio::test(flavor = "multi_thread")]
 async fn one_portable_object_three_channels_last_source_wins() {
     let _leak_sweep = crate::leaks::LeakGuard::default();
@@ -2100,19 +2100,11 @@ async fn one_portable_object_three_channels_last_source_wins() {
         "one account throughout"
     );
 
-    // (d) A 0644 server file is refused naming the mode; the pool is unchanged.
-    // Only Unix refuses a file by its mode.
-    if cfg!(windows) {
-        return;
-    }
+    // (d) A server file others can read is refused naming its access (the
+    // mode, or Windows' Users group); the pool is unchanged.
     let open = instance.root.join("open.json");
-    fs::write(&open, &portable).expect("write the open file");
-    crate::leaks::register_planted(&open);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&open, fs::Permissions::from_mode(0o644)).expect("chmod the open file");
-    }
+    write_private(&open, &portable);
+    let named = widen(&open);
     let digest = instance.state_digest();
     let envelope = instance.cli_json(
         &[
@@ -2127,12 +2119,12 @@ async fn one_portable_object_three_channels_last_source_wins() {
     assert_eq!(envelope["error"]["code"], "import_failed");
     let message = envelope["error"]["message"].as_str().expect("message");
     assert!(
-        message.contains("mode 644"),
-        "the refusal names the mode: {message}"
+        message.contains(named),
+        "the refusal names the access: {message}"
     );
     assert_eq!(instance.state_digest(), digest, "the refusal wrote nothing");
 
-    // (e) The same 0644 file through the CLI's own `--file` channel is refused
+    // (e) The same open file through the CLI's own `--file` channel is refused
     // by the CLI before any request (as in (c)); the pool is unchanged. The
     // channel rule is a usage error, exit 2, not the server's
     // rejection of a value.
@@ -2150,8 +2142,8 @@ async fn one_portable_object_three_channels_last_source_wins() {
     assert_eq!(envelope["error"]["code"], "cli_usage");
     let message = envelope["error"]["message"].as_str().expect("message");
     assert!(
-        message.contains("mode 644"),
-        "the CLI refusal names the mode: {message}"
+        message.contains(named),
+        "the CLI refusal names the access: {message}"
     );
     assert_eq!(instance.state_digest(), digest, "nothing written");
 }

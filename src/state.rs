@@ -243,6 +243,7 @@ pub fn protect_windows(path: &Path) -> Result<(), String> {
 mod windows_acl {
     use std::ffi::c_void;
     use std::io;
+    use std::marker::PhantomData;
     use std::os::windows::ffi::OsStrExt;
     use std::path::Path;
     use std::ptr::{addr_of, null, null_mut};
@@ -254,12 +255,15 @@ mod windows_acl {
     use windows_sys::Win32::Security::{
         ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, ACL_REVISION, AddAccessAllowedAceEx,
         CONTAINER_INHERIT_ACE, CreateWellKnownSid, DACL_SECURITY_INFORMATION, EqualSid, GetAce,
-        GetLengthSid, GetTokenInformation, INHERITED_ACE, InitializeAcl, OBJECT_INHERIT_ACE,
-        PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SECURITY_MAX_SID_SIZE,
-        TOKEN_QUERY, TOKEN_USER, TokenUser, WinLocalSystemSid,
+        GetLengthSid, GetTokenInformation, INHERITED_ACE, InitializeAcl, LookupAccountSidW,
+        OBJECT_INHERIT_ACE, PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
+        SECURITY_MAX_SID_SIZE, TOKEN_QUERY, TOKEN_USER, TokenUser, WELL_KNOWN_SID_TYPE,
+        WinBuiltinAdministratorsSid, WinCreatorOwnerSid, WinLocalSystemSid,
     };
     use windows_sys::Win32::Storage::FileSystem::FILE_ALL_ACCESS;
-    use windows_sys::Win32::System::SystemServices::ACCESS_ALLOWED_ACE_TYPE;
+    use windows_sys::Win32::System::SystemServices::{
+        ACCESS_ALLOWED_ACE_TYPE, ACCESS_DENIED_ACE_TYPE,
+    };
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
     /// A SID copied into a buffer aligned for the API to read in place.
@@ -289,8 +293,8 @@ mod windows_acl {
 
     pub(super) fn restrict(path: &Path) -> Result<(), String> {
         let user = current_user()?;
-        let system = local_system()?;
-        let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        let system = well_known(WinLocalSystemSid, "SYSTEM")?;
+        let wide = wide(path);
         let mut acl = private_acl(&user, &system, path.is_dir())?;
         // SAFETY: `wide` is NUL-terminated and `acl` is an initialized ACL.
         let status = unsafe {
@@ -311,6 +315,38 @@ mod windows_acl {
             ));
         }
         read_back(&wide, &user, &system)
+    }
+
+    /// Accepts `path` when every entry granting access names the user,
+    /// `SYSTEM` or `Administrators`. Inherited entries count like any
+    /// other, and a deny entry only narrows access. A directory's
+    /// `CREATOR OWNER` entry also passes: it grants a new file's creator.
+    pub(super) fn check(path: &Path) -> Result<(), String> {
+        let allowed = [
+            current_user()?,
+            well_known(WinLocalSystemSid, "SYSTEM")?,
+            well_known(WinBuiltinAdministratorsSid, "Administrators")?,
+            well_known(WinCreatorOwnerSid, "CREATOR OWNER")?,
+        ];
+        let dacl = Dacl::read(&wide(path))?;
+        for entry in dacl.entries()? {
+            match entry.kind {
+                ACCESS_DENIED_ACE_TYPE => {}
+                ACCESS_ALLOWED_ACE_TYPE if allowed.iter().any(|sid| entry.names(sid)) => {}
+                ACCESS_ALLOWED_ACE_TYPE => {
+                    return Err(format!(
+                        "grants access to {}; only you, SYSTEM and Administrators may have access",
+                        entry.principal()
+                    ));
+                }
+                other => return Err(format!("has an access entry of type {other}")),
+            }
+        }
+        Ok(())
+    }
+
+    fn wide(path: &Path) -> Vec<u16> {
+        path.as_os_str().encode_wide().chain(Some(0)).collect()
     }
 
     fn current_user() -> Result<Sid, String> {
@@ -347,21 +383,15 @@ mod windows_acl {
         Ok(Sid::copied(user.User.Sid))
     }
 
-    fn local_system() -> Result<Sid, String> {
+    fn well_known(kind: WELL_KNOWN_SID_TYPE, name: &str) -> Result<Sid, String> {
         let mut buffer = vec![0u32; (SECURITY_MAX_SID_SIZE as usize).div_ceil(4)];
         let mut size = SECURITY_MAX_SID_SIZE;
         // SAFETY: `buffer` holds `size` bytes.
-        let made = unsafe {
-            CreateWellKnownSid(
-                WinLocalSystemSid,
-                null_mut(),
-                buffer.as_mut_ptr().cast(),
-                &mut size,
-            )
-        };
+        let made =
+            unsafe { CreateWellKnownSid(kind, null_mut(), buffer.as_mut_ptr().cast(), &mut size) };
         if made == 0 {
             return Err(format!(
-                "cannot name SYSTEM: {}",
+                "cannot name {name}: {}",
                 io::Error::last_os_error()
             ));
         }
@@ -403,73 +433,152 @@ mod windows_acl {
         Ok(acl)
     }
 
-    fn read_back(wide: &[u16], user: &Sid, system: &Sid) -> Result<(), String> {
-        let mut dacl: *mut ACL = null_mut();
-        let mut descriptor: PSECURITY_DESCRIPTOR = null_mut();
-        // SAFETY: `wide` is NUL-terminated; the outputs are written on success.
-        let status = unsafe {
-            GetNamedSecurityInfoW(
-                wide.as_ptr(),
-                SE_FILE_OBJECT,
-                DACL_SECURITY_INFORMATION,
-                null_mut(),
-                null_mut(),
-                &mut dacl,
-                null_mut(),
-                &mut descriptor,
-            )
-        };
-        if status != ERROR_SUCCESS {
-            return Err(format!(
-                "cannot read its ACL back: {}",
-                io::Error::from_raw_os_error(status as i32)
-            ));
-        }
-        let verdict = judge(dacl, user, system);
-        // SAFETY: the descriptor was allocated by the call above.
-        unsafe { LocalFree(descriptor) };
-        verdict
-    }
-
     /// Every entry must allow the user or `SYSTEM` and none be inherited.
-    fn judge(dacl: *const ACL, user: &Sid, system: &Sid) -> Result<(), String> {
-        if dacl.is_null() {
-            return Err("it has no ACL, which grants everyone access".into());
-        }
-        // SAFETY: a non-null DACL from the descriptor is valid while it lives.
-        let count = unsafe { (*dacl).AceCount };
-        for index in 0..u32::from(count) {
-            let mut entry: *mut c_void = null_mut();
-            // SAFETY: `index` is below the entry count.
-            if unsafe { GetAce(dacl, index, &mut entry) } == 0 {
-                return Err(format!(
-                    "cannot read its ACL: {}",
-                    io::Error::last_os_error()
-                ));
-            }
-            // SAFETY: every entry starts with an `ACE_HEADER`.
-            let header = unsafe { &*entry.cast::<ACE_HEADER>() };
-            if u32::from(header.AceFlags) & INHERITED_ACE != 0 {
+    fn read_back(wide: &[u16], user: &Sid, system: &Sid) -> Result<(), String> {
+        let dacl = Dacl::read(wide)?;
+        for entry in dacl.entries()? {
+            if entry.inherited {
                 return Err("an inherited access entry remains".into());
             }
-            if u32::from(header.AceType) != ACCESS_ALLOWED_ACE_TYPE {
-                return Err(format!(
-                    "an access entry of type {} remains",
-                    header.AceType
-                ));
+            if entry.kind != ACCESS_ALLOWED_ACE_TYPE {
+                return Err(format!("an access entry of type {} remains", entry.kind));
             }
-            // SAFETY: an access-allowed entry carries its SID at `SidStart`.
-            let sid: PSID = unsafe { addr_of!((*entry.cast::<ACCESS_ALLOWED_ACE>()).SidStart) }
-                .cast_mut()
-                .cast();
-            // SAFETY: all three are valid SIDs.
-            let known =
-                unsafe { EqualSid(sid, user.psid()) != 0 || EqualSid(sid, system.psid()) != 0 };
-            if !known {
-                return Err(format!("the ACL grants access to {}", sid_text(sid)));
+            if !entry.names(user) && !entry.names(system) {
+                return Err(format!("the ACL grants access to {}", entry.principal()));
             }
         }
         Ok(())
+    }
+
+    /// A path's DACL, owned by the security descriptor it was read with.
+    struct Dacl {
+        acl: *mut ACL,
+        descriptor: PSECURITY_DESCRIPTOR,
+    }
+
+    impl Dacl {
+        fn read(wide: &[u16]) -> Result<Self, String> {
+            let mut acl: *mut ACL = null_mut();
+            let mut descriptor: PSECURITY_DESCRIPTOR = null_mut();
+            // SAFETY: `wide` is NUL-terminated; the outputs are written on success.
+            let status = unsafe {
+                GetNamedSecurityInfoW(
+                    wide.as_ptr(),
+                    SE_FILE_OBJECT,
+                    DACL_SECURITY_INFORMATION,
+                    null_mut(),
+                    null_mut(),
+                    &mut acl,
+                    null_mut(),
+                    &mut descriptor,
+                )
+            };
+            if status != ERROR_SUCCESS {
+                return Err(format!(
+                    "cannot read its ACL: {}",
+                    io::Error::from_raw_os_error(status as i32)
+                ));
+            }
+            Ok(Self { acl, descriptor })
+        }
+
+        /// The entries in order. A missing DACL grants everyone access.
+        fn entries(&self) -> Result<Vec<Entry<'_>>, String> {
+            if self.acl.is_null() {
+                return Err("has no ACL, which grants everyone access".into());
+            }
+            // SAFETY: a non-null DACL from the descriptor is valid while it lives.
+            let count = unsafe { (*self.acl).AceCount };
+            (0..u32::from(count))
+                .map(|index| {
+                    let mut entry: *mut c_void = null_mut();
+                    // SAFETY: `index` is below the entry count.
+                    if unsafe { GetAce(self.acl, index, &mut entry) } == 0 {
+                        return Err(format!(
+                            "cannot read its ACL: {}",
+                            io::Error::last_os_error()
+                        ));
+                    }
+                    // SAFETY: every entry starts with an `ACE_HEADER`.
+                    let header = unsafe { &*entry.cast::<ACE_HEADER>() };
+                    let kind = u32::from(header.AceType);
+                    // Allow and deny entries carry their SID at `SidStart`.
+                    let sid = [ACCESS_ALLOWED_ACE_TYPE, ACCESS_DENIED_ACE_TYPE]
+                        .contains(&kind)
+                        .then(|| {
+                            // SAFETY: an allow or deny entry has the
+                            // `ACCESS_ALLOWED_ACE` layout.
+                            unsafe { addr_of!((*entry.cast::<ACCESS_ALLOWED_ACE>()).SidStart) }
+                                .cast_mut()
+                                .cast()
+                        });
+                    Ok(Entry {
+                        kind,
+                        inherited: u32::from(header.AceFlags) & INHERITED_ACE != 0,
+                        sid,
+                        dacl: PhantomData,
+                    })
+                })
+                .collect()
+        }
+    }
+
+    impl Drop for Dacl {
+        fn drop(&mut self) {
+            // SAFETY: the descriptor was allocated by `GetNamedSecurityInfoW`.
+            unsafe { LocalFree(self.descriptor) };
+        }
+    }
+
+    /// One entry of a [`Dacl`], whose memory its SID points into.
+    struct Entry<'a> {
+        kind: u32,
+        inherited: bool,
+        sid: Option<PSID>,
+        dacl: PhantomData<&'a Dacl>,
+    }
+
+    impl Entry<'_> {
+        fn names(&self, sid: &Sid) -> bool {
+            // SAFETY: both are valid SIDs.
+            self.sid
+                .is_some_and(|own| unsafe { EqualSid(own, sid.psid()) != 0 })
+        }
+
+        /// `DOMAIN\name (S-1-…)`, or the SID alone when it names no account.
+        fn principal(&self) -> String {
+            let Some(sid) = self.sid else {
+                return "an entry without a SID".into();
+            };
+            let text = sid_text(sid);
+            let mut name = [0u16; 256];
+            let mut domain = [0u16; 256];
+            let mut name_length = name.len() as u32;
+            let mut domain_length = domain.len() as u32;
+            let mut usage = 0;
+            // SAFETY: each buffer holds the length passed beside it.
+            let found = unsafe {
+                LookupAccountSidW(
+                    null(),
+                    sid,
+                    name.as_mut_ptr(),
+                    &mut name_length,
+                    domain.as_mut_ptr(),
+                    &mut domain_length,
+                    &mut usage,
+                )
+            };
+            if found == 0 {
+                return text;
+            }
+            let name = String::from_utf16_lossy(&name[..name_length as usize]);
+            let domain = String::from_utf16_lossy(&domain[..domain_length as usize]);
+            if domain.is_empty() {
+                format!("{name} ({text})")
+            } else {
+                format!("{domain}\\{name} ({text})")
+            }
+        }
     }
 
     fn sid_text(sid: PSID) -> String {
@@ -488,7 +597,14 @@ mod windows_acl {
     }
 }
 
+/// Refuses a path others can reach: on Unix a mode wider than 0600 (0700
+/// for a directory), on Windows an entry granting access to anyone but the
+/// user, `SYSTEM` and `Administrators`. A missing path passes.
 pub fn check_private(path: &Path) -> Result<(), String> {
+    #[cfg(windows)]
+    if path.exists() {
+        windows_acl::check(path).map_err(|why| format!("{} {why}", path.display()))?;
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -595,6 +711,35 @@ mod tests {
             fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
             assert!(check_private(&path).is_err());
         }
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// On Windows, entries inherited from a private directory and an
+    /// `Administrators` entry pass, a deny entry only narrows, and any
+    /// other grantee is refused by its SID.
+    #[cfg(windows)]
+    #[test]
+    fn windows_private_is_the_user_system_and_administrators() {
+        let icacls = |path: &Path, args: &[&str]| {
+            let output = std::process::Command::new("icacls")
+                .arg(path)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "icacls {args:?}");
+        };
+        let dir = std::env::temp_dir().join(format!("jaynshare-acl-{}", uuid::Uuid::new_v4()));
+        ensure_private_dir(&dir).unwrap();
+        let path = dir.join("secret");
+        fs::write(&path, "x").unwrap();
+        check_private(&path).expect("inherited from a private directory");
+        icacls(&path, &["/grant", "*S-1-5-32-544:F"]);
+        check_private(&path).expect("Administrators");
+        icacls(&path, &["/deny", "*S-1-5-32-546:R"]);
+        check_private(&path).expect("a deny entry for Guests");
+        icacls(&path, &["/grant", "*S-1-1-0:R"]);
+        let refusal = check_private(&path).unwrap_err();
+        assert!(refusal.contains("S-1-1-0"), "{refusal}");
         fs::remove_dir_all(&dir).unwrap();
     }
 }

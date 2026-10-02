@@ -465,8 +465,9 @@ async fn status_takes_its_role_from_the_machine() {
 }
 
 /// `secret set` takes the rotated secret from a hidden prompt,
-/// `--stdin` or an owner-only `--file`, keeps the installed file `0600`, and
-/// without an installation exits 11 having written nothing.
+/// `--stdin` or an owner-only `--file` (refusing one others can read),
+/// keeps the installed file `0600`, and without an installation exits 11
+/// having written nothing.
 #[tokio::test(flavor = "multi_thread")]
 async fn secret_set_takes_every_channel_and_writes_one_file() {
     let _leak_sweep = crate::leaks::LeakGuard::default();
@@ -521,28 +522,26 @@ async fn secret_set_takes_every_channel_and_writes_one_file() {
     #[cfg(unix)]
     assert_eq!(mode_of(&secret_file), 0o600, "still owner-only");
 
-    // A world-readable `--file` is refused and the installed secret stands.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let open = scratch("secret-set-takes-channel-open").join("secret");
-        std::fs::create_dir_all(open.parent().expect("parent")).expect("dir");
-        std::fs::write(&open, "jsc2_open").expect("write");
-        std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o644)).expect("chmod");
-        let (exit, _, stderr) = cli_raw(
-            &["secret", "set", "--file", &open.display().to_string()],
-            &env,
-            None,
-        );
-        assert_ne!(exit, 0, "a world-readable secret file is refused: {stderr}");
-        assert_eq!(
-            std::fs::read_to_string(&secret_file)
-                .expect("secret")
-                .trim(),
-            rotated,
-            "the installed secret is unchanged"
-        );
-    }
+    // A `--file` others can read is refused and the installed secret stands.
+    let open = scratch("secret-set-takes-channel-open").join("secret");
+    crate::harness::write_private(&open, "jsc2_open");
+    crate::harness::widen(&open);
+    let (exit, _, stderr) = cli_raw(
+        &["secret", "set", "--file", &open.display().to_string()],
+        &env,
+        None,
+    );
+    assert_ne!(
+        exit, 0,
+        "a secret file others can read is refused: {stderr}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&secret_file)
+            .expect("secret")
+            .trim(),
+        rotated,
+        "the installed secret is unchanged"
+    );
 
     // The hidden prompt, on a terminal: a Unix pseudo-terminal.
     if cfg!(windows) {

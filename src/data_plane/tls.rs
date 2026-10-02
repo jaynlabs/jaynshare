@@ -136,6 +136,9 @@ mod tests {
             )
             .expect("the key is the owner's alone");
         }
+        #[cfg(windows)]
+        crate::state::protect_windows(&files.private_key_file)
+            .expect("the key is the owner's alone");
         files
     }
 

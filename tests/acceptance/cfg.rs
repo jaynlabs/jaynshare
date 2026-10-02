@@ -269,11 +269,9 @@ fn platform_paths_with_no_override() {
     assert_eq!(paths["configuration"]["exists"], false);
 }
 
-/// A broad POSIX mode on each protected path in turn is refused
-/// before either listener binds, naming that path; correcting the access
-/// lets it start.
-// the modes are Unix's; Windows' ACL half is.
-#[cfg(unix)]
+/// Access for others (a broad mode, or Windows' Users group) on each
+/// protected path in turn is refused before either listener binds, naming
+/// that path; correcting the access lets it start.
 #[test]
 fn a_broad_protected_path_is_refused_before_bind() {
     let _leak_sweep = crate::leaks::LeakGuard::default();
@@ -288,9 +286,7 @@ fn a_broad_protected_path_is_refused_before_bind() {
         ("state directory", root.join("state")),
         ("log directory", root.join("log")),
     ] {
-        let narrow = fs::metadata(&path).expect("target").permissions().mode() & 0o777;
-        let broad = if path.is_dir() { 0o755 } else { 0o644 };
-        fs::set_permissions(&path, fs::Permissions::from_mode(broad)).expect("widen");
+        widen(&path);
         // As root the mode cannot make a path unreadable/broad-sensitive: skip, never silently.
         let (code, stderr) = serve_fails(&root, &config);
         if code == 0 {
@@ -302,7 +298,7 @@ fn a_broad_protected_path_is_refused_before_bind() {
                 "{label} not named: {stderr}"
             );
         }
-        fs::set_permissions(&path, fs::Permissions::from_mode(narrow)).expect("restore");
+        unwiden(&path);
     }
 }
 

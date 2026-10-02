@@ -1211,20 +1211,99 @@ pub(crate) fn reserve_port() -> u16 {
 pub(crate) fn write_private(path: &Path, contents: &str) {
     crate::leaks::register_planted(path);
     fs::write(path, contents).expect("write fixture file");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).expect("chmod fixture file");
-    }
+    make_private(path);
 }
 
 pub(crate) fn private_dir(path: &Path) {
     fs::create_dir_all(path).expect("create fixture directory");
+    make_private(path);
+}
+
+/// Narrows `path` to the user: mode 0600 (0700 for a directory) on Unix,
+/// and on Windows an ACL granting the user and `SYSTEM` alone, which a
+/// directory hands down to what is created inside it.
+pub(crate) fn make_private(path: &Path) {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).expect("chmod fixture dir");
+        let mode = if path.is_dir() { 0o700 } else { 0o600 };
+        fs::set_permissions(path, fs::Permissions::from_mode(mode)).expect("narrow the fixture");
     }
+    #[cfg(windows)]
+    {
+        let inherit = if path.is_dir() { "(OI)(CI)" } else { "" };
+        let grant = |sid: &str| format!("*{sid}:{inherit}F");
+        icacls(
+            path,
+            &[
+                "/inheritance:r",
+                "/grant:r",
+                &grant(user_sid()),
+                &grant("S-1-5-18"),
+            ],
+        );
+    }
+}
+
+/// Opens `path` to every local user and returns what its refusal names:
+/// the Unix mode, or the SID of Windows' `Users` group.
+pub(crate) fn widen(path: &Path) -> &'static str {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let (mode, named) = if path.is_dir() {
+            (0o755, "mode 755")
+        } else {
+            (0o644, "mode 644")
+        };
+        fs::set_permissions(path, fs::Permissions::from_mode(mode)).expect("widen the fixture");
+        named
+    }
+    #[cfg(windows)]
+    {
+        icacls(path, &["/grant", "*S-1-5-32-545:R"]);
+        "S-1-5-32-545"
+    }
+}
+
+/// Undoes [`widen`].
+pub(crate) fn unwiden(path: &Path) {
+    #[cfg(unix)]
+    make_private(path);
+    #[cfg(windows)]
+    icacls(path, &["/remove:g", "*S-1-5-32-545"]);
+}
+
+/// `icacls <path> <args>`, which must succeed.
+#[cfg(windows)]
+fn icacls(path: &Path, args: &[&str]) {
+    let output = Command::new("icacls")
+        .arg(path)
+        .args(args)
+        .output()
+        .expect("run icacls");
+    assert!(
+        output.status.success(),
+        "icacls {} {args:?}: {}",
+        path.display(),
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+/// The SID of the user running the suite.
+#[cfg(windows)]
+fn user_sid() -> &'static str {
+    static SID: OnceLock<String> = OnceLock::new();
+    SID.get_or_init(|| {
+        // One CSV row: `"DOMAIN\name","S-1-5-21-…"`.
+        let output = Command::new("whoami")
+            .args(["/user", "/fo", "csv", "/nh"])
+            .output()
+            .expect("run whoami");
+        let row = String::from_utf8_lossy(&output.stdout);
+        let sid = row.trim().rsplit(',').next().unwrap_or_default();
+        sid.trim_matches('"').to_string()
+    })
 }
 
 pub(crate) fn api_fixture(
@@ -2454,11 +2533,7 @@ pub(crate) fn stage_tls_pair(directory: &Path) -> (PathBuf, PathBuf) {
     chain.extend(fs::read(fixture("test-ca.pem")).expect("read the test CA"));
     fs::write(&cert, chain).expect("stage the certificate chain");
     fs::copy(fixture("test-leaf-key.pem"), &key).expect("stage the key");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&key, fs::Permissions::from_mode(0o600)).expect("key 0600");
-    }
+    make_private(&key);
     (cert, key)
 }
 
