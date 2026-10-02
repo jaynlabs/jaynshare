@@ -355,6 +355,16 @@ mod tests {
         dir
     }
 
+    /// A settings file holding our two entries and nothing else.
+    fn ours_only(executable: &Path) -> Value {
+        json!({
+            "statusLine": {"type": "command", "command": command(executable, "statusline")},
+            "hooks": {"UserPromptSubmit": [
+                {"hooks": [{"type": "command", "command": command(executable, "title-hook")}]}
+            ]}
+        })
+    }
+
     #[test]
     fn a_fresh_file_gets_both_entries_and_no_backup() {
         let dir = temp("fresh");
@@ -370,17 +380,11 @@ mod tests {
         assert_eq!(status["type"], "command");
         assert_eq!(status["padding"], 0);
         assert_eq!(status["refreshInterval"], 10);
-        assert_eq!(
-            status["command"],
-            format!("'{}' statusline", executable.display())
-        );
+        assert_eq!(status["command"], command(&executable, "statusline"));
         let groups = new["hooks"]["UserPromptSubmit"].as_array().expect("array");
         assert_eq!(groups.len(), 1);
         let hook = &groups[0]["hooks"][0];
-        assert_eq!(
-            hook["command"],
-            format!("'{}' title-hook", executable.display())
-        );
+        assert_eq!(hook["command"], command(&executable, "title-hook"));
         assert_eq!(hook["timeout"], 2);
         assert!(hook.get("matcher").is_none(), "no matcher");
         commit(&plan).expect("commit");
@@ -460,14 +464,11 @@ mod tests {
         let dir = temp("foreign");
         let path = dir.join("settings.json");
         let executable = dir.join("bin/jaynshare");
-        let ours = format!(
-            r#"{{"hooks": {{"UserPromptSubmit": [
-                {{"hooks": [{{"type": "command", "command": "echo hi"}}]}},
-                {{"hooks": [{{"type": "command", "command": "'{}' title-hook", "timeout": 2}}]}}
-            ]}}}}"#,
-            executable.display()
-        );
-        fs::write(&path, ours).unwrap();
+        let ours = json!({"hooks": {"UserPromptSubmit": [
+            {"hooks": [{"type": "command", "command": "echo hi"}]},
+            {"hooks": [{"type": "command", "command": command(&executable, "title-hook"), "timeout": 2}]}
+        ]}});
+        fs::write(&path, ours.to_string()).unwrap();
         let plan = plan_install_at(&path, &backup_path(&path), &executable)
             .unwrap()
             .unwrap();
@@ -480,7 +481,7 @@ mod tests {
         assert_eq!(groups[0]["hooks"][0]["command"], "echo hi");
         assert_eq!(
             groups[1]["hooks"][0]["command"],
-            format!("'{}' title-hook", executable.display())
+            command(&executable, "title-hook")
         );
         commit(&plan).unwrap();
         assert_eq!(
@@ -495,24 +496,18 @@ mod tests {
         let dir = temp("interval");
         let path = dir.join("settings.json");
         let executable = dir.join("bin/jaynshare");
-        fs::write(
-            &path,
-            format!(
-                r#"{{"statusLine": {{"type": "command", "command": "{} statusline", "padding": 7, "refreshInterval": 99}}}}"#,
-                executable.display()
-            ),
-        )
-        .unwrap();
+        let unquoted = format!("{} statusline", executable.display());
+        let existing = json!({"statusLine": {
+            "type": "command", "command": unquoted, "padding": 7, "refreshInterval": 99
+        }});
+        fs::write(&path, existing.to_string()).unwrap();
         let plan = plan_install_at(&path, &backup_path(&path), &executable)
             .unwrap()
             .unwrap();
         let status = serde_json::from_slice::<Value>(&plan.bytes).unwrap()["statusLine"].clone();
         assert_eq!(status["refreshInterval"], 99);
         assert_eq!(status["padding"], 7);
-        assert_eq!(
-            status["command"],
-            format!("'{}' statusline", executable.display())
-        );
+        assert_eq!(status["command"], command(&executable, "statusline"));
     }
 
     #[test]
@@ -520,17 +515,18 @@ mod tests {
         let dir = temp("uninstall-foreign");
         let path = dir.join("settings.json");
         let executable = dir.join("bin/jaynshare");
-        fs::write(
-            &path,
-            format!(
-                r##"{{"theme": "dark", "statusLine": {{"type": "command", "command": "other-tool line"}}, "hooks": {{"UserPromptSubmit": [
-                    {{"hooks": [{{"type": "command", "command": "other-tool title"}}]}},
-                    {{"hooks": [{{"type": "command", "command": "'{}' title-hook", "timeout": 2}}]}}
-                ], "PreToolUse": [{{"matcher": "Bash", "hooks": [{{"type": "command", "command": "echo hi"}}]}}]}}}}"##,
-                executable.display()
-            ),
-        )
-        .unwrap();
+        let existing = json!({
+            "theme": "dark",
+            "statusLine": {"type": "command", "command": "other-tool line"},
+            "hooks": {
+                "UserPromptSubmit": [
+                    {"hooks": [{"type": "command", "command": "other-tool title"}]},
+                    {"hooks": [{"type": "command", "command": command(&executable, "title-hook"), "timeout": 2}]}
+                ],
+                "PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "echo hi"}]}]
+            }
+        });
+        fs::write(&path, existing.to_string()).unwrap();
         let plan = plan_uninstall_at(&path, &backup_path(&path), &executable)
             .unwrap()
             .expect("our two entries are there");
@@ -555,15 +551,7 @@ mod tests {
         let dir = temp("uninstall-hooks");
         let path = dir.join("settings.json");
         let executable = dir.join("bin/jaynshare");
-        fs::write(
-            &path,
-            format!(
-                r#"{{"statusLine": {{"type": "command", "command": "'{}' statusline"}}, "hooks": {{"UserPromptSubmit": [{{"hooks": [{{"type": "command", "command": "'{}' title-hook"}}]}}]}}}}"#,
-                executable.display(),
-                executable.display()
-            ),
-        )
-        .unwrap();
+        fs::write(&path, ours_only(&executable).to_string()).unwrap();
         let plan = plan_uninstall_at(&path, &backup_path(&path), &executable)
             .unwrap()
             .unwrap();
@@ -610,15 +598,9 @@ mod tests {
             .unwrap();
         commit(&plan).unwrap();
         // The engineer's unrelated edit after the install.
-        fs::write(
-            &path,
-            format!(
-                r#"{{"model": "opus", "statusLine": {{"type": "command", "command": "'{}' statusline"}}, "hooks": {{"UserPromptSubmit": [{{"hooks": [{{"type": "command", "command": "'{}' title-hook"}}]}}]}}}}"#,
-                executable.display(),
-                executable.display()
-            ),
-        )
-        .unwrap();
+        let mut edited = ours_only(&executable);
+        edited["model"] = json!("opus");
+        fs::write(&path, edited.to_string()).unwrap();
 
         let plan = plan_uninstall_at(&path, &backup, &executable)
             .unwrap()
@@ -663,14 +645,8 @@ mod tests {
             "a foreign status line is reported"
         );
 
-        fs::write(
-            &path,
-            format!(
-                r#"{{"statusLine": {{"type": "command", "command": "'{}' statusline"}}}}"#,
-                executable.display()
-            ),
-        )
-        .unwrap();
+        let own = json!({"statusLine": {"type": "command", "command": command(&executable, "statusline")}});
+        fs::write(&path, own.to_string()).unwrap();
         assert_eq!(
             foreign_status_line_at(&path, &executable),
             None,
