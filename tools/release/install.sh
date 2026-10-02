@@ -97,13 +97,17 @@ binary="$work/jaynshare-$version-$target/jaynshare"
 [ -f "$binary" ] || die "$archive contains no jaynshare executable"
 chmod +x "$binary"
 
-if [ "$system" = Darwin ]; then
-    # Piped into sh, stdin is this script: the join asks on the terminal.
+# Piped into sh, stdin is this script: the join and the install ask on the terminal.
+asking() {
     if [ ! -t 0 ] && [ -t 2 ] && (exec </dev/tty) 2>/dev/null; then
-        "$binary" join "$invite" </dev/tty
+        "$@" </dev/tty
     else
-        "$binary" join "$invite"
+        "$@"
     fi
+}
+
+if [ "$system" = Darwin ]; then
+    asking "$binary" join "$invite"
     exit
 fi
 
@@ -111,8 +115,8 @@ set -- server install --version "$version"
 [ "$origin_given" = false ] || set -- "$@" --release-origin "$origin"
 [ -z "$tls_ca" ] || set -- "$@" --tls-ca "$tls_ca"
 if [ "$(id -u)" -eq 0 ]; then
-    "$binary" "$@"
+    asking "$binary" "$@"
     exit
 fi
 command -v sudo >/dev/null 2>&1 || die "sudo is required"
-sudo "$binary" "$@"
+asking sudo "$binary" "$@"
