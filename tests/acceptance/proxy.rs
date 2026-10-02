@@ -1474,11 +1474,11 @@ fn serve_once(root: &std::path::Path, listen: u16, proxy: Option<u16>) -> (i32, 
              [data_plane]\n\
              listen = \"127.0.0.1:{listen}\"\n\n\
              [storage]\n\
-             state_file = \"{}\"\n\n\
+             state_file = {}\n\n\
              [logging]\n\
-             directory = \"{}\"\n{mitm}",
-            root.join("state/state.json").display(),
-            root.join("log").display(),
+             directory = {}\n{mitm}",
+            crate::harness::toml_path(&root.join("state/state.json")),
+            crate::harness::toml_path(&root.join("log")),
         ),
     );
     let output = Command::new(binary())

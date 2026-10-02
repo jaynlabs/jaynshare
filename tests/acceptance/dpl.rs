@@ -2396,9 +2396,9 @@ async fn tls_listener_agrees_over_http_1_and_http_2() {
         "tls-listener-agrees",
         Setup {
             data_plane: format!(
-                "tls_certificate_file = \"{}\"\ntls_private_key_file = \"{}\"\n",
-                certificate.display(),
-                private_key.display()
+                "tls_certificate_file = {}\ntls_private_key_file = {}\n",
+                crate::harness::toml_path(&certificate),
+                crate::harness::toml_path(&private_key)
             ),
             ..Setup::default()
         },

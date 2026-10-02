@@ -704,6 +704,7 @@ async fn acc_login_refused_authorisation_ends_failed_with_the_retry_action() {
 /// it, so the deadline is moved from outside the process: the
 /// the published expiry is the anchor: awaiting one tick plus the suite's
 /// 2 s scheduling slack before it, failed at it.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn acc_login_times_out_past_its_ttl_with_the_retry_action() {
     let _leak_sweep = crate::leaks::LeakGuard::default();

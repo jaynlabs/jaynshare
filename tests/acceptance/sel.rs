@@ -408,6 +408,7 @@ async fn distribution_spreads_new_sessions_by_load_within_a_tier() {
 /// runs against the harness-moved clock: the anchor is the last
 /// exchange that saw the session, forgotten at the deadline exactly, and the
 /// fresh binding follows the default the operator moved in between.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_bound_session_gets_its_accounts_real_429() {
     let _leak_sweep = crate::leaks::LeakGuard::default();
@@ -2639,6 +2640,7 @@ async fn a_blocked_advisor_model_refuses_and_an_empty_list_blocks_nothing() {
 /// release binary is started unchanged and reads the platform clock as it
 /// always does; the scenario tags and its report record are
 /// the runner's own.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn the_binding_is_set_once_and_the_last_served_follows_it() {
     let _leak_sweep = crate::leaks::LeakGuard::default();

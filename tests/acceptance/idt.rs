@@ -237,9 +237,9 @@ async fn an_operator_certificate_names_no_pin() {
         "identity-operator-certificate",
         Setup {
             data_plane: format!(
-                "tls_certificate_file = \"{}\"\ntls_private_key_file = \"{}\"\n",
-                cert.display(),
-                key.display()
+                "tls_certificate_file = {}\ntls_private_key_file = {}\n",
+                crate::harness::toml_path(&cert),
+                crate::harness::toml_path(&key)
             ),
             ..Setup::default()
         },

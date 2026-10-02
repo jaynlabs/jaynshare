@@ -305,6 +305,7 @@ async fn a_piped_shell_bootstrap_asks_on_the_terminal() {
 
 /// An invite claims once: the second machine is refused and installs
 /// nothing; one past its expiry is refused the same way.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn an_invite_works_once_and_until_it_expires() {
     let _leak_sweep = crate::leaks::LeakGuard::default();
@@ -538,9 +539,9 @@ async fn an_operator_certificate_invite_trusts_the_certificate() {
         Setup {
             mitm: true,
             data_plane: format!(
-                "tls_certificate_file = \"{}\"\ntls_private_key_file = \"{}\"\n",
-                cert.display(),
-                key.display()
+                "tls_certificate_file = {}\ntls_private_key_file = {}\n",
+                crate::harness::toml_path(&cert),
+                crate::harness::toml_path(&key)
             ),
             ..Setup::default()
         },

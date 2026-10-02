@@ -489,6 +489,7 @@ async fn claim_is_atomic_and_one_time() {
 
 /// An expired code is refused; reissue invalidates the old code
 /// and increments the generation.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn expired_code_and_reissue() {
     let _leak_sweep = crate::leaks::LeakGuard::default();
@@ -1140,9 +1141,9 @@ async fn secret_bearing_needs_loopback_or_tls() {
         Setup {
             wildcard: true,
             data_plane: format!(
-                "tls_certificate_file = \"{}\"\ntls_private_key_file = \"{}\"\n",
-                cert.display(),
-                key.display()
+                "tls_certificate_file = {}\ntls_private_key_file = {}\n",
+                crate::harness::toml_path(&cert),
+                crate::harness::toml_path(&key)
             ),
             ..Setup::default()
         },
@@ -1322,6 +1323,7 @@ async fn registry_lifecycle_endpoints() {
 
 /// The claim: the first succeeds; unknown id, wrong code, expired
 /// code, replay and a lost concurrent race all give one identical refusal.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn every_failed_claim_is_one_refusal() {
     let _leak_sweep = crate::leaks::LeakGuard::default();
@@ -1446,9 +1448,9 @@ async fn operator_secret_is_loopback_managed() {
         Setup {
             wildcard: true,
             data_plane: format!(
-                "tls_certificate_file = \"{}\"\ntls_private_key_file = \"{}\"\n",
-                cert.display(),
-                key.display()
+                "tls_certificate_file = {}\ntls_private_key_file = {}\n",
+                crate::harness::toml_path(&cert),
+                crate::harness::toml_path(&key)
             ),
             ..Setup::default()
         },

@@ -1249,9 +1249,9 @@ pub(crate) fn api_fixture(
         &config,
         &format!(
             "version = 1\n\n[data_plane]\nlisten = \"{addr}\"\n\n\
-             [storage]\nstate_file = \"{}\"\n\n[logging]\ndirectory = \"{}\"\n",
-            root.join("state/state.json").display(),
-            root.join("log").display(),
+             [storage]\nstate_file = {}\n\n[logging]\ndirectory = {}\n",
+            toml_path(&root.join("state/state.json")),
+            toml_path(&root.join("log")),
         ),
     );
     let stdout = root.join("api.stdout");
@@ -1301,8 +1301,8 @@ fn config_document(setup: &Setup, port: u16, mitm_port: u16, origin: &str, root:
         .join(", ");
     let capture = if setup.capture {
         format!(
-            "\n[diagnostics]\nwire_capture_directory = \"{}\"\n",
-            root.join("cap").display()
+            "\n[diagnostics]\nwire_capture_directory = {}\n",
+            toml_path(&root.join("cap"))
         )
     } else {
         String::new()
@@ -1342,18 +1342,23 @@ fn config_document(setup: &Setup, port: u16, mitm_port: u16, origin: &str, root:
          [selection]\n\
          blocked_models = [{blocked}]\n{}\n\
          [storage]\n\
-         state_file = \"{}\"\n\n\
+         state_file = {}\n\n\
          [logging]\n\
-         directory = \"{}\"\n\
+         directory = {}\n\
          level = \"debug\"\n{}{audit}{capture}{egress}{clients}{mitm}",
         setup.telemetry_policy,
         setup.data_plane,
         setup.quota,
         setup.selection,
-        root.join("state/state.json").display(),
-        root.join("log").display(),
+        toml_path(&root.join("state/state.json")),
+        toml_path(&root.join("log")),
         setup.logging,
     )
+}
+
+/// `path` as a TOML string: a Windows path's backslashes are escaped.
+pub(crate) fn toml_path(path: &Path) -> String {
+    toml::Value::String(path.display().to_string()).to_string()
 }
 
 impl Instance {

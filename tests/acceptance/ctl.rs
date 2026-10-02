@@ -1389,6 +1389,7 @@ async fn removal_reference_conflict_and_the_enable_path() {
 /// The login operation over the raw control surface: poll to success, cancel,
 /// A state mismatch, the expiry, and no code, state or verifier in any
 /// response, log or audit record.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn the_login_operation_lifecycle() {
     let _leak_sweep = crate::leaks::LeakGuard::default();

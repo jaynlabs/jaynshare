@@ -80,9 +80,9 @@ async fn the_operator_is_loopback_or_a_credential_on_a_safe_channel() {
         Setup {
             wildcard: true,
             data_plane: format!(
-                "tls_certificate_file = \"{}\"\ntls_private_key_file = \"{}\"\n",
-                cert.display(),
-                key.display()
+                "tls_certificate_file = {}\ntls_private_key_file = {}\n",
+                crate::harness::toml_path(&cert),
+                crate::harness::toml_path(&key)
             ),
             ..Setup::default()
         },
@@ -130,6 +130,7 @@ async fn the_operator_is_loopback_or_a_credential_on_a_safe_channel() {
 /// every path an unauthenticated remote caller
 /// probes answers the one identical refusal, the claim returns a secret once
 /// and its refusal discloses nothing.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn without_a_principal_there_is_only_the_refusal_and_the_claim() {
     let _leak_sweep = crate::leaks::LeakGuard::default();
@@ -751,12 +752,23 @@ async fn no_secret_reaches_any_surface_but_the_state_file() {
         }
     }
     let argv = {
-        let output = Command::new("/bin/ps")
-            .args(["-o", "command=", "-p", &instance.pid().to_string()])
-            .output()
-            .expect("ps runs");
+        let pid = instance.pid().to_string();
+        let output = if cfg!(windows) {
+            Command::new("powershell")
+                .args(["-NoProfile", "-Command"])
+                .arg(format!(
+                    "(Get-CimInstance Win32_Process -Filter 'ProcessId={pid}').CommandLine"
+                ))
+                .output()
+        } else {
+            Command::new("/bin/ps")
+                .args(["-o", "command=", "-p", &pid])
+                .output()
+        }
+        .expect("the process's command line");
         String::from_utf8_lossy(&output.stdout).into_owned()
     };
+    assert!(!argv.trim().is_empty(), "the command line was read");
     for needle in &refs {
         assert!(
             !encodings(needle).iter().any(|f| argv.contains(f)),

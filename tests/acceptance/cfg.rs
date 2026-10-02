@@ -34,9 +34,9 @@ fn write_config(root: &Path, extra: &str) -> PathBuf {
     write_private(
         &path,
         &format!(
-            "version = 1\n[storage]\nstate_file = \"{}\"\n[logging]\ndirectory = \"{}\"\n{extra}",
-            root.join("state/state.json").display(),
-            root.join("log").display(),
+            "version = 1\n[storage]\nstate_file = {}\n[logging]\ndirectory = {}\n{extra}",
+            crate::harness::toml_path(&root.join("state/state.json")),
+            crate::harness::toml_path(&root.join("log")),
         ),
     );
     path
@@ -825,8 +825,8 @@ async fn capture_keeps_the_audit_and_a_nested_capture_is_rejected() {
     let config = write_config(
         &root,
         &format!(
-            "[diagnostics]\nwire_capture_directory = \"{}\"\n",
-            root.join("log/cap").display()
+            "[diagnostics]\nwire_capture_directory = {}\n",
+            crate::harness::toml_path(&root.join("log/cap"))
         ),
     );
     let (code, _, stderr) = run(&root, &config, &["config", "validate"]);

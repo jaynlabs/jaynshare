@@ -1664,7 +1664,6 @@ async fn status_check_is_silent_and_answers_by_exit_code() {
 #[test]
 fn api_streams_beyond_the_timeout_and_reports_truncation() {
     let _leak_sweep = crate::leaks::LeakGuard::default();
-    let _leak_sweep = crate::leaks::LeakGuard::default();
     let (first_chunk, first_chunk_sent) = std::sync::mpsc::channel();
     let (mut child, server, stdout, stderr) =
         api_fixture("api-streams-beyond-slow", move |mut stream| {
@@ -1676,7 +1675,9 @@ fn api_streams_beyond_the_timeout_and_reports_truncation() {
             std::thread::sleep(Duration::from_millis(1500));
             stream.write_all(b"def").expect("write final chunk");
         });
-    first_chunk_sent.recv().expect("first chunk sent");
+    first_chunk_sent
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the CLI connects and the first chunk is sent");
     let deadline = Instant::now() + Duration::from_millis(500);
     while fs::metadata(&stdout).map_or(0, |m| m.len()) < 3 && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(10));

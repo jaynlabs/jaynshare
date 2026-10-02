@@ -52,12 +52,12 @@ fn spawn(scenario: &str, faults: Option<std::sync::Arc<crate::faults::Faults>>) 
              enabled = true\n\
              listen = \"127.0.0.1:{mitm_port}\"\n\n\
              [storage]\n\
-             state_file = \"{}\"\n\n\
+             state_file = {}\n\n\
              [logging]\n\
-             directory = \"{}\"\n\
+             directory = {}\n\
              level = \"debug\"\n",
-            root.join("state/state.json").display(),
-            root.join("log").display(),
+            crate::harness::toml_path(&root.join("state/state.json")),
+            crate::harness::toml_path(&root.join("log")),
         ),
     );
     let mut command = Command::new(binary());
@@ -395,6 +395,7 @@ async fn deleted_leaf_key_is_unusable_never_regenerated() {
 /// inside the 30-day window, start logs the expiry warning and `status`
 /// shows `expiring`; outside the window nothing is warned. The once-a-day
 /// repetition and the real client's reaction are checked by hand.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn expiry_warning_thirty_days_out() {
     let _leak_sweep = crate::leaks::LeakGuard::default();
