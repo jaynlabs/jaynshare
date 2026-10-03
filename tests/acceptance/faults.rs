@@ -7,12 +7,13 @@
 //! The product sees three `JAYNSHARE_`-prefixed environment variables naming
 //! the shim's control files; they change no behaviour of the product itself,
 //! and nothing of the shim is in the product's bytes.
-//! Interposition is Unix-only: scenarios using it compile out on Windows.
+//! Interposition is Unix-only; portable scenarios fall back to real waits on
+//! Windows.
 
-use std::io::Write as _;
+use std::io::{Read as _, Write as _};
 use std::process::Command;
 use std::sync::{Arc, OnceLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::harness::{PathBuf, Uuid, fs};
 
@@ -70,15 +71,48 @@ impl Faults {
     /// Injects the shim into a child process. Every spawn a scenario makes
     /// under faults goes through this.
     pub(crate) fn inject(&self, command: &mut Command) {
-        command
-            .env("JAYNSHARE_SHIM_CLOCK", self.directory.join("clock"))
-            .env("JAYNSHARE_SHIM_RENAME", self.directory.join("rename"))
-            .env("JAYNSHARE_SHIM_FSIZE", self.directory.join("fsize"));
-        if cfg!(target_os = "macos") {
-            command.env("DYLD_INSERT_LIBRARIES", shim_path());
-        } else {
-            command.env("LD_PRELOAD", shim_path());
+        #[cfg(unix)]
+        {
+            command
+                .env("JAYNSHARE_SHIM_CLOCK", self.directory.join("clock"))
+                .env("JAYNSHARE_SHIM_RENAME", self.directory.join("rename"))
+                .env("JAYNSHARE_SHIM_FSIZE", self.directory.join("fsize"));
+            if cfg!(target_os = "macos") {
+                command.env("DYLD_INSERT_LIBRARIES", shim_path());
+            } else {
+                command.env("LD_PRELOAD", shim_path());
+            }
         }
+        #[cfg(not(unix))]
+        let _ = command;
+    }
+
+    /// Advances the injected clock immediately. Windows has no interposition
+    /// shim, so it keeps the same coverage with a real wait.
+    pub(crate) async fn elapse(&self, duration: Duration) {
+        #[cfg(unix)]
+        {
+            self.set_clock_offset(self.clock_offset() as i128 + duration.as_nanos() as i128);
+        }
+        #[cfg(not(unix))]
+        tokio::time::sleep(duration).await;
+    }
+
+    pub(crate) fn product_time(&self) -> time::OffsetDateTime {
+        time::OffsetDateTime::now_utc() + time::Duration::nanoseconds(self.clock_offset())
+    }
+
+    pub(crate) fn reset_in(&self, seconds: i64) -> String {
+        (self.product_time().unix_timestamp() + seconds).to_string()
+    }
+
+    fn clock_offset(&self) -> i64 {
+        let mut bytes = [0; size_of::<i64>()];
+        fs::File::open(self.directory.join("clock"))
+            .expect("clock control file")
+            .read_exact(&mut bytes)
+            .expect("read clock offset");
+        i64::from_le_bytes(bytes)
     }
 
     /// Under the moved clock, the deadline the product sees at

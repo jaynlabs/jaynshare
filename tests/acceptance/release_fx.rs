@@ -472,7 +472,7 @@ pub(crate) fn platform_archive(version: &str, target: &str, executable: &[u8]) -
         ),
         ("README.txt", readme.into_bytes(), 0o644),
     ];
-    let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
     let mut archive = tar::Builder::new(encoder);
     let mut directory = tar::Header::new_gnu();
     directory.set_entry_type(tar::EntryType::Directory);

@@ -2022,50 +2022,62 @@ async fn a_client_leaving_the_ramp_queue_makes_no_attempt() {
     assert_eq!(instance.last_record(4)["attempts"], 1);
 }
 
-/// Throttle 429 `retry-after: 3` → the account is paused 3 s: new
-/// requests on it wait, none rotates, the default is unchanged; a second
-/// throttle during the pause extends it; the pause's end releases the waiters
-/// staggered under a fresh ramp. Counts at the fake under a 5 s
-/// step.
+/// Throttling pauses admission without rotating, extends on another throttle,
+/// and releases waiters under a fresh ramp when the pause ends.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_throttle_pauses_the_account_and_its_end_releases_staggered() {
     let _leak_sweep = crate::leaks::LeakGuard::default();
-    let instance = Instance::start_with(
+    let faults = Faults::new();
+    // Wide virtual phases keep slow CI status reads inside their phase.
+    let time_scale = if cfg!(unix) { 30 } else { 1 };
+    let floor_seconds = 2 * time_scale;
+    let hold_seconds = 5 * time_scale;
+    let step_seconds = 5 * time_scale;
+    let instance = Instance::start_with_faults(
         "throttle-pauses-account",
         Setup {
-            data_plane: "throttle_absorb_seconds = 1\n".into(),
-            // One waiter may go as the revalidation request after 2 s; the
-            // gate then stays shut for the rest of the scenario. 2 s (not 1)
-            // leaves the "paused attempts wait" read 1.5 s of slack under a
-            // loaded suite.
-            quota: "revalidation_floor_seconds = 2\nrevalidation_interval_seconds = 60\n".into(),
-            selection: ramp(true, 5_000, 30),
+            // Held replies must survive the injected clock jumps.
+            data_plane: "throttle_absorb_seconds = 1\nfirst_byte_timeout_seconds = 1200\n".into(),
+            quota: format!(
+                "revalidation_floor_seconds = {floor_seconds}\nrevalidation_interval_seconds = {}\n",
+                60 * time_scale
+            ),
+            selection: ramp(true, step_seconds * 1_000, 30 * time_scale),
             ..Setup::default()
         },
+        faults.clone(),
     )
     .await;
     add_two(&instance);
 
-    instance.upstream.script([reply_throttle_429(Some(5))]);
+    instance
+        .upstream
+        .script([reply_throttle_429(Some(hold_seconds))]);
     let answer = send(instance.addr, messages(haiku_prompt())).await;
     assert_eq!(answer.status, StatusCode::TOO_MANY_REQUESTS);
-    let paused_at = Instant::now();
-    let account = instance.account("FSUB");
+    let paused_at = faults.product_time().unix_timestamp();
+    let status = instance.status();
+    let account = status["accounts"]
+        .as_array()
+        .expect("accounts")
+        .iter()
+        .find(|account| account["display_name"] == "FSUB")
+        .expect("FSUB account");
+    let handle = account["handle"].clone();
     let first_end = crate_time(
         account["quota_holds"]["throttle_hold_end"]
             .as_str()
             .expect("the pause end"),
     );
-    let now = OffsetDateTime::now_utc().unix_timestamp();
     assert!(
-        (first_end - now - 5).abs() <= 2,
-        "paused ≈ 5 s: {first_end}"
+        (first_end - paused_at - hold_seconds as i64).abs() <= 2,
+        "paused for the advertised hold: {first_end}"
     );
     assert_eq!(
         account["eligibility"]["eligible"], true,
         "paused, not ineligible"
     );
-    assert_eq!(instance.default_account(), instance.handle("FSUB"));
+    assert_eq!(status["default_account"]["handle"], handle);
     assert_eq!(instance.events("account_paused").len(), 1);
 
     // Four callers during the pause: none reaches the fake, until the floor
@@ -2074,22 +2086,31 @@ async fn a_throttle_pauses_the_account_and_its_end_releases_staggered() {
     let held = gates(3);
     let before = instance.upstream.calls();
     instance.upstream.script(
-        std::iter::once(reply_throttle_429(Some(5)))
+        std::iter::once(reply_throttle_429(Some(hold_seconds)))
             .chain(held.iter().map(|g| Reply::Hold(Arc::clone(g)))),
     );
     let prompts = burst(instance.addr, 4, || messages(haiku_prompt()));
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while instance.events("attempt_paused").len() < 4 {
+        assert!(Instant::now() < deadline, "all four callers are paused");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     assert_eq!(
         instance.upstream.calls() - before,
         0,
         "paused attempts wait"
     );
+    faults.elapse(Duration::from_secs(floor_seconds)).await;
     assert_eq!(
         attempts_since(&instance.upstream, before, 1, Duration::from_secs(3)).await,
         1,
         "one revalidation release"
     );
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while instance.events("account_paused").len() < 2 {
+        assert!(Instant::now() < deadline, "the second throttle is recorded");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     let second_end = crate_time(
         instance.account("FSUB")["quota_holds"]["throttle_hold_end"]
             .as_str()
@@ -2103,14 +2124,13 @@ async fn a_throttle_pauses_the_account_and_its_end_releases_staggered() {
     assert_eq!(instance.upstream.calls() - before, 1, "the rest still wait");
 
     // The pause ends → a fresh ramp: one waiter at the end, one more per step.
+    faults.elapse(Duration::from_secs(hold_seconds)).await;
     assert_eq!(
         attempts_since(&instance.upstream, before, 2, Duration::from_secs(8)).await,
         2
     );
-    // The revalidation at ≈2 s was throttled for 5 s more: the pause ends
-    // at ≈7 s (the hold end is whole seconds, so allow one).
     assert!(
-        paused_at.elapsed() >= Duration::from_secs(6),
+        faults.product_time().unix_timestamp() >= second_end,
         "not before the extended pause end"
     );
     let ramps = instance.events("ramp_started");
@@ -2122,22 +2142,28 @@ async fn a_throttle_pauses_the_account_and_its_end_releases_staggered() {
     assert_eq!(ended.len(), 1, "{ended:?}");
     assert_eq!(ended[0]["fields"]["acct"], "FSUB");
     assert_eq!(ended[0]["fields"]["cause"], "hold_elapsed");
-    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    faults.elapse(Duration::from_millis(1_500)).await;
     assert_eq!(
         instance.upstream.calls() - before,
         2,
         "cap 1 until the step"
     );
+    faults
+        .elapse(Duration::from_millis(step_seconds * 1_000 - 1_500))
+        .await;
     assert_eq!(
         attempts_since(&instance.upstream, before, 3, Duration::from_secs(8)).await,
         3
     );
-    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    faults.elapse(Duration::from_millis(1_500)).await;
     assert_eq!(
         instance.upstream.calls() - before,
         3,
         "cap 2 until the next step"
     );
+    faults
+        .elapse(Duration::from_millis(step_seconds * 1_000 - 1_500))
+        .await;
     assert_eq!(
         attempts_since(&instance.upstream, before, 4, Duration::from_secs(8)).await,
         4
@@ -2168,7 +2194,7 @@ async fn a_throttle_pauses_the_account_and_its_end_releases_staggered() {
         "{records:?}"
     );
     assert!(instance.events("default_moved").is_empty());
-    assert_eq!(instance.default_account(), instance.handle("FSUB"));
+    assert_eq!(instance.default_account(), handle);
     assert!(
         instance.account("FSUB")["quota_holds"]["throttle_hold_end"].is_null(),
         "the pause is over"

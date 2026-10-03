@@ -10,6 +10,7 @@
 
 #![allow(clippy::items_after_test_module)]
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -135,11 +136,43 @@ fn leak_sweep() -> Vec<serde_json::Value> {
     );
     let mut hits = Vec::new();
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/acceptance");
-    sweep_tree(&root, &values, &mut hits);
+    sweep_tree(&root, &needle_forms(&values), &mut hits);
     hits
 }
 
-fn sweep_tree(directory: &Path, needles: &[(String, String)], hits: &mut Vec<serde_json::Value>) {
+struct NeedleForm {
+    role: String,
+    index: usize,
+    value: String,
+}
+
+fn needle_forms(needles: &[(String, String)]) -> BTreeMap<String, Vec<NeedleForm>> {
+    let mut groups: BTreeMap<String, Vec<NeedleForm>> = BTreeMap::new();
+    for (role, value) in needles {
+        let forms = crate::harness::encodings(value);
+        for (index, value) in forms.iter().enumerate() {
+            if forms[..index].contains(value) {
+                continue;
+            }
+            let prefix_end = value.char_indices().nth(3).map_or(value.len(), |(i, _)| i);
+            groups
+                .entry(value[..prefix_end].to_owned())
+                .or_default()
+                .push(NeedleForm {
+                    role: role.clone(),
+                    index,
+                    value: value.clone(),
+                });
+        }
+    }
+    groups
+}
+
+fn sweep_tree(
+    directory: &Path,
+    needles: &BTreeMap<String, Vec<NeedleForm>>,
+    hits: &mut Vec<serde_json::Value>,
+) {
     let Ok(entries) = fs::read_dir(directory) else {
         return;
     };
@@ -157,21 +190,33 @@ fn sweep_tree(directory: &Path, needles: &[(String, String)], hits: &mut Vec<ser
             && let Ok(bytes) = fs::read(&path)
         {
             let contents = String::from_utf8_lossy(&bytes);
-            for (role, value) in needles {
-                let forms = crate::harness::encodings(value);
-                for (index, form) in forms.iter().enumerate() {
-                    // A plain needle's JSON form is the needle itself: one leak, one hit.
-                    if forms[..index].contains(form) {
-                        continue;
-                    }
-                    if let Some(offset) = contents.find(form.as_str()) {
+            // ponytail: comparisons scale with prefix hits; use Aho-Corasick for dense matches.
+            for (prefix, forms) in needles {
+                let mut pending: Vec<_> = forms.iter().collect();
+                let mut remaining = contents.as_ref();
+                while let Some(relative) = remaining.find(prefix.as_str()) {
+                    let tail = &remaining[relative..];
+                    let offset = contents.len() - tail.len();
+                    pending.retain(|form| {
+                        if !tail.starts_with(&form.value) {
+                            return true;
+                        }
                         hits.push(json!({
-                            "needle_role": role,
-                            "needle_form": index,
+                            "needle_role": form.role,
+                            "needle_form": form.index,
                             "surface": path.display().to_string(),
                             "offset": offset,
                         }));
+                        false
+                    });
+                    if pending.is_empty() {
+                        break;
                     }
+                    let Some(first) = tail.chars().next() else {
+                        break;
+                    };
+                    // Advance one character so overlapping prefixes are still found.
+                    remaining = &tail[first.len_utf8()..];
                 }
             }
         }
@@ -217,13 +262,64 @@ mod tests {
         .expect("write the allowed surface");
         let needles = vec![("test token".to_owned(), "sk-ant-oat-leak-test".to_owned())];
         let mut hits = Vec::new();
-        sweep_tree(&dir, &needles, &mut hits);
+        sweep_tree(&dir, &needle_forms(&needles), &mut hits);
         let _ = fs::remove_dir_all(&dir);
         assert_eq!(hits.len(), 1, "{hits:?}");
         assert_eq!(
             hits[0]["surface"],
             dir.join("log.txt").display().to_string()
         );
+    }
+
+    #[test]
+    fn grouped_search_matches_individual_searches() {
+        run_start();
+        let dir = std::env::temp_dir().join(format!(
+            "leak-prefix-test-{}",
+            crate::harness::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&dir).expect("create the tree");
+        let path = dir.join("output.bin");
+        let contents = "\0é中d aaaaaab ababab xy sk-ant-oat-secret sk%2Dant%2Doat%2Dsecret";
+        fs::write(&path, contents).expect("write the output");
+        let needles: Vec<_> = [
+            "",
+            "x",
+            "xy",
+            "aaaaa",
+            "aaaab",
+            "aba",
+            "ababa",
+            "é中d",
+            "missing",
+            "sk-ant-oat-secret",
+            "sk-ant-oat-other",
+        ]
+        .iter()
+        .map(|value| (format!("role:{value}"), (*value).to_owned()))
+        .collect();
+        let mut expected = Vec::new();
+        for (role, value) in &needles {
+            let forms = crate::harness::encodings(value);
+            for (index, form) in forms.iter().enumerate() {
+                if !forms[..index].contains(form)
+                    && let Some(offset) = contents.find(form.as_str())
+                {
+                    expected.push(json!({
+                        "needle_role": role,
+                        "needle_form": index,
+                        "surface": path.display().to_string(),
+                        "offset": offset,
+                    }));
+                }
+            }
+        }
+        let mut hits = Vec::new();
+        sweep_tree(&dir, &needle_forms(&needles), &mut hits);
+        fs::remove_dir_all(&dir).expect("remove the test tree");
+        hits.sort_by_key(serde_json::Value::to_string);
+        expected.sort_by_key(serde_json::Value::to_string);
+        assert_eq!(hits, expected);
     }
 
     #[test]
