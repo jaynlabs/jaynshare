@@ -102,6 +102,10 @@ impl Faults {
         time::OffsetDateTime::now_utc() + time::Duration::nanoseconds(self.clock_offset())
     }
 
+    pub(crate) fn reset_in(&self, seconds: i64) -> String {
+        (self.product_time().unix_timestamp() + seconds).to_string()
+    }
+
     fn clock_offset(&self) -> i64 {
         let mut bytes = [0; size_of::<i64>()];
         fs::File::open(self.directory.join("clock"))

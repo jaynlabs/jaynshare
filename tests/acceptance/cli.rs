@@ -2287,9 +2287,14 @@ async fn a_private_listener_is_reached_through_loopback_as_itself() {
     };
 
     // 1. http: the fake on 127.0.0.1 gets the call, addressed to the
-    // configured host, with no bearer.
+    // configured host, with no bearer and without needing any TLS trust store.
     let config = write_config(fake.addr.port(), None);
-    let (code, _, stderr) = cli_raw(&["--config", &config, "account", "list"], &env, None);
+    let empty_roots = root.join("empty-roots.pem");
+    write_private(&empty_roots, "");
+    let mut plain_env = env.clone();
+    plain_env.push(("SSL_CERT_FILE".into(), empty_roots.display().to_string()));
+    plain_env.push(("SSL_CERT_DIR".into(), String::new()));
+    let (code, _, stderr) = cli_raw(&["--config", &config, "account", "list"], &plain_env, None);
     assert_eq!(code, 0, "the loopback default reaches 127.0.0.1: {stderr}");
     let seen = fake.seen();
     let request = seen

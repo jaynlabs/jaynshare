@@ -759,7 +759,6 @@ async fn every_ineligible_reason_is_the_right_one() {
         .script([reply_auth_401(), reply_auth_401()]);
     let answer = send(addr, pinned(messages(haiku_prompt()), "FSUB")).await;
     assert_eq!(answer.status, StatusCode::BAD_GATEWAY);
-    instance.settle();
     let state = eligibility_ctl(addr, &fsub).await;
     assert_eq!(state["reason"], "errored", "{state}");
 
@@ -783,7 +782,6 @@ async fn every_ineligible_reason_is_the_right_one() {
     instance.upstream.script([exhausted]);
     let answer = send(addr, messages(haiku_prompt())).await;
     assert_eq!(answer.status, StatusCode::TOO_MANY_REQUESTS);
-    instance.settle();
     let held = await_snapshot(addr, |body| {
         body["status"]["accounts"]
             .as_array()
@@ -807,7 +805,6 @@ async fn every_ineligible_reason_is_the_right_one() {
         .script([reply_teaching_weekly("0.99", "2099-01-01T00:00:00Z")]);
     let answer = send(addr, messages(prompt_for("claude-sonnet-4-5"))).await;
     assert_eq!(answer.status, StatusCode::OK, "over threshold still serves");
-    instance.settle();
     let over = await_snapshot(addr, |body| {
         body["status"]["accounts"]
             .as_array()
@@ -983,8 +980,9 @@ async fn the_usage_probe_shapes() {
     let started_before = probe["last_started"].clone();
     let finished_before = probe["last_finished"].clone();
 
-    // Mid-sweep: the trigger runs while the usage read is delayed.
-    instance.upstream.delay_usage(Duration::from_secs(2));
+    // Mid-sweep: the trigger runs while the usage reply is held.
+    let gate = Arc::new(Notify::new());
+    instance.upstream.script_usage([Reply::Hold(gate.clone())]);
     let started = ctl_post(addr, "/control/v1/quota/probe", json!({})).await;
     assert_eq!(started.status, StatusCode::ACCEPTED);
     assert!(started.json()["started_at"].is_string());
@@ -1001,6 +999,7 @@ async fn the_usage_probe_shapes() {
     assert!(probe["pending_reason"].is_null());
 
     await_upstream_usage_calls(&instance, 1).await;
+    gate.notify_one();
     let done = await_snapshot(addr, |body| {
         body["status"]["usage_probe"]["last_finished"] != finished_before
     })
@@ -1762,7 +1761,8 @@ async fn the_probe_trigger_refusals() {
     instance.add_fsub();
     let addr = instance.addr;
 
-    instance.upstream.delay_usage(Duration::from_secs(2));
+    let gate = Arc::new(Notify::new());
+    instance.upstream.script_usage([Reply::Hold(gate.clone())]);
     let first = ctl_post(addr, "/control/v1/quota/probe", json!({})).await;
     assert_eq!(first.status, StatusCode::ACCEPTED);
     assert!(first.json()["started_at"].is_string());
@@ -1772,7 +1772,12 @@ async fn the_probe_trigger_refusals() {
     assert_error(&overlapping.json(), "sweep_in_progress");
 
     await_upstream_usage_calls(&instance, 1).await;
-    tokio::time::sleep(Duration::from_millis(2_400)).await;
+    gate.notify_one();
+    let finished = await_snapshot(addr, |body| {
+        body["status"]["usage_probe"]["last_finished"].is_string()
+    })
+    .await;
+    assert!(finished["status"]["usage_probe"]["last_finished"].is_string());
     let again = ctl_post(addr, "/control/v1/quota/probe", json!({})).await;
     assert_eq!(again.status, StatusCode::ACCEPTED, "{}", again.text());
 }

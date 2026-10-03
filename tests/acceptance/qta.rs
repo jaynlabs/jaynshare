@@ -76,7 +76,8 @@ async fn operator_probe_refuses_an_overlapping_sweep() {
     let _leak_sweep = crate::leaks::LeakGuard::default();
     let instance = Instance::start("operator-probe-refuses").await;
     instance.add_fsub();
-    instance.upstream.delay_usage(Duration::from_secs(2));
+    let gate = Arc::new(Notify::new());
+    instance.upstream.script_usage([Reply::Hold(gate.clone())]);
 
     let first = instance.cli_json(&["probe"], None);
     assert_eq!(first["ok"], true, "{first}");
@@ -87,7 +88,12 @@ async fn operator_probe_refuses_an_overlapping_sweep() {
     assert_eq!(overlapping["error"]["code"], "sweep_in_progress");
 
     wait_for_usage_calls(&instance, 1, Duration::from_secs(3)).await;
-    tokio::time::sleep(Duration::from_millis(2_200)).await;
+    gate.notify_one();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while instance.status()["usage_probe"]["last_finished"].is_null() {
+        assert!(Instant::now() < deadline, "the probe finished");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     assert_eq!(instance.upstream.usage_calls().len(), 1);
 }
 
@@ -614,12 +620,14 @@ async fn family_only_exhaustion_leaves_other_families_usable() {
 #[tokio::test(flavor = "multi_thread")]
 async fn newer_reset_replaces_and_reset_less_only_extends() {
     let _leak_sweep = crate::leaks::LeakGuard::default();
-    let instance = Instance::start_with(
+    let faults = crate::faults::Faults::new();
+    let instance = Instance::start_with_faults(
         "newer-reset-replaces",
         Setup {
             quota: "revalidation_floor_seconds = 2\nrevalidation_interval_seconds = 2\n".into(),
             ..Setup::default()
         },
+        faults.clone(),
     )
     .await;
     instance.add_fkey();
@@ -628,7 +636,7 @@ async fn newer_reset_replaces_and_reset_less_only_extends() {
         &[
             ("tokens-limit", "100"),
             ("tokens-remaining", "0"),
-            ("tokens-reset", &reset_in(100)),
+            ("tokens-reset", &faults.reset_in(100)),
             ("requests-remaining", "40"),
         ],
         Some("45"),
@@ -639,13 +647,13 @@ async fn newer_reset_replaces_and_reset_less_only_extends() {
         (event_span(line, "hold_end") - 100).abs() <= 2,
         "the reset wins over the retry-after: {line}"
     );
-    tokio::time::sleep(Duration::from_millis(2_300)).await;
+    faults.elapse(Duration::from_millis(2_300)).await;
 
     instance.upstream.script([reply_429_apikey(
         &[
             ("tokens-limit", "100"),
             ("tokens-remaining", "0"),
-            ("tokens-reset", &reset_in(200)),
+            ("tokens-reset", &faults.reset_in(200)),
             ("requests-remaining", "40"),
         ],
         Some("45"),
@@ -656,7 +664,7 @@ async fn newer_reset_replaces_and_reset_less_only_extends() {
         (event_span(line, "hold_end") - 198).abs() <= 3,
         "the newer reset replaces the hold: {line}"
     );
-    tokio::time::sleep(Duration::from_millis(2_300)).await;
+    faults.elapse(Duration::from_millis(2_300)).await;
 
     // Reset-less: a later rejection only extends, never shortens.
     instance.upstream.script([reply_429_apikey(
@@ -670,7 +678,7 @@ async fn newer_reset_replaces_and_reset_less_only_extends() {
     send(instance.addr, messages(haiku_prompt())).await;
     let first = &instance.events("quota_classified")[2];
     assert!((event_span(first, "hold_end") - 30).abs() <= 2, "{first}");
-    tokio::time::sleep(Duration::from_millis(2_300)).await;
+    faults.elapse(Duration::from_millis(2_300)).await;
 
     instance.upstream.script([reply_429_apikey(
         &[
@@ -687,7 +695,7 @@ async fn newer_reset_replaces_and_reset_less_only_extends() {
         shortened > 25 && shortened < 31,
         "the 15 s rejection did not shorten the running hold: {second}"
     );
-    tokio::time::sleep(Duration::from_millis(2_300)).await;
+    faults.elapse(Duration::from_millis(2_300)).await;
 
     instance.upstream.script([reply_429_apikey(
         &[
@@ -711,13 +719,15 @@ async fn newer_reset_replaces_and_reset_less_only_extends() {
 #[tokio::test(flavor = "multi_thread")]
 async fn throttle_leaves_buckets_unchanged_and_extends_only() {
     let _leak_sweep = crate::leaks::LeakGuard::default();
-    let instance = Instance::start_with(
+    let faults = crate::faults::Faults::new();
+    let instance = Instance::start_with_faults(
         "throttle-leaves-buckets",
         Setup {
             data_plane: "throttle_absorb_seconds = 1\n".into(),
             quota: "revalidation_floor_seconds = 2\nrevalidation_interval_seconds = 2\n".into(),
             ..Setup::default()
         },
+        faults.clone(),
     )
     .await;
     instance.add_fsub();
@@ -734,7 +744,7 @@ async fn throttle_leaves_buckets_unchanged_and_extends_only() {
         .script([reply_throttle_429(Some(0)), reply_headerless_200()]);
     let answer = send(instance.addr, messages(haiku_prompt())).await;
     assert_eq!(answer.status, StatusCode::OK, "absorbed and retried");
-    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    faults.elapse(Duration::from_millis(1_500)).await;
     assert!(
         instance.account("FSUB")["quota_holds"]["throttle_hold_end"].is_null(),
         "the hold ended naturally"
@@ -747,10 +757,7 @@ async fn throttle_leaves_buckets_unchanged_and_extends_only() {
         .as_str()
         .expect("hold end")
         .to_string();
-    let started = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("clock")
-        .as_secs() as i64;
+    let started = faults.product_time().unix_timestamp();
     let end = crate_time(&hold);
     assert!((end - started - 119).abs() <= 3, "hold ≈ 120 s: {hold}");
 
@@ -759,7 +766,7 @@ async fn throttle_leaves_buckets_unchanged_and_extends_only() {
     // waits at admission; after the floor the pool releases one
     // waiting attempt as the revalidation request, and its
     // throttle 60 must not shorten the running 120 s hold.
-    tokio::time::sleep(Duration::from_millis(2_500)).await;
+    faults.elapse(Duration::from_millis(2_500)).await;
     instance.upstream.script([reply_throttle_429(Some(60))]);
     let answer = send(instance.addr, messages(haiku_prompt())).await;
     assert_eq!(answer.status, StatusCode::TOO_MANY_REQUESTS, "relayed");
@@ -773,7 +780,7 @@ async fn throttle_leaves_buckets_unchanged_and_extends_only() {
 
     // A longer one extends, clamped to 300 s (the 1…300) — again through
     // the released revalidation attempt, 2 s after the last one.
-    tokio::time::sleep(Duration::from_millis(2_500)).await;
+    faults.elapse(Duration::from_millis(2_500)).await;
     instance.upstream.script([reply_throttle_429(Some(600))]);
     send(instance.addr, messages(haiku_prompt())).await;
     let end = crate_time(
@@ -781,16 +788,13 @@ async fn throttle_leaves_buckets_unchanged_and_extends_only() {
             .as_str()
             .expect("still held"),
     );
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("clock")
-        .as_secs() as i64;
+    let now = faults.product_time().unix_timestamp();
     assert!((end - now - 300).abs() <= 4, "clamped extension: {end}");
 
     // The released revalidation's 200 ends the pause at
     // once, and the log carries the end as it carried the start — the
     // natural end of the first, absorbed hold before it.
-    tokio::time::sleep(Duration::from_millis(2_500)).await;
+    faults.elapse(Duration::from_millis(2_500)).await;
     instance.upstream.script([reply_headerless_200()]);
     let answer = send(instance.addr, messages(haiku_prompt())).await;
     assert_eq!(answer.status, StatusCode::OK, "the revalidation's 200");
@@ -824,11 +828,17 @@ async fn throttle_leaves_buckets_unchanged_and_extends_only() {
 #[tokio::test(flavor = "multi_thread")]
 async fn reset_expiry_leaves_the_bucket_unknown() {
     let _leak_sweep = crate::leaks::LeakGuard::default();
-    let instance = Instance::start("reset-expiry-leaves-bucket").await;
+    let faults = crate::faults::Faults::new();
+    let instance = Instance::start_with_faults(
+        "reset-expiry-leaves-bucket",
+        Setup::default(),
+        faults.clone(),
+    )
+    .await;
     instance.add_fsub();
     exhaust_fsub_until(&instance, 2).await;
 
-    tokio::time::sleep(Duration::from_millis(2_600)).await;
+    faults.elapse(Duration::from_millis(2_600)).await;
     let weekly = instance.account("FSUB")["buckets"]
         .as_array()
         .expect("buckets")
@@ -853,12 +863,14 @@ async fn reset_expiry_leaves_the_bucket_unknown() {
 #[tokio::test(flavor = "multi_thread")]
 async fn headroom_clears_hold_and_headerless_revalidation_leaves_unknown() {
     let _leak_sweep = crate::leaks::LeakGuard::default();
-    let instance = Instance::start_with(
+    let faults = crate::faults::Faults::new();
+    let instance = Instance::start_with_faults(
         "headroom-clears-hold",
         Setup {
             quota: "revalidation_floor_seconds = 2\nrevalidation_interval_seconds = 2\n".into(),
             ..Setup::default()
         },
+        faults.clone(),
     )
     .await;
     instance.add_fsub();
@@ -877,7 +889,7 @@ async fn headroom_clears_hold_and_headerless_revalidation_leaves_unknown() {
     assert_eq!(instance.account("FSUB")["eligibility"]["eligible"], false);
 
     // Headroom clears the hold before its prior end.
-    tokio::time::sleep(Duration::from_millis(2_300)).await;
+    faults.elapse(Duration::from_millis(2_300)).await;
     instance
         .upstream
         .script([reply_teaching_weekly("0.10", "2099-01-01T00:00:00Z")]);
@@ -905,7 +917,7 @@ async fn headroom_clears_hold_and_headerless_revalidation_leaves_unknown() {
         Some("3000"),
     )]);
     send(instance.addr, messages(haiku_prompt())).await;
-    tokio::time::sleep(Duration::from_millis(2_300)).await;
+    faults.elapse(Duration::from_millis(2_300)).await;
     instance.upstream.script([reply_headerless_200()]);
     let answer = send(instance.addr, messages(haiku_prompt())).await;
     assert_eq!(answer.status, StatusCode::OK, "the revalidation served");
@@ -927,12 +939,14 @@ async fn headroom_clears_hold_and_headerless_revalidation_leaves_unknown() {
 #[tokio::test(flavor = "multi_thread")]
 async fn threshold_only_candidate_is_immediate_held_waits_the_floor() {
     let _leak_sweep = crate::leaks::LeakGuard::default();
-    let instance = Instance::start_with(
+    let faults = crate::faults::Faults::new();
+    let instance = Instance::start_with_faults(
         "threshold-candidate-immediate",
         Setup {
             quota: "revalidation_floor_seconds = 6\nrevalidation_interval_seconds = 2\n".into(),
             ..Setup::default()
         },
+        faults.clone(),
     )
     .await;
     add_two(&instance);
@@ -961,7 +975,7 @@ async fn threshold_only_candidate_is_immediate_held_waits_the_floor() {
     // holds arrive through revalidation attempts (pins to over-threshold
     // accounts are refused before any attempt), 2 s apart — the gate's own
     // cadence. FSUB first (its observation is the older), then FSUB2.
-    tokio::time::sleep(Duration::from_millis(2_500)).await;
+    faults.elapse(Duration::from_millis(2_500)).await;
     instance.upstream.script([reply_429_unified(
         &[
             ("5h-utilization", "1.0"),
@@ -973,7 +987,7 @@ async fn threshold_only_candidate_is_immediate_held_waits_the_floor() {
     )]);
     let answer = send(instance.addr, messages(haiku_prompt())).await;
     assert_eq!(answer.status, StatusCode::TOO_MANY_REQUESTS, "FSUB held");
-    tokio::time::sleep(Duration::from_millis(2_500)).await;
+    faults.elapse(Duration::from_millis(2_500)).await;
     instance.upstream.script([reply_429_unified(
         &[
             ("5h-utilization", "1.0"),
@@ -988,7 +1002,7 @@ async fn threshold_only_candidate_is_immediate_held_waits_the_floor() {
 
     // With the floor at 6 s both anchors are still inside it when the gate
     // reopens: nobody, and no candidate.
-    tokio::time::sleep(Duration::from_millis(2_500)).await;
+    faults.elapse(Duration::from_millis(2_500)).await;
     let calls = instance.upstream.calls();
     let answer = send(instance.addr, messages(haiku_prompt())).await;
     assert_eq!(
@@ -999,7 +1013,7 @@ async fn threshold_only_candidate_is_immediate_held_waits_the_floor() {
     assert_eq!(instance.upstream.calls(), calls, "no candidate yet");
 
     // Past the floor the older-observed account is challenged and serves.
-    tokio::time::sleep(Duration::from_millis(3_000)).await;
+    faults.elapse(Duration::from_millis(3_000)).await;
     instance.upstream.script([reply_headerless_200()]);
     let answer = send(instance.addr, messages(haiku_prompt())).await;
     assert_eq!(answer.status, StatusCode::OK);
@@ -1125,12 +1139,14 @@ async fn futures_join(
 #[tokio::test(flavor = "multi_thread")]
 async fn revalidation_200_clears_429_rearms_network_preserves() {
     let _leak_sweep = crate::leaks::LeakGuard::default();
-    let instance = Instance::start_with(
+    let faults = crate::faults::Faults::new();
+    let instance = Instance::start_with_faults(
         "revalidation-200-clears",
         Setup {
             quota: "revalidation_floor_seconds = 2\nrevalidation_interval_seconds = 2\n".into(),
             ..Setup::default()
         },
+        faults.clone(),
     )
     .await;
     instance.add_fsub();
@@ -1150,7 +1166,7 @@ async fn revalidation_200_clears_429_rearms_network_preserves() {
     assert_eq!(answer.status, StatusCode::TOO_MANY_REQUESTS, "held");
 
     // 200 clears.
-    tokio::time::sleep(Duration::from_millis(2_300)).await;
+    faults.elapse(Duration::from_millis(2_300)).await;
     instance.upstream.script([reply_headerless_200()]);
     let answer = send(instance.addr, messages(haiku_prompt())).await;
     assert_eq!(answer.status, StatusCode::OK);
@@ -1168,7 +1184,7 @@ async fn revalidation_200_clears_429_rearms_network_preserves() {
     )]);
     let answer = send(instance.addr, messages(haiku_prompt())).await;
     assert_eq!(answer.status, StatusCode::TOO_MANY_REQUESTS, "held again");
-    tokio::time::sleep(Duration::from_millis(2_300)).await;
+    faults.elapse(Duration::from_millis(2_300)).await;
     instance.upstream.script([reply_429_unified(
         &[
             ("5h-utilization", "1.0"),
@@ -1182,7 +1198,7 @@ async fn revalidation_200_clears_429_rearms_network_preserves() {
     assert_eq!(answer.status, StatusCode::TOO_MANY_REQUESTS, "re-armed");
     let lines = instance.events("quota_classified");
     assert_eq!(lines.len(), 3, "the revalidation was reclassified");
-    tokio::time::sleep(Duration::from_millis(2_300)).await;
+    faults.elapse(Duration::from_millis(2_300)).await;
 
     // A network failure preserves the facts and consumes the gate.
     instance

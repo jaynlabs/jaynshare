@@ -597,7 +597,7 @@ async fn usage_and_quota_land_on_the_serving_account() {
     )
     .await;
     assert_eq!(answer.status, StatusCode::OK);
-    instance.settle();
+    instance.last_record(1);
 
     let account = instance.account("FSUB");
     assert_eq!(account["usage"]["input_tokens"], 11);
@@ -712,7 +712,6 @@ async fn http_401_surviving_the_refresh_errors_the_account_and_ends_502() {
     assert_eq!(record["serving_account"]["display_name"], "FSUB");
     assert_eq!(record["error_class"], "authentication");
 
-    instance.settle();
     let fsub = instance.account("FSUB");
     assert_eq!(fsub["health"]["state"], "errored");
     assert_eq!(
@@ -1239,7 +1238,6 @@ async fn exhaustion_429_on_the_bound_account_is_relayed() {
     assert!(instance.events("default_moved").is_empty());
 
     // The hold runs to the exact reset, and only the held account's models.
-    instance.settle();
     let weekly = instance.account("FSUB")["buckets"]
         .as_array()
         .expect("buckets")
@@ -1263,17 +1261,29 @@ async fn exhaustion_429_on_the_bound_account_is_relayed() {
 #[tokio::test(flavor = "multi_thread")]
 async fn throttle_retry_absorbed_then_relayed() {
     let _leak_sweep = crate::leaks::LeakGuard::default();
-    let instance = Instance::start("throttle-retry-absorbed").await;
+    let faults = crate::faults::Faults::new();
+    let instance =
+        Instance::start_with_faults("throttle-retry-absorbed", Setup::default(), faults.clone())
+            .await;
     instance.add_fsub();
 
     instance
         .upstream
         .script([reply_throttle_429(Some(3)), reply_headerless_200()]);
     let base = instance.upstream.calls();
-    let started = Instant::now();
-    let answer = send(instance.addr, messages(haiku_prompt())).await;
+    let answer = send_after_wait(
+        &instance,
+        &faults,
+        messages(haiku_prompt()),
+        "throttle_wait",
+    )
+    .await;
     assert_eq!(answer.status, StatusCode::OK);
-    let elapsed = started.elapsed();
+    let elapsed = Duration::from_millis(
+        instance.last_record(1)["duration_ms"]
+            .as_u64()
+            .expect("duration_ms"),
+    );
     assert!(
         elapsed >= Duration::from_millis(2_800) && elapsed < Duration::from_secs(8),
         "the caller waited the 3 s: {elapsed:?}"
@@ -1312,7 +1322,10 @@ async fn throttle_retry_absorbed_then_relayed() {
 #[tokio::test(flavor = "multi_thread")]
 async fn inline_wait_then_reattempt_of_the_bound_account() {
     let _leak_sweep = crate::leaks::LeakGuard::default();
-    let instance = Instance::start("inline-wait-reattempt").await;
+    let faults = crate::faults::Faults::new();
+    let instance =
+        Instance::start_with_faults("inline-wait-reattempt", Setup::default(), faults.clone())
+            .await;
     add_two(&instance);
     send(instance.addr, in_session(messages(haiku_prompt()), "golf")).await;
 
@@ -1321,25 +1334,34 @@ async fn inline_wait_then_reattempt_of_the_bound_account() {
         &[
             ("5h-utilization", "1.0"),
             ("5h-status", "rejected"),
-            ("5h-reset", &reset_in(10)),
+            ("5h-reset", &faults.reset_in(10)),
             ("7d-utilization", "1.0"),
             ("7d-status", "rejected"),
-            ("7d-reset", &reset_in(10)),
+            ("7d-reset", &faults.reset_in(10)),
         ],
         Some("10"),
     )]);
     let answer = send(instance.addr, in_session(messages(haiku_prompt()), "golf")).await;
     assert_eq!(answer.status, StatusCode::TOO_MANY_REQUESTS, "held");
 
-    let started = Instant::now();
     instance.upstream.script([reply_headerless_200()]);
-    let answer = send(instance.addr, in_session(messages(haiku_prompt()), "golf")).await;
+    let answer = send_after_wait(
+        &instance,
+        &faults,
+        in_session(messages(haiku_prompt()), "golf"),
+        "bound_account_held",
+    )
+    .await;
     assert_eq!(
         answer.status,
         StatusCode::OK,
         "the reset landed during the wait"
     );
-    let elapsed = started.elapsed();
+    let elapsed = Duration::from_millis(
+        instance.last_record(3)["duration_ms"]
+            .as_u64()
+            .expect("duration_ms"),
+    );
     assert!(
         elapsed >= Duration::from_millis(8_800) && elapsed < Duration::from_secs(15),
         "one inline wait of ~10 s: {elapsed:?}"
@@ -1353,10 +1375,10 @@ async fn inline_wait_then_reattempt_of_the_bound_account() {
         &[
             ("5h-utilization", "1.0"),
             ("5h-status", "rejected"),
-            ("5h-reset", &reset_in(20)),
+            ("5h-reset", &faults.reset_in(20)),
             ("7d-utilization", "1.0"),
             ("7d-status", "rejected"),
-            ("7d-reset", &reset_in(20)),
+            ("7d-reset", &faults.reset_in(20)),
         ],
         Some("20"),
     )]);
@@ -1386,12 +1408,14 @@ async fn inline_wait_then_reattempt_of_the_bound_account() {
 #[tokio::test(flavor = "multi_thread")]
 async fn hold_budget_holds_then_relays() {
     let _leak_sweep = crate::leaks::LeakGuard::default();
-    let instance = Instance::start_with(
+    let faults = crate::faults::Faults::new();
+    let instance = Instance::start_with_faults(
         "hold-budget-holds",
         Setup {
             data_plane: "hold_budget_seconds = 30\n".into(),
             ..Setup::default()
         },
+        faults.clone(),
     )
     .await;
     instance.add_fsub();
@@ -1408,9 +1432,18 @@ async fn hold_budget_holds_then_relays() {
     let answer = send(instance.addr, messages(haiku_prompt())).await;
     assert_eq!(answer.status, StatusCode::TOO_MANY_REQUESTS);
 
-    let started = Instant::now();
-    let answer = send(instance.addr, messages(haiku_prompt())).await;
-    let elapsed = started.elapsed();
+    let answer = send_after_wait(
+        &instance,
+        &faults,
+        messages(haiku_prompt()),
+        "no_account_hold",
+    )
+    .await;
+    let elapsed = Duration::from_millis(
+        instance.last_record(2)["duration_ms"]
+            .as_u64()
+            .expect("duration_ms"),
+    );
     assert_eq!(answer.status, StatusCode::TOO_MANY_REQUESTS);
     assert!(
         elapsed >= Duration::from_millis(28_000) && elapsed < Duration::from_secs(40),
@@ -1439,12 +1472,14 @@ async fn hold_budget_holds_then_relays() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_spent_budget_answers_without_the_inline_wait() {
     let _leak_sweep = crate::leaks::LeakGuard::default();
-    let instance = Instance::start_with(
+    let faults = crate::faults::Faults::new();
+    let instance = Instance::start_with_faults(
         "spent-budget-answers",
         Setup {
             data_plane: "hold_budget_seconds = 3\n".into(),
             ..Setup::default()
         },
+        faults.clone(),
     )
     .await;
     instance.add_fsub();
@@ -1460,9 +1495,18 @@ async fn a_spent_budget_answers_without_the_inline_wait() {
     )]);
     let answer = send(instance.addr, messages(haiku_prompt())).await;
     assert_eq!(answer.status, StatusCode::TOO_MANY_REQUESTS);
-    let started = Instant::now();
-    let answer = send(instance.addr, messages(haiku_prompt())).await;
-    let elapsed = started.elapsed();
+    let answer = send_after_wait(
+        &instance,
+        &faults,
+        messages(haiku_prompt()),
+        "no_account_hold",
+    )
+    .await;
+    let elapsed = Duration::from_millis(
+        instance.last_record(2)["duration_ms"]
+            .as_u64()
+            .expect("duration_ms"),
+    );
     assert_eq!(answer.status, StatusCode::TOO_MANY_REQUESTS);
     assert!(
         elapsed >= Duration::from_millis(2_500) && elapsed < Duration::from_secs(6),
@@ -1674,7 +1718,6 @@ async fn http_401_forces_a_refresh_and_one_retry_on_the_rotated_token() {
     assert_eq!(record["serving_account"]["display_name"], "FSUB");
     assert_eq!(record["error_class"], Value::Null);
 
-    instance.settle();
     let fsub = instance.account("FSUB");
     assert_eq!(
         fsub["health"]["state"], "ready",
@@ -1714,7 +1757,6 @@ async fn api_key_401_errors_the_account_and_ends_with_502() {
     assert_eq!(record["attempts"], 1);
     assert_eq!(record["error_class"], "authentication");
 
-    instance.settle();
     let fkey = instance.account("FKEY");
     assert_eq!(fkey["health"]["state"], "errored");
     assert_eq!(fkey["eligibility"]["reason"], "errored");
@@ -2012,18 +2054,45 @@ async fn send_after_inline_refresh_wait(
     instance: &Instance,
     faults: &crate::faults::Faults,
 ) -> Answer {
-    let waits = instance.events("refresh_wait_waited").len();
+    send_after_wait(
+        instance,
+        faults,
+        messages(haiku_prompt()),
+        "refresh_wait_waited",
+    )
+    .await
+}
+
+/// Advance only after the product has entered its wait, retaining the real-wait
+/// coverage on Windows and checking the product's elapsed time in its audit.
+async fn send_after_wait(
+    instance: &Instance,
+    faults: &crate::faults::Faults,
+    request: Request<Full<Bytes>>,
+    event: &str,
+) -> Answer {
+    let waits = instance.events(event).len();
     let addr = instance.addr;
-    let pending = tokio::spawn(async move { send(addr, messages(haiku_prompt())).await });
-    let deadline = Instant::now() + Duration::from_secs(3);
-    while instance.events("refresh_wait_waited").len() == waits {
-        assert!(Instant::now() < deadline, "the inline wait started");
+    let pending = tokio::spawn(async move { send(addr, request).await });
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let seconds = loop {
+        let events = instance.events(event);
+        if let Some(wait) = events.get(waits) {
+            break wait["fields"]["seconds"].as_u64().expect("wait seconds");
+        }
+        assert!(
+            Instant::now() < deadline && !pending.is_finished(),
+            "the product entered {event}"
+        );
         tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    assert!(!pending.is_finished(), "the request waits out the floor");
-    faults.elapse(Duration::from_secs(15)).await;
+    };
+    assert!(!pending.is_finished(), "the request remains held");
+    faults.elapse(Duration::from_secs(seconds)).await;
     instance.status();
-    pending.await.expect("inline-wait request")
+    tokio::time::timeout(Duration::from_secs(5), pending)
+        .await
+        .expect("the advanced wait completed")
+        .expect("held request")
 }
 
 /// 8 concurrent 1 MiB uploads complete in about the time of one;

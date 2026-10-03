@@ -17,9 +17,9 @@ use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
 use crate::harness::{
     Answer, Arc, Bytes, Command, Duration, Full, Instance, Instant, Method, Mutex, Path, PathBuf,
-    Request, Setup, SocketAddr, StdTcpListener, StdTcpStream, Stdio, TcpListener, TcpStream,
-    TokioIo, Value, binary, collect_answer, enroll, fs, haiku_prompt, json, messages,
-    non_loopback_addr, private_dir, reserve_port, scratch, send, write_private,
+    Request, Setup, SocketAddr, StdTcpListener, Stdio, TcpListener, TcpStream, TokioIo, Value,
+    binary, collect_answer, enroll, fs, haiku_prompt, json, messages, non_loopback_addr,
+    private_dir, reserve_port, scratch, send, write_private,
 };
 
 /// MITM mode on, everything else at the suite's defaults.
@@ -1011,38 +1011,58 @@ async fn unreachable_targets_are_502_and_504_before_any_200() {
         &refused.json(),
     );
 
-    // An address that answers nothing: 504, and only after the 30 s.
-    // TEST-NET-1 is documentation space (RFC 5737) and reaches no service;
-    // A host whose network answers it outright has no 30 s wait to observe,
-    // and that half is checked by hand.
+    // A silent corporate proxy exercises the same 30 s connection deadline
+    // entirely on loopback, without depending on the host's routing table.
     if cfg!(windows) {
-        eprintln!("skipping: Windows gives up a connection at about 21 s, before the 30 s");
+        eprintln!("skipping: the clock interposition fixture is Unix-only");
         return;
     }
-    let unroutable: SocketAddr = "192.0.2.1:443".parse().expect("TEST-NET-1");
-    let answered_fast = tokio::task::spawn_blocking(move || {
-        let at = Instant::now();
-        let _ = StdTcpStream::connect_timeout(&unroutable, Duration::from_secs(2));
-        at.elapsed() < Duration::from_millis(1500)
-    })
-    .await
-    .expect("probe the fixture host's route to TEST-NET-1");
-    if answered_fast {
-        eprintln!("skipping: the fixture host answers TEST-NET-1 outright; there is no 30 s wait");
-        return;
+    let silent = crate::harness::Fake::start().await;
+    silent.script([crate::harness::Reply::Stall]);
+    let faults = crate::faults::Faults::new();
+    let timed = Instance::start_with_faults(
+        "unreachable-targets-504",
+        Setup {
+            data_plane: format!(
+                "corporate_proxy_url = \"http://{}\"\nno_proxy = []\n",
+                silent.addr
+            ),
+            ..mitm_on()
+        },
+        faults.clone(),
+    )
+    .await;
+    let proxy = proxy_addr(&timed);
+    let started = faults.product_time();
+    let pending =
+        tokio::spawn(
+            async move { connect_through(proxy, "timeout.fixture.invalid:443", None).await },
+        );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while silent.calls() == 0 {
+        assert!(Instant::now() < deadline, "the proxy received the CONNECT");
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    let started = Instant::now();
-    let timed_out = connect_through(proxy, "192.0.2.1:443", None).await;
-    let waited = started.elapsed();
+    assert_eq!(silent.seen()[0].method, "CONNECT");
+    faults.elapse(Duration::from_secs(29)).await;
+    timed.status();
+    assert!(!pending.is_finished(), "no answer before the 30 s deadline");
+    faults.elapse(Duration::from_secs(1)).await;
+    timed.status();
+    let timed_out = tokio::time::timeout(Duration::from_secs(5), pending)
+        .await
+        .expect("the connection deadline fired")
+        .expect("CONNECT request");
     assert_proxy_refusal(
         timed_out.status,
         504,
         timed_out.header("connection"),
         &timed_out.json(),
     );
+    let waited = (faults.product_time() - started).whole_seconds();
     assert!(
-        waited >= Duration::from_secs(28) && waited <= Duration::from_secs(50),
-        "the 504 came at the 30 s, not sooner and not later: {waited:?}"
+        (28..=50).contains(&waited),
+        "the 504 came at the 30 s: {waited}"
     );
 }
 
@@ -3695,17 +3715,16 @@ async fn every_refusal_class_names_the_caller() {
 #[tokio::test]
 async fn advertised_origins_are_self_targets() {
     let _leak_sweep = crate::leaks::LeakGuard::default();
-    let echo = Echo::start().await;
+    let chain = Chain::start().await;
 
-    // 203.0.113.7 is TEST-NET-3: nothing connects there, so a refusal that
-    // arrives before any connection is the only passable assertion. The
-    // advertised origin is not the host's own address, yet it is self
+    // The advertised origin is not the host's own address, yet it is self:
     // it is the published address an enrolled client reaches back on.
     let instance = Instance::start_with(
         "self-targets-403-a",
         Setup {
             no_upstream_override: true,
             clients: "advertised_base_url = \"http://203.0.113.7:17421\"\n".into(),
+            data_plane: chain.settings(&[]),
             ..mitm_on()
         },
     )
@@ -3721,31 +3740,29 @@ async fn advertised_origins_are_self_targets() {
         );
     }
 
-    // A different address on the same network is not a self target: the
-    // guard lets it through to the connector, which cannot reach TEST-NET-3.
-    let through = connect_through(proxy, "203.0.113.8:9", None).await;
-    assert_ne!(
-        through.status, 403,
-        "an unrelated routable address is not a self target"
-    );
     assert!(
-        matches!(through.status, 502 | 504),
-        "the unreachable target fails in the connector: {}",
-        through.status
+        chain.heads().is_empty(),
+        "self targets never reach the proxy"
     );
-    assert_eq!(echo.opened(), 0);
+
+    // A different address is not self. The loopback proxy answers for it,
+    // so this classification check never connects to TEST-NET-3.
+    let through = connect_through(proxy, "203.0.113.8:9", None).await;
+    assert_eq!(through.status, 200, "an unrelated address is not self");
+    assert_eq!(chain.request_lines(), ["CONNECT 203.0.113.8:9 HTTP/1.1"]);
 }
 
 #[tokio::test]
 async fn bracketed_ipv6_literals_are_classified() {
     let _leak_sweep = crate::leaks::LeakGuard::default();
-    let echo = Echo::start().await;
+    let chain = Chain::start().await;
 
     // the override stays off: loopback is then a self target.
     let instance = Instance::start_with(
         "self-targets-403-b",
         Setup {
             no_upstream_override: true,
+            data_plane: chain.settings(&[]),
             ..mitm_on()
         },
     )
@@ -3776,21 +3793,16 @@ async fn bracketed_ipv6_literals_are_classified() {
         &mapped.json(),
     );
 
-    // A routable IPv6 literal is not a self target and reaches the connector;
-    // 2001:db8:: is TEST-NET/documentation space, so the connector's failure
-    // is the expected outcome.
-    let through = connect_through(proxy, "[2001:db8::1]:9", None).await;
-    assert_ne!(
-        through.status, 403,
-        "a routable literal is not a self target: {}",
-        through.body
-    );
     assert!(
-        !through.body.contains("cannot be resolved"),
-        "a literal target is never resolved: {}",
-        through.body
+        chain.heads().is_empty(),
+        "self targets never reach the proxy"
     );
-    assert_eq!(echo.opened(), 0);
+
+    // A routable literal reaches the loopback proxy without local resolution
+    // or a real connection to documentation-only IPv6 space.
+    let through = connect_through(proxy, "[2001:db8::1]:9", None).await;
+    assert_eq!(through.status, 200, "a routable literal is not self");
+    assert_eq!(chain.request_lines(), ["CONNECT [2001:db8::1]:9 HTTP/1.1"]);
 }
 
 #[tokio::test]
