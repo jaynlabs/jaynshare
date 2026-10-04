@@ -1,15 +1,17 @@
 //! Third-party facts about the Codex backend on chatgpt.com, as the Codex CLI
 //! speaks to it under a ChatGPT login.
 
-use http::{HeaderMap, HeaderName};
+use http::header::AUTHORIZATION;
+use http::{HeaderMap, HeaderName, HeaderValue};
 use serde_json::Value;
 
-use crate::pool::Account;
 use crate::pool::quota::Observation;
+use crate::pool::{Account, Credential};
 
 pub const API_HOST: &str = "chatgpt.com";
 pub const API_ORIGIN: &str = "https://chatgpt.com";
 pub const SESSION_ID: HeaderName = HeaderName::from_static("session-id");
+pub const CHATGPT_ACCOUNT_ID: HeaderName = HeaderName::from_static("chatgpt-account-id");
 
 pub fn is_telemetry(_path: &str) -> bool {
     todo!("lane C: /backend-api/codex/analytics-events and below")
@@ -19,8 +21,22 @@ pub fn is_account_bound(_path: &str) -> bool {
     todo!("lane C: everything outside /backend-api/codex/")
 }
 
-pub fn inject_credential(_headers: &mut HeaderMap, _account: &Account) {
-    todo!("lane C: bearer plus ChatGPT-Account-ID")
+/// Codex accounts are ChatGPT logins; an API key has no Codex form, so it
+/// injects nothing and upstream answers 401.
+pub fn inject_credential(headers: &mut HeaderMap, account: &Account) {
+    if let Credential::OAuth(c) = &account.credential
+        && let Ok(v) = HeaderValue::from_str(&format!("Bearer {}", c.access_token.expose()))
+    {
+        headers.insert(AUTHORIZATION, v);
+    }
+    if let Some(v) = account
+        .profile
+        .chatgpt_account_id
+        .as_deref()
+        .and_then(|id| HeaderValue::from_str(id).ok())
+    {
+        headers.insert(CHATGPT_ACCOUNT_ID, v);
+    }
 }
 
 pub fn observe_headers(_headers: &HeaderMap) -> Vec<Observation> {
@@ -33,4 +49,39 @@ pub fn observe_usage(_usage: &Value) -> Result<Vec<Observation>, String> {
 
 pub fn is_spend_cap_429(_body: Option<&[u8]>) -> bool {
     todo!("lane B: the usage-limit 429 body")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pool::{OAuthCredential, Profile, Secret, Source};
+    use crate::provider::Provider;
+    use time::macros::datetime;
+
+    #[test]
+    fn the_pooled_login_replaces_the_client_s_bearer_and_workspace() {
+        let account = Account::new(
+            Provider::Codex,
+            String::new(),
+            Profile {
+                chatgpt_account_id: Some("acct-pool".into()),
+                ..Profile::default()
+            },
+            Source::PortableJson,
+            Credential::OAuth(OAuthCredential {
+                access_token: Secret::new("pooled".into()),
+                refresh_token: None,
+                expires_at: datetime!(2027-01-01 00:00 UTC),
+                last_refresh_attempt_at: None,
+                last_refresh_success_at: None,
+                refresh_not_before: None,
+            }),
+        );
+        let mut h = HeaderMap::new();
+        h.insert(AUTHORIZATION, HeaderValue::from_static("Bearer own"));
+        h.insert(CHATGPT_ACCOUNT_ID, HeaderValue::from_static("acct-own"));
+        inject_credential(&mut h, &account);
+        assert_eq!(h[AUTHORIZATION], "Bearer pooled");
+        assert_eq!(h[CHATGPT_ACCOUNT_ID], "acct-pool");
+    }
 }
