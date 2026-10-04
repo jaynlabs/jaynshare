@@ -20,7 +20,7 @@ pub(super) fn env(args: &EnvArgs) -> Outcome {
         ));
     }
     let request = launch::Request {
-        provider: args.provider,
+        provider: Some(args.provider),
         intent: intent(&args.launch),
         picker: None,
         args: Vec::new(),

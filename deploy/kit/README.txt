@@ -31,7 +31,9 @@ Code. It starts a picker when the pool cannot choose for you: pick the
 account to serve this session and it is remembered for it. Pass
 `--account <name>` to name the account yourself, or `--auto` to let the
 pool pick without asking. `--direct` runs outside the pool entirely,
-under your own login instead of a pool account.
+under your own login instead of a pool account. `jaynshare` alone shows
+every pooled account, Claude and ChatGPT, with its usage, and launches
+the tool of the one you pick.
 
 `jaynshare status` shows this machine's enrollment and connection state.
 If you want plain `claude` to keep working, `jaynshare alias` makes it

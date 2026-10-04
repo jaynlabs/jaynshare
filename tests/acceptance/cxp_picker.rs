@@ -640,6 +640,102 @@ async fn cancel_interrupt_and_end_of_input_each_end_with_15() {
     );
 }
 
+/// Bare `jaynshare` offers every provider's accounts, each provider under
+/// its tool's name with its own automatic row, and launches the tool of the
+/// row picked; `JAYNSHARE_ACCOUNT` does not skip it. Without a terminal it
+/// refuses like any pick, and without an installation it is the help.
+#[tokio::test(flavor = "multi_thread")]
+async fn bare_jaynshare_picks_across_providers_and_launches_the_picked_tool() {
+    let _leak_sweep = crate::leaks::LeakGuard::default();
+    let mut instance = Instance::start_client("bare-picks-across-providers").await;
+    add_two(&instance);
+    instance.restart_with_state(|state| {
+        let record = state["accounts"]
+            .as_array_mut()
+            .expect("accounts")
+            .iter_mut()
+            .find(|r| r["display_name"] == "FSUB2")
+            .expect("the FSUB2 record");
+        record["provider"] = json!("codex");
+        record["chatgpt_account_id"] = json!("ws-fsub2");
+    });
+    let machine = install_client(&instance).await;
+    let pin = |name: &str| Some(token(true, &instance.handle(name)));
+    // The fake answers as either tool; its CA variable tells which ran.
+    let ran = |why: &str| {
+        let seen = machine.claude_ran().expect(why);
+        let tool = if seen.env.contains_key("CODEX_CA_CERTIFICATE") {
+            "codex"
+        } else {
+            assert!(seen.env.contains_key("NODE_EXTRA_CA_CERTS"), "{why}");
+            "claude"
+        };
+        (tool, seen.pin())
+    };
+
+    let numbered = [("JAYNSHARE_PICKER", "numbered")];
+    let (code, transcript) = machine.pty(&[], &numbered, &[("or q to cancel", "4\r")]);
+    assert_eq!(code, 0, "the fake exits 0: {transcript}");
+    let lines = [
+        "\nClaude Code\r",
+        "  1) Automatic (the pool chooses)",
+        "  2) FSUB | 5h ? | weekly ?",
+        "\nCodex\r",
+        "  3) Automatic (the pool chooses)",
+        "  4) FSUB2 | 5h ? | weekly ?",
+        "Enter a number (1-4)",
+    ];
+    let at: Vec<usize> = lines
+        .iter()
+        .map(|line| {
+            transcript
+                .find(line)
+                .unwrap_or_else(|| panic!("{line:?} missing: {transcript}"))
+        })
+        .collect();
+    assert!(at.windows(2).all(|w| w[0] < w[1]), "in order: {transcript}");
+    assert_eq!(ran("4: FSUB2"), ("codex", pin("FSUB2")));
+
+    let (code, _) = machine.pty(&[], &numbered, &[("or q to cancel", "1\r")]);
+    assert_eq!(code, 0);
+    assert_eq!(ran("1: Claude Code's automatic row"), ("claude", None));
+
+    // The keyboard skips headings: up wraps to FSUB2, and down twice from
+    // the first automatic row lands on Codex's.
+    let keyboard = [("JAYNSHARE_PICKER", "keyboard")];
+    for (keys, want) in [
+        (format!("{KEY_UP}{KEY_ENTER}"), ("codex", pin("FSUB2"))),
+        (format!("{KEY_DOWN}{KEY_DOWN}{KEY_ENTER}"), ("codex", None)),
+    ] {
+        let (code, transcript) = machine.pty(&[], &keyboard, &[("Esc cancels", &keys)]);
+        assert_eq!(code, 0, "{keys:?}: {transcript}");
+        assert_eq!(ran(&format!("{keys:?}")), want, "{keys:?}");
+    }
+
+    let (code, transcript) = machine.pty(
+        &[],
+        &[
+            ("JAYNSHARE_PICKER", "numbered"),
+            ("JAYNSHARE_ACCOUNT", "FSUB"),
+        ],
+        &[("or q to cancel", "3\r")],
+    );
+    assert_eq!(code, 0, "{transcript}");
+    let seen = machine.claude_ran().expect("Codex was launched");
+    assert!(!seen.env.contains_key("JAYNSHARE_ACCOUNT"));
+    assert_eq!(seen.pin(), None, "the picker, not the variable, chose");
+
+    let (code, _, stderr) = machine.jaynshare(&[], &[], None);
+    assert_eq!(code, 16, "{stderr}");
+    assert!(stderr.starts_with("cli_no_terminal:"), "{stderr}");
+
+    fs::remove_file(machine.client_dir.join("client.toml")).expect("remove client.toml");
+    let (code, _, stderr) = machine.jaynshare(&[], &[], None);
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("Usage: jaynshare"), "{stderr}");
+    instance.stop();
+}
+
 /// `--picker` matches the leg's name.
 fn where_picker(why: &&str) -> &'static str {
     if why.starts_with("keyboard") {

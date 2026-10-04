@@ -141,6 +141,10 @@ fn dual_role(cli: &Cli, operator_flag: bool, client_flag: bool) -> Role {
 
 pub fn main() -> i32 {
     let argv: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    // Bare, on an enrolled machine: pick any account, launch its tool.
+    if argv.len() == 1 && client_installation().1 {
+        return tool::pick();
+    }
     let json_asked = argv.iter().any(|a| a == "--json");
     let color = if argv.iter().any(|a| a == "--no-color") || std::env::var_os("NO_COLOR").is_some()
     {

@@ -39,10 +39,12 @@ pub enum IntentFlag {
     Direct,
 }
 
-/// One `claude`, `codex` or `env` invocation, stripped of clap's types.
+/// One `claude`, `codex`, bare `jaynshare` or `env` invocation, stripped of
+/// clap's types.
 pub struct Request {
-    /// Whose tool launches, on whose accounts.
-    pub provider: Provider,
+    /// Whose tool launches, on whose accounts; `None` offers every
+    /// provider's in the picker, and the account picked decides.
+    pub provider: Option<Provider>,
     pub intent: IntentFlag,
     pub picker: Option<picker::Kind>,
     /// Passed to the tool unchanged and in order.
@@ -91,24 +93,23 @@ pub fn run(request: Request) -> Result<i32, Refusal> {
     exec::exec(&executable, &args, &prepared.plan)
 }
 
-/// The shared half of `claude`, `codex` and `env`: every check and the plan.
-/// `launch` is false for `env`, which needs no executable.
+/// The shared half of `claude`, `codex`, bare `jaynshare` and `env`: every
+/// check and the plan. `launch` is false for `env`, which needs no executable.
 pub fn prepare(request: Request, launch: bool) -> Result<Prepared, Refusal> {
-    let provider = request.provider;
-    let tool = provider.tool();
     let mut notices = Vec::new();
     // The environment's pin is consumed whatever the flags say; an
     // explicit flag wins over it (the flag is the more
-    // deliberate input).
+    // deliberate input). Bare `jaynshare` always picks.
     let ambient = std::env::var("JAYNSHARE_ACCOUNT")
         .ok()
-        .filter(|v| !v.is_empty());
+        .filter(|v| !v.is_empty() && request.provider.is_some());
     let intent = match (request.intent, ambient) {
         (IntentFlag::Pick, Some(reference)) => IntentFlag::Account(reference),
         (flag, _) => flag,
     };
 
     if intent == IntentFlag::Direct {
+        let tool = request.provider.expect("--direct names its tool").tool();
         // A direct launch needs nothing from the pool — but `claude` is
         // an engineer verb, so the client installation must exist.
         client::read_installation().map_err(installation_refusal)?;
@@ -148,8 +149,12 @@ pub fn prepare(request: Request, launch: bool) -> Result<Prepared, Refusal> {
     let secret = client::read_secret(&installation).map_err(installation_refusal)?;
     require_proxy(&installation)?;
 
-    // No pooled environment is ever built without the tool.
-    let executable = executable(tool, launch)?;
+    // No pooled environment is ever built without the tool; when the
+    // account picked decides it, it is looked up once picked.
+    let found = match request.provider {
+        Some(provider) => executable(provider.tool(), launch)?,
+        None => None,
+    };
 
     // One intercepted probe gives an authenticated answer within 1.5 s, or
     // nothing launches; the snapshot stays best-effort.
@@ -157,7 +162,7 @@ pub fn prepare(request: Request, launch: bool) -> Result<Prepared, Refusal> {
         .enable_all()
         .build()
         .expect("runtime");
-    runtime.block_on(reachable(&mut installation, &secret, tool))?;
+    runtime.block_on(reachable(&mut installation, &secret, request.provider))?;
     let snapshot = runtime
         .block_on(client::snapshot(&installation, &secret, None, READ_TIMEOUT))
         .ok();
@@ -174,19 +179,28 @@ pub fn prepare(request: Request, launch: bool) -> Result<Prepared, Refusal> {
     // The hold hint; an unreadable snapshot leaves the deadline alone.
     let hold_hint = snapshot.and_then(|snapshot| snapshot["hold_hint_seconds"].as_u64());
 
-    let token = runtime.block_on(async {
-        match &intent {
-            IntentFlag::Account(reference) => {
-                intent::resolve(&installation, &secret, reference, provider, &mut notices).await
+    let (provider, token) = runtime.block_on(async {
+        match (&intent, request.provider) {
+            (IntentFlag::Account(reference), Some(provider)) => {
+                let token =
+                    intent::resolve(&installation, &secret, reference, provider, &mut notices)
+                        .await?;
+                Ok((provider, token))
             }
-            IntentFlag::Pick => {
+            (IntentFlag::Pick, provider) => {
                 let kind = picker_kind.expect("pick mode");
                 intent::pick(&installation, &secret, provider, kind).await
             }
-            IntentFlag::Auto => Ok(None),
-            IntentFlag::Direct => unreachable!("handled above"),
+            (IntentFlag::Auto, Some(provider)) => Ok((provider, None)),
+            _ => unreachable!("only a pick leaves the tool to the account"),
         }
     })?;
+    let tool = provider.tool();
+    let executable = if found.is_some() {
+        found
+    } else {
+        executable(tool, launch)?
+    };
 
     let mut plan = env::build(&env::Inputs {
         tool,
@@ -238,7 +252,7 @@ fn require_proxy(installation: &ClientInstallation) -> Result<(), Refusal> {
 async fn reachable(
     installation: &mut ClientInstallation,
     secret: &str,
-    tool: &Tool,
+    provider: Option<Provider>,
 ) -> Result<(), Refusal> {
     let origin = installation.proxy.clone().unwrap_or_default();
     let ca = installation.directory.join("ca.pem");
@@ -268,14 +282,14 @@ async fn reachable(
         },
         other => other.map_err(|code| (code, String::new())),
     };
-    checked.map_err(|(code, why)| check_refusal(&origin, code, &why, tool))
+    checked.map_err(|(code, why)| check_refusal(&origin, code, &why, provider))
 }
 
-/// A failed check names the origin and the `--direct` way out, and keeps
-/// the failure's class — 4 no answer, 5 the credential refused, 6 no
-/// snapshot under that origin, 10 a failed or incompatible server, 12 the CA
-/// failed.
-fn check_refusal(origin: &str, code: i32, why: &str, tool: &Tool) -> Refusal {
+/// A failed check names the origin and the `--direct` way out (every
+/// tool's when no provider was named), and keeps the failure's class — 4 no
+/// answer, 5 the credential refused, 6 no snapshot under that origin, 10 a
+/// failed or incompatible server, 12 the CA failed.
+fn check_refusal(origin: &str, code: i32, why: &str, provider: Option<Provider>) -> Refusal {
     let (code, slug, what) = match code {
         4 => (
             4,
@@ -301,13 +315,25 @@ fn check_refusal(origin: &str, code: i32, why: &str, tool: &Tool) -> Refusal {
     } else {
         format!(" ({why})")
     };
+    let providers = match provider {
+        Some(provider) => vec![provider],
+        None => Provider::ALL.to_vec(),
+    };
+    let direct = providers
+        .into_iter()
+        .map(|provider| {
+            let tool = provider.tool();
+            format!(
+                "`jaynshare {} --direct` launches {}",
+                tool.executable, tool.name
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" and ");
     Refusal::new(
         code,
         slug,
-        format!(
-            "{origin} {what}{why}. `jaynshare {} --direct` launches {} outside the pool, under your own login",
-            tool.executable, tool.name
-        ),
+        format!("{origin} {what}{why}. {direct} outside the pool, under your own login"),
     )
 }
 

@@ -1,11 +1,11 @@
-//! What a picker row reads: the automatic row first, then
+//! What a picker line reads: a heading as is, the automatic row, and
 //! each display name with control characters removed and truncated to its
 //! column, its five-hour and weekly utilisation, and whether it can be chosen
 //! now. The
 //! character set is ASCII on Windows and wherever the locale names
 //! no UTF-8.
 
-use super::Row;
+use super::{Line, Row};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Charset {
@@ -95,35 +95,42 @@ pub fn rate_limits(five_hour: Option<f64>, weekly: Option<f64>) -> String {
     )
 }
 
-/// The rows' texts — index 0 is the automatic row, index `i + 1`
-/// is `rows[i]` — without markers or numbers, which the pickers add.
-pub fn labels(rows: &[Row], width: usize, charset: Charset) -> Vec<String> {
-    std::iter::once(AUTOMATIC.to_string())
-        .chain(rows.iter().map(|row| {
-            let limits = rate_limits(row.five_hour, row.weekly);
-            let unavailable_width = if row.selectable {
-                0
-            } else {
-                UNAVAILABLE.chars().count() + 1
-            };
-            let reserved = limits.chars().count() + unavailable_width + 3;
-            let name = sanitize(
-                &row.display_name,
-                width.saturating_sub(reserved).max(16),
-                charset,
-            );
-            let label = format!("{name} | {limits}");
-            if row.selectable {
-                label
-            } else {
-                format!("{label} {UNAVAILABLE}")
-            }
-        }))
+/// The lines' texts, without markers or numbers, which the pickers add.
+pub(super) fn labels(lines: &[Line], width: usize, charset: Charset) -> Vec<String> {
+    lines
+        .iter()
+        .map(|line| match line {
+            Line::Heading(heading) => heading.to_string(),
+            Line::Automatic(_) => AUTOMATIC.to_string(),
+            Line::Account(_, row) => label(row, width, charset),
+        })
         .collect()
+}
+
+fn label(row: &Row, width: usize, charset: Charset) -> String {
+    let limits = rate_limits(row.five_hour, row.weekly);
+    let unavailable_width = if row.selectable {
+        0
+    } else {
+        UNAVAILABLE.chars().count() + 1
+    };
+    let reserved = limits.chars().count() + unavailable_width + 3;
+    let name = sanitize(
+        &row.display_name,
+        width.saturating_sub(reserved).max(16),
+        charset,
+    );
+    let label = format!("{name} | {limits}");
+    if row.selectable {
+        label
+    } else {
+        format!("{label} {UNAVAILABLE}")
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::{Section, lines};
     use super::*;
 
     fn row(name: &str, selectable: bool) -> Row {
@@ -149,13 +156,43 @@ mod tests {
 
     #[test]
     fn automatic_first_then_the_catalogue_in_order() {
-        let labels = labels(&[row("A", true), row("B", false)], 20, Charset::Ascii);
+        let section = Section {
+            heading: None,
+            rows: vec![row("A", true), row("B", false)],
+        };
+        let labels = labels(&lines(&[section]), 20, Charset::Ascii);
         assert_eq!(
             labels,
             [
                 AUTOMATIC,
                 "A | 5h 12% | weekly 34%",
                 "B | 5h 12% | weekly 34% (cannot be chosen now)"
+            ]
+        );
+    }
+
+    #[test]
+    fn each_section_has_its_heading_and_its_own_automatic_row() {
+        let sections = [
+            Section {
+                heading: Some("Claude Code"),
+                rows: vec![row("A", true)],
+            },
+            Section {
+                heading: Some("Codex"),
+                rows: vec![row("B", true)],
+            },
+        ];
+        let labels = labels(&lines(&sections), 20, Charset::Ascii);
+        assert_eq!(
+            labels,
+            [
+                "Claude Code",
+                AUTOMATIC,
+                "A | 5h 12% | weekly 34%",
+                "Codex",
+                AUTOMATIC,
+                "B | 5h 12% | weekly 34%"
             ]
         );
     }

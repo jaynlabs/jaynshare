@@ -1,9 +1,9 @@
-//! The numbered picker — numbered rows, automatic is 1, one
-//! line read from the controlling terminal per attempt. An unselectable or
+//! The numbered picker — numbered rows under unnumbered headings, the first
+//! automatic row is 1, one line read from the controlling terminal per attempt. An unselectable or
 //! out-of-range entry is refused with a message and the prompt repeats; the
 //! cancel word or end of input cancels, and a closed input never selects.
 
-use super::{CANCELLED, Choice, PickError, Row};
+use super::{CANCELLED, Choice, Line, PickError};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 
@@ -67,7 +67,7 @@ fn spawn_interrupt_watcher(armed: std::sync::mpsc::Sender<()>) -> Disarm {
 }
 
 /// The numbered-list picker.
-pub fn pick(rows: &[Row]) -> Result<Choice, PickError> {
+pub(super) fn pick(lines: &[Line]) -> Result<(usize, Choice), PickError> {
     let (armed_tx, armed_rx) = std::sync::mpsc::channel();
     let _disarm = spawn_interrupt_watcher(armed_tx);
     let terminal = super::tty::open().map_err(|_| PickError::NoTerminal)?;
@@ -75,8 +75,12 @@ pub fn pick(rows: &[Row]) -> Result<Choice, PickError> {
     let mut output = terminal.output;
     let charset = super::render::charset();
     let width = super::render::name_width();
-    let labels = super::render::labels(rows, width, charset);
-    let last = labels.len();
+    let labels = super::render::labels(lines, width, charset);
+    let numbered: Vec<&Line> = lines
+        .iter()
+        .filter(|line| !matches!(line, Line::Heading(_)))
+        .collect();
+    let last = numbered.len();
     let prompt = format!("Enter a number (1-{last}), or q to cancel: ");
 
     let prompt_once = |output: &mut File| -> Result<(), PickError> {
@@ -91,8 +95,14 @@ pub fn pick(rows: &[Row]) -> Result<Choice, PickError> {
         .map_err(|_| PickError::Io("the interrupt watcher ended".into()))?;
 
     writeln!(output, "Choose the account for this session:").map_err(io)?;
-    for (n, label) in labels.iter().enumerate() {
-        writeln!(output, "  {}) {label}", n + 1).map_err(io)?;
+    let mut number = 0;
+    for (line, label) in lines.iter().zip(&labels) {
+        if matches!(line, Line::Heading(_)) {
+            writeln!(output, "{label}").map_err(io)?;
+        } else {
+            number += 1;
+            writeln!(output, "  {number}) {label}").map_err(io)?;
+        }
     }
     prompt_once(&mut output)?;
 
@@ -107,20 +117,20 @@ pub fn pick(rows: &[Row]) -> Result<Choice, PickError> {
         if answer.eq_ignore_ascii_case("q") || answer.eq_ignore_ascii_case("quit") {
             return Err(PickError::Cancelled);
         }
-        if answer == "1" {
-            return Ok(Choice::Automatic);
-        }
-        if let Some(n) = answer
+        if let Some(line) = answer
             .parse::<usize>()
             .ok()
-            .filter(|&n| (2..=last).contains(&n))
+            .filter(|&n| (1..=last).contains(&n))
+            .map(|n| numbered[n - 1])
         {
-            let row = &rows[n - 2];
-            if row.selectable {
-                return Ok(Choice::Account(row.handle.clone()));
+            if let Some(choice) = line.choice() {
+                return Ok(choice);
             }
-            let name = super::render::sanitize(&row.display_name, width, charset);
-            writeln!(output, "{name} cannot be chosen now; choose another.").map_err(io)?;
+            // Only an account row can be unselectable.
+            if let Line::Account(_, row) = line {
+                let name = super::render::sanitize(&row.display_name, width, charset);
+                writeln!(output, "{name} cannot be chosen now; choose another.").map_err(io)?;
+            }
             prompt_once(&mut output)?;
             continue;
         }

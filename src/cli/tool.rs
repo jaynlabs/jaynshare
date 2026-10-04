@@ -1,4 +1,4 @@
-//! `claude` and `codex`: clap's flags become a
+//! `claude`, `codex` and bare `jaynshare`: clap's flags become a
 //! `launch::Request`; a refusal before the replacement exits with its
 //! refusal code, and after it the exit code is the tool's.
 
@@ -27,12 +27,26 @@ pub(super) fn picker_kind(picker: Option<Picker>) -> Option<picker::Kind> {
 }
 
 pub(super) fn launch(provider: Provider, args: &ToolArgs) -> i32 {
-    let request = launch::Request {
-        provider,
+    run(launch::Request {
+        provider: Some(provider),
         intent: intent(&args.launch),
         picker: picker_kind(args.picker),
         args: args.args.clone(),
-    };
+    })
+}
+
+/// Bare `jaynshare`: the picker over every provider's accounts, then the
+/// picked account's tool.
+pub(super) fn pick() -> i32 {
+    run(launch::Request {
+        provider: None,
+        intent: IntentFlag::Pick,
+        picker: None,
+        args: Vec::new(),
+    })
+}
+
+fn run(request: launch::Request) -> i32 {
     match launch::run(request) {
         Ok(code) => code,
         Err(refusal) => {

@@ -41,14 +41,15 @@ pub(super) async fn resolve(
     Ok(Some(encode_token(true, &entry.handle)))
 }
 
-/// The picker over `provider`'s part of the catalogue; its selection is a
-/// pin, its automatic row is no token.
+/// The picker over `provider`'s part of the catalogue, or with no provider
+/// over every provider's; its selection is a pin, its automatic row is no
+/// token, and the section chosen in names the provider whose tool launches.
 pub(super) async fn pick(
     installation: &ClientInstallation,
     secret: &str,
-    provider: Provider,
+    provider: Option<Provider>,
     kind: picker::Kind,
-) -> Result<Option<String>, Refusal> {
+) -> Result<(Provider, Option<String>), Refusal> {
     let entries = client::catalogue(installation, secret, READ_TIMEOUT)
         .await
         .map_err(|(code, message)| {
@@ -59,9 +60,13 @@ pub(super) async fn pick(
             };
             Refusal::new(code, slug, message)
         })?;
-    match picker::pick(&rows(entries, provider), kind) {
-        Ok(picker::Choice::Automatic) => Ok(None),
-        Ok(picker::Choice::Account(handle)) => Ok(Some(encode_token(true, &handle))),
+    let (providers, sections): (Vec<Provider>, Vec<picker::Section>) =
+        sections(&entries, provider).into_iter().unzip();
+    match picker::pick(&sections, kind) {
+        Ok((section, picker::Choice::Automatic)) => Ok((providers[section], None)),
+        Ok((section, picker::Choice::Account(handle))) => {
+            Ok((providers[section], Some(encode_token(true, &handle))))
+        }
         Err(picker::PickError::Cancelled) => {
             Err(Refusal::new(15, "cli_picker_cancelled", picker::CANCELLED))
         }
@@ -78,47 +83,115 @@ pub(super) async fn pick(
     }
 }
 
-/// The picker's rows: the catalogue entries of `provider`, in order.
-fn rows(entries: Vec<CatalogueEntry>, provider: Provider) -> Vec<picker::Row> {
-    entries
-        .into_iter()
-        .filter(|e| e.provider == provider)
-        .map(|e| picker::Row {
-            handle: e.handle,
-            display_name: e.display_name,
-            selectable: e.selectable,
-            five_hour: e.five_hour,
-            weekly: e.weekly,
-        })
-        .collect()
+/// `provider`'s section, unheaded; with no provider, one section per
+/// provider holding accounts (each provider when none does), headed by its
+/// tool's name. The entries keep the catalogue's order.
+fn sections(
+    entries: &[CatalogueEntry],
+    provider: Option<Provider>,
+) -> Vec<(Provider, picker::Section)> {
+    let section = |of: Provider| {
+        let rows = entries
+            .iter()
+            .filter(|e| e.provider == of)
+            .map(|e| picker::Row {
+                handle: e.handle.clone(),
+                display_name: e.display_name.clone(),
+                selectable: e.selectable,
+                five_hour: e.five_hour,
+                weekly: e.weekly,
+            })
+            .collect();
+        let heading = provider.is_none().then_some(of.tool().name);
+        (of, picker::Section { heading, rows })
+    };
+    if let Some(provider) = provider {
+        return vec![section(provider)];
+    }
+    let mut all: Vec<_> = Provider::ALL.into_iter().map(section).collect();
+    if all.iter().any(|(_, s)| !s.rows.is_empty()) {
+        all.retain(|(_, s)| !s.rows.is_empty());
+    }
+    all
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn the_picker_shows_one_provider_s_accounts() {
-        let entry = |handle: &str, provider| CatalogueEntry {
+    fn entry(handle: &str, provider: Provider) -> CatalogueEntry {
+        CatalogueEntry {
             handle: handle.into(),
             display_name: handle.into(),
             selectable: true,
             five_hour: None,
             weekly: None,
             provider,
-        };
-        let catalogue = vec![
+        }
+    }
+
+    /// Each section as its provider, heading and handles.
+    fn shown(
+        entries: &[CatalogueEntry],
+        provider: Option<Provider>,
+    ) -> Vec<(Provider, Option<&'static str>, Vec<String>)> {
+        sections(entries, provider)
+            .into_iter()
+            .map(|(of, s)| {
+                let handles = s.rows.into_iter().map(|r| r.handle).collect();
+                (of, s.heading, handles)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_picker_shows_one_provider_s_accounts() {
+        let catalogue = [
             entry("claude-1", Provider::Anthropic),
             entry("codex-1", Provider::Codex),
             entry("claude-2", Provider::Anthropic),
         ];
-        let handles = |provider| -> Vec<String> {
-            rows(catalogue.clone(), provider)
-                .into_iter()
-                .map(|r| r.handle)
-                .collect()
-        };
-        assert_eq!(handles(Provider::Anthropic), ["claude-1", "claude-2"]);
-        assert_eq!(handles(Provider::Codex), ["codex-1"]);
+        assert_eq!(
+            shown(&catalogue, Some(Provider::Anthropic)),
+            [(
+                Provider::Anthropic,
+                None,
+                vec!["claude-1".to_string(), "claude-2".to_string()]
+            )]
+        );
+        assert_eq!(
+            shown(&catalogue, Some(Provider::Codex)),
+            [(Provider::Codex, None, vec!["codex-1".to_string()])]
+        );
+    }
+
+    #[test]
+    fn with_no_provider_each_provider_holding_accounts_has_a_headed_section() {
+        let catalogue = [
+            entry("codex-1", Provider::Codex),
+            entry("claude-1", Provider::Anthropic),
+        ];
+        assert_eq!(
+            shown(&catalogue, None),
+            [
+                (
+                    Provider::Anthropic,
+                    Some("Claude Code"),
+                    vec!["claude-1".to_string()]
+                ),
+                (Provider::Codex, Some("Codex"), vec!["codex-1".to_string()]),
+            ]
+        );
+        let claude_only = [entry("claude-1", Provider::Anthropic)];
+        assert_eq!(
+            shown(&claude_only, None),
+            [(
+                Provider::Anthropic,
+                Some("Claude Code"),
+                vec!["claude-1".to_string()]
+            )]
+        );
+        let providers: Vec<Provider> = shown(&[], None).into_iter().map(|s| s.0).collect();
+        assert_eq!(providers, Provider::ALL, "an empty pool offers each tool");
     }
 }

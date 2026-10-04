@@ -176,6 +176,9 @@ updates itself whenever the server does.
 `jaynshare claude` and `jaynshare codex` open a picker when the pool cannot
 choose for you; `--account <name>` names the account, `--auto` lets the pool
 pick, and `--direct` runs the tool outside the pool under your own login.
+`jaynshare` alone opens one picker over every pooled account, grouped by tool
+with each account's five-hour and weekly usage, and launches the tool of the
+account you pick.
 Arguments after `--` go to the tool unchanged. `jaynshare status` checks enrollment
 and connectivity, `jaynshare account login` adds your account later, and
 `jaynshare alias` prints a shell alias so that `claude` itself goes through the

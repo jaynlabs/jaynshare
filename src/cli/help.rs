@@ -786,7 +786,10 @@ pub(super) fn top_level() -> String {
         crate::server::VERSION
     ));
     out.push_str(
-        "Usage: jaynshare [global options] <verb> [options] [arguments] [-- passthrough]\n\n",
+        "Usage: jaynshare [global options] <verb> [options] [arguments] [-- passthrough]\n",
+    );
+    out.push_str(
+        "On an enrolled machine, `jaynshare` alone picks any pooled account and launches its tool.\n\n",
     );
     let width = DOCS.iter().map(|d| d.path.len()).max().unwrap_or(0);
     let groups: [(Role, &str); 5] = [
