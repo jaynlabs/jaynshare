@@ -122,7 +122,8 @@ pub(super) enum Verb {
         verb: ServiceVerb,
     },
     // ---- engineer
-    Claude(ClaudeArgs),
+    Claude(ToolArgs),
+    Codex(ToolArgs),
     Env(EnvArgs),
     Alias {
         #[arg(long, value_enum, value_name = "shell")]
@@ -169,6 +170,12 @@ pub(super) enum Shell {
 pub(super) enum Picker {
     Keyboard,
     Numbered,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(super) enum LoginProvider {
+    Anthropic,
+    Codex,
 }
 
 #[derive(Args)]
@@ -420,6 +427,9 @@ pub(super) struct LoginArgs {
     /// Display name for the new account; the profile derives one without it.
     #[arg(long)]
     pub(super) name: Option<String>,
+    /// Whose login: a Claude account (the default) or a ChatGPT one for Codex.
+    #[arg(long, value_enum, value_name = "provider")]
+    pub(super) provider: Option<LoginProvider>,
     /// Print the URL and the operation id and exit at once.
     #[arg(long)]
     pub(super) no_wait: bool,
@@ -703,7 +713,7 @@ pub(super) enum ServiceVerb {
     Status,
 }
 
-/// `claude`'s and `env`'s launch intent: at most one of the three.
+/// `claude`'s, `codex`'s and `env`'s launch intent: at most one of the three.
 #[derive(Args)]
 pub(super) struct LaunchArgs {
     /// Pin the session to this account.
@@ -717,22 +727,23 @@ pub(super) struct LaunchArgs {
     pub(super) direct: bool,
 }
 
+/// `claude` and `codex`.
 #[derive(Args)]
-pub(super) struct ClaudeArgs {
+pub(super) struct ToolArgs {
     #[command(flatten)]
     pub(super) launch: LaunchArgs,
     /// The picker; wins over JAYNSHARE_PICKER.
     #[arg(long, value_enum, value_name = "picker")]
     pub(super) picker: Option<Picker>,
-    /// Passed to Claude Code unchanged and in order: everything
+    /// Passed to the tool unchanged and in order: everything
     /// after the launcher's own options, and everything after `--`,
     /// including a later literal `--` and words that look like options.
     #[arg(
         trailing_var_arg = true,
-        value_name = "claude arguments",
+        value_name = "tool arguments",
         allow_hyphen_values = true
     )]
-    pub(super) claude: Vec<std::ffi::OsString>,
+    pub(super) args: Vec<std::ffi::OsString>,
 }
 
 #[derive(Args)]

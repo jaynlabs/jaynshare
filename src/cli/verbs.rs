@@ -11,8 +11,8 @@ use serde_json::{Value, json};
 use time::OffsetDateTime;
 
 use super::args::{
-    AddArgs, ApiArgs, Cli, LoginArgs, ProbeArgs, ReplaceArgs, SecretChannel, SourceFlags,
-    StatusArgs, SwitchArgs,
+    AddArgs, ApiArgs, Cli, LoginArgs, LoginProvider, ProbeArgs, ReplaceArgs, SecretChannel,
+    SourceFlags, StatusArgs, SwitchArgs,
 };
 use super::control::Control;
 use super::{Failure, Outcome, colour_wanted};
@@ -371,7 +371,7 @@ fn account_block(
     } else {
         name.to_owned()
     };
-    let mut header = format!("{marker} {shown} ({kind}");
+    let mut header = format!("{marker} {shown} ({} {kind}", provider_cell(a));
     if verbose {
         header += &format!(", prio {}", a["priority"]);
     }
@@ -661,6 +661,12 @@ pub(super) fn health_cell(a: &Value) -> String {
     }
 }
 
+/// The account's provider; a 2.1.x server names none, its accounts are
+/// Anthropic's.
+pub(super) fn provider_cell(a: &Value) -> &str {
+    a["provider"].as_str().unwrap_or("anthropic")
+}
+
 /// The account row: every fact the operator reads at a glance,
 /// each bucket as `name=state@reset` (unknown says so, never `0%`).
 pub(super) fn account_row(a: &Value) -> String {
@@ -697,8 +703,9 @@ pub(super) fn account_row(a: &Value) -> String {
     };
     let probe = a["probe"]["outcome"].as_str().unwrap_or("not-run");
     format!(
-        "{}  {}/{}  enabled {}  {health}  priority {}  {eligibility}  [{buckets}]  {hold}  {ramp}  sessions {}  usage in {} out {} req {}  probe {probe}  handle {}",
+        "{}  {} {}/{}  enabled {}  {health}  priority {}  {eligibility}  [{buckets}]  {hold}  {ramp}  sessions {}  usage in {} out {} req {}  probe {probe}  handle {}",
         a["display_name"].as_str().unwrap_or(""),
+        provider_cell(a),
         a["kind"].as_str().unwrap_or(""),
         a["source_class"].as_str().unwrap_or(""),
         a["enabled"],
@@ -1063,13 +1070,23 @@ async fn handle_of(control: &Control, reference: &str) -> Result<String, Failure
         .to_string())
 }
 
-/// Login: the URL goes to standard output first, states to
-/// standard error, the pasted code (when one is wanted) to `…/code`.
-pub(super) async fn account_login(control: &Control, cli: &Cli, args: &LoginArgs) -> Outcome {
+/// The operator's and the client's login body. Anthropic is the server's
+/// default, so a 2.1.x server is never sent `provider`.
+pub(super) fn login_body(args: &LoginArgs) -> Value {
     let mut body = json!({});
     if let Some(name) = args.name.as_deref() {
         body["display_name"] = json!(name);
     }
+    if args.provider == Some(LoginProvider::Codex) {
+        body["provider"] = json!("codex");
+    }
+    body
+}
+
+/// Login: the URL goes to standard output first, states to
+/// standard error, the pasted code (when one is wanted) to `…/code`.
+pub(super) async fn account_login(control: &Control, cli: &Cli, args: &LoginArgs) -> Outcome {
+    let body = login_body(args);
     let started = control
         .expect(Method::POST, "/control/v1/accounts/login", Some(&body))
         .await?;

@@ -65,7 +65,7 @@ fn help_grammar_and_schema_name_one_verb_set() {
         .cloned()
         .collect();
     schema_paths.extend(
-        ["claude", "env", "statusline", "title-hook"]
+        ["claude", "codex", "env", "statusline", "title-hook"]
             .into_iter()
             .map(str::to_owned),
     );
@@ -880,7 +880,7 @@ async fn every_json_document_validates_against_its_schema() {
     }
     let _ = empty;
     // A verb with no --json has no schema.
-    for verb in ["claude", "env", "statusline", "title-hook"] {
+    for verb in ["claude", "codex", "env", "statusline", "title-hook"] {
         let (code, _, _) = instance.cli(&["schema", verb], None);
         assert_eq!(code, 2, "schema {verb}");
         assert!(all["result"].get(verb).is_none());
@@ -2073,7 +2073,7 @@ async fn status_renders_every_section_including_clients() {
     let (code, stdout, stderr) = instance.cli(&["status"], None);
     assert_eq!(code, 0, "{stderr}");
     let mut order = 0;
-    for marker in ["routes", "FSUB (oauth", "default"] {
+    for marker in ["routes", "FSUB (anthropic oauth", "default"] {
         let at = stdout
             .lines()
             .position(|line| line.contains(marker))

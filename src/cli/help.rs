@@ -61,6 +61,17 @@ pub(super) static DOCS: &[VerbDoc] = &[
         ]
     ),
     verb!(
+        "codex",
+        Engineer,
+        None,
+        "Launch Codex through the pool (it still needs your own `codex login`); after the launch the exit code is Codex's",
+        [4, 6, 7, 11, 13, 14, 15, 16],
+        [
+            "jaynshare codex --auto -- exec \"<prompt>\"",
+            "jaynshare codex --account <reference>"
+        ]
+    ),
+    verb!(
         "env",
         Engineer,
         None,
@@ -150,11 +161,11 @@ pub(super) static DOCS: &[VerbDoc] = &[
         "account login",
         Engineer,
         None,
-        "As the enrolled client: log in a Claude account of your own, or log it in again",
+        "As the enrolled client: log in a Claude or ChatGPT account of your own, or log it in again",
         [4, 5, 8, 9, 10, 11],
         [
             "jaynshare account login",
-            "jaynshare account login --name <name>"
+            "jaynshare account login --provider codex"
         ]
     ),
     verb!(
@@ -221,10 +232,11 @@ pub(super) static DOCS: &[VerbDoc] = &[
         "account login",
         Operator,
         None,
-        "Start a browser login; prints the authorisation URL first",
+        "Start a browser login, Claude's or (--provider codex) ChatGPT's; prints the authorisation URL first",
         [3, 4, 5, 8, 9, 10],
         [
             "jaynshare account login --name <name>",
+            "jaynshare account login --provider codex",
             "jaynshare account login --no-wait"
         ]
     ),
@@ -892,7 +904,7 @@ pub(super) fn exit_meaning(code: i32) -> &'static str {
         10 => "server failed or answered incompatibly",
         11 => "not enrolled or installation incomplete",
         12 => "CA not trusted or fingerprint mismatch",
-        13 => "Claude Code not found",
+        13 => "Claude Code or Codex not found",
         14 => "MITM mode impossible for this enrollment",
         15 => "picker cancelled",
         16 => "pick mode with no usable terminal",
@@ -1018,8 +1030,8 @@ mod tests {
         }
         // The kept product words.
         for word in [
-            "status", "switch", "claude", "env", "probe", "route", "client", "service", "api",
-            "alias",
+            "status", "switch", "claude", "codex", "env", "probe", "route", "client", "service",
+            "api", "alias",
         ] {
             assert!(help.contains(&format!("  {word}")), "{word} missing");
         }

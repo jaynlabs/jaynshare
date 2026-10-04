@@ -10,14 +10,16 @@ use http::Method;
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
 
-use super::args::{Cli, LoginArgs};
+use super::args::{Cli, LoginArgs, LoginProvider};
 use super::engineer::{client_failure_pair, installation, request, secret};
-use super::verbs::{health_cell, read_input};
+use super::verbs::{health_cell, login_body, provider_cell, read_input};
 use super::{Failure, Outcome};
 use crate::client::{self, ClientRequest};
 use crate::login;
 
 const ACCOUNTS: &str = "/control/v1/client/accounts";
+/// OpenAI registered Codex's redirect on this one loopback port.
+const CODEX_CALLBACK_PORT: u16 = 1455;
 
 /// Log in an account this client owns: a new one, or one of its own again.
 pub(super) async fn account_login(cli: &Cli, args: &LoginArgs) -> Outcome {
@@ -29,17 +31,20 @@ pub(super) async fn account_login(cli: &Cli, args: &LoginArgs) -> Outcome {
         ));
     }
     let channel = Channel::open(cli)?;
-    let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+    let port = if args.provider == Some(LoginProvider::Codex) {
+        CODEX_CALLBACK_PORT
+    } else {
+        0
+    };
+    let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], port)))
         .await
         .map_err(|e| internal(format!("cannot open the loopback callback listener: {e}")))?;
     let port = listener
         .local_addr()
         .map_err(|e| internal(format!("cannot read the callback listener's port: {e}")))?
         .port();
-    let mut body = json!({ "redirect_port": port });
-    if let Some(name) = args.name.as_deref() {
-        body["display_name"] = json!(name);
-    }
+    let mut body = login_body(args);
+    body["redirect_port"] = json!(port);
     let started = channel
         .call(Method::POST, &format!("{ACCOUNTS}/login"), Some(&body))
         .await?;
@@ -112,8 +117,9 @@ fn open_or_paste(args: &LoginArgs, url: &str) -> Result<Option<String>, Failure>
 
 fn owned_row(account: &Value) -> String {
     format!(
-        "{}  {}  {}",
+        "{}  {}  {}  {}",
         account["display_name"].as_str().unwrap_or(""),
+        provider_cell(account),
         account["profile"]["email"].as_str().unwrap_or("-"),
         health_cell(account),
     )

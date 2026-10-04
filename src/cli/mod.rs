@@ -40,6 +40,7 @@ use crate::capture::Capture;
 use crate::config::{self, ListenerTls};
 use crate::data_plane::upstream::Upstream;
 use crate::identity::{self, Identity};
+use crate::launch::Tool;
 use crate::pool::refresh::{self, Trigger};
 use crate::pool::{Credential, Errored, Pool, probe};
 use crate::provider::Provider;
@@ -250,8 +251,9 @@ pub fn main() -> i32 {
         // error and always exit 0.
         Verb::Statusline => return crate::statusline::main(),
         Verb::TitleHook => return crate::title_hook::main(),
-        // `claude` exits with its own codes only before it replaces itself.
-        Verb::Claude(args) => return claude::claude(args),
+        // A launch exits with its own codes only before it replaces itself.
+        Verb::Claude(args) => return claude::launch(Tool::Claude, args),
+        Verb::Codex(args) => return claude::launch(Tool::Codex, args),
         Verb::Env(args) => return finish(&cli, path, None, env::env(args)),
         // Print-only, but still an engineer verb.
         Verb::Alias { shell } => {
@@ -664,6 +666,7 @@ fn verb_path(verb: &Verb) -> &'static str {
             ServiceVerb::Status => "service status",
         },
         Verb::Claude(_) => "claude",
+        Verb::Codex(_) => "codex",
         Verb::Env(_) => "env",
         Verb::Alias { .. } => "alias",
         Verb::Join { .. } => "join",
