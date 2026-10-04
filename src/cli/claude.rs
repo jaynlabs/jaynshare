@@ -1,9 +1,9 @@
-//! `claude`: clap's flags become a
+//! `claude` and `codex`: clap's flags become a
 //! `launch::Request`; a refusal before the replacement exits with its
-//! refusal code, and after it the exit code is Claude Code's.
+//! refusal code, and after it the exit code is the tool's.
 
-use super::args::{ClaudeArgs, LaunchArgs, Picker};
-use crate::launch::{self, IntentFlag};
+use super::args::{LaunchArgs, Picker, ToolArgs};
+use crate::launch::{self, IntentFlag, Tool};
 use crate::picker;
 
 pub(super) fn intent(args: &LaunchArgs) -> IntentFlag {
@@ -25,11 +25,12 @@ pub(super) fn picker_kind(picker: Option<Picker>) -> Option<picker::Kind> {
     })
 }
 
-pub(super) fn claude(args: &ClaudeArgs) -> i32 {
+pub(super) fn launch(tool: Tool, args: &ToolArgs) -> i32 {
     let request = launch::Request {
+        tool,
         intent: intent(&args.launch),
         picker: picker_kind(args.picker),
-        claude_args: args.claude.clone(),
+        args: args.args.clone(),
     };
     match launch::run(request) {
         Ok(code) => code,

@@ -20,9 +20,10 @@ pub(super) fn env(args: &EnvArgs) -> Outcome {
         ));
     }
     let request = launch::Request {
+        tool: launch::Tool::Claude,
         intent: intent(&args.launch),
         picker: None,
-        claude_args: Vec::new(),
+        args: Vec::new(),
     };
     let prepared = launch::prepare(request, false)
         .map_err(|refusal| Failure::local(refusal.code, refusal.slug, refusal.message))?;

@@ -7,6 +7,11 @@ developers may not route requests through Free, Pro, or Max credentials for
 their users. A proxy, company ownership, or account-owner consent does not
 override those rules.
 
+**Pooling ChatGPT subscriptions for Codex conflicts with OpenAI's rules too.**
+Its Terms of Use prohibit sharing account credentials or making an account
+available to anyone else, and allow OpenAI to suspend or terminate access for a
+breach.
+
 This page covers subscription and compliance risk. The separate
 [security and privacy model](docs/security-and-privacy.md) covers what the proxy
 can see and what one participant can learn about another.
@@ -16,7 +21,8 @@ Reviewed: **17 September 2026**.
 
 - **Account suspension or termination:** enrolled accounts can lose access,
   including the owner's personal use outside Jaynshare. Anthropic's terms allow
-  suspension or termination without notice for a suspected breach.
+  suspension or termination without notice for a suspected breach; OpenAI's
+  allow it for a breach.
 - **Financial loss:** subscription value may be lost. Anthropic's terms say a
   subscription terminated for a violation is not refunded, subject to
   applicable law.
@@ -64,6 +70,7 @@ contractual route, with its own obligations.
 - [Anthropic Consumer Terms](https://www.anthropic.com/legal/consumer-terms)
 - [Claude Code: legal, compliance, and credential use](https://code.claude.com/docs/en/legal-and-compliance)
 - [Anthropic Transparency Hub: enforcement](https://www.anthropic.com/transparency/system-trust-reporting)
+- [OpenAI Terms of Use](https://openai.com/policies/terms-of-use/)
 
 This is a risk summary, not legal advice, a prediction of enforcement, or a
 guarantee of compliance.

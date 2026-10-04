@@ -1,8 +1,8 @@
 //! The launcher: resolve the launch's account
-//! intent, build Claude Code's environment, and replace this process with
-//! Claude Code. `run` is the spine: every check runs in a fixed order, and
-//! each leaf — an environment rule, the picker, the shell quoting of `env` —
-//! lives in its own file.
+//! intent, build the tool's environment, and replace this process with
+//! Claude Code or Codex. `run` is the spine: every check runs in a fixed
+//! order, and each leaf — an environment rule, the picker, the shell quoting
+//! of `env` — lives in its own file.
 //!
 //! Nothing here reads a secret from anywhere but the client installation,
 //! and nothing puts one in an argument vector: the child receives it through
@@ -19,6 +19,7 @@ use std::time::Duration;
 
 use crate::client::{self, ClientInstallation};
 use crate::picker;
+use crate::provider::Provider;
 
 pub use env::EnvPlan;
 
@@ -38,12 +39,65 @@ pub enum IntentFlag {
     Direct,
 }
 
-/// One `claude` or `env` invocation, stripped of clap's types.
+/// The program a launch becomes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tool {
+    Claude,
+    Codex,
+}
+
+impl Tool {
+    /// Its executable, and the verb that launches it.
+    fn name(self) -> &'static str {
+        match self {
+            Tool::Claude => "claude",
+            Tool::Codex => "codex",
+        }
+    }
+
+    fn product(self) -> &'static str {
+        match self {
+            Tool::Claude => "Claude Code",
+            Tool::Codex => "Codex",
+        }
+    }
+
+    /// The accounts it draws from.
+    fn provider(self) -> Provider {
+        match self {
+            Tool::Claude => Provider::Anthropic,
+            Tool::Codex => Provider::Codex,
+        }
+    }
+
+    /// Its extra trust anchor variable.
+    fn ca_variable(self) -> &'static str {
+        match self {
+            Tool::Claude => "NODE_EXTRA_CA_CERTS",
+            Tool::Codex => "CODEX_CA_CERTIFICATE",
+        }
+    }
+
+    /// Its own upstream and credential, removed from every launch.
+    fn upstream_variables(self) -> &'static [&'static str] {
+        match self {
+            Tool::Claude => &[
+                "ANTHROPIC_BASE_URL",
+                "ANTHROPIC_API_KEY",
+                "ANTHROPIC_CUSTOM_HEADERS",
+            ],
+            Tool::Codex => &["OPENAI_API_KEY", "CODEX_API_KEY", "OPENAI_BASE_URL"],
+        }
+    }
+}
+
+/// One `claude`, `codex` or `env` invocation, stripped of clap's types.
 pub struct Request {
+    pub tool: Tool,
     pub intent: IntentFlag,
     pub picker: Option<picker::Kind>,
-    /// Passed to Claude Code unchanged and in order.
-    pub claude_args: Vec<OsString>,
+    /// Passed to the tool unchanged and in order.
+    pub args: Vec<OsString>,
 }
 
 /// A refusal before the replacement: the exit code and slug, and the
@@ -65,32 +119,33 @@ impl Refusal {
     }
 }
 
-/// A launch ready to happen: the child's environment, and for `claude` the
-/// Claude Code executable found on the search path.
+/// A launch ready to happen: the child's environment, and for a launch the
+/// tool's executable found on the search path.
 pub struct Prepared {
     pub plan: EnvPlan,
-    pub claude: Option<PathBuf>,
+    pub executable: Option<PathBuf>,
     /// Lines for standard error before the launch: the unselectable-account
     /// warning, the "the pool is not in use" notice.
     pub notices: Vec<String>,
 }
 
-/// `run`: prepare, then replace this process with Claude Code. Returns only
+/// `run`: prepare, then replace this process with the tool. Returns only
 /// on a refusal, or — where the platform cannot replace a process — with
-/// Claude Code's own exit code.
+/// the tool's own exit code.
 pub fn run(request: Request) -> Result<i32, Refusal> {
-    let args = request.claude_args.clone();
+    let args = request.args.clone();
     let prepared = prepare(request, true)?;
     for notice in &prepared.notices {
         eprintln!("{notice}");
     }
-    let claude = prepared.claude.expect("run looks Claude Code up");
-    exec::exec(&claude, &args, &prepared.plan)
+    let executable = prepared.executable.expect("run looks the tool up");
+    exec::exec(&executable, &args, &prepared.plan)
 }
 
-/// The shared half of `claude` and `env`: every check and the plan.
-/// `launch` is false for `env`, which needs no Claude Code executable.
+/// The shared half of `claude`, `codex` and `env`: every check and the plan.
+/// `launch` is false for `env`, which needs no executable.
 pub fn prepare(request: Request, launch: bool) -> Result<Prepared, Refusal> {
+    let tool = request.tool;
     let mut notices = Vec::new();
     // The environment's pin is consumed whatever the flags say; an
     // explicit flag wins over it (the flag is the more
@@ -108,21 +163,16 @@ pub fn prepare(request: Request, launch: bool) -> Result<Prepared, Refusal> {
         // an engineer verb, so the client installation must exist.
         client::read_installation().map_err(installation_refusal)?;
         let mut plan = EnvPlan::default();
-        env::direct::apply(&mut plan);
+        env::direct::apply(&mut plan, tool);
         plan.unset("JAYNSHARE_ACCOUNT");
         plan.unset(crate::statusline::ACTIVE_ENV);
-        notices.push(
-            "jaynshare: --direct: the pool is not in use; Claude Code runs under your own login"
-                .to_string(),
-        );
-        let claude = if launch {
-            Some(exec::find_claude().map_err(claude_missing)?)
-        } else {
-            None
-        };
+        notices.push(format!(
+            "jaynshare: --direct: the pool is not in use; {} runs under your own login",
+            tool.product()
+        ));
         return Ok(Prepared {
             plan,
-            claude,
+            executable: executable(tool, launch)?,
             notices,
         });
     }
@@ -148,12 +198,8 @@ pub fn prepare(request: Request, launch: bool) -> Result<Prepared, Refusal> {
     let secret = client::read_secret(&installation).map_err(installation_refusal)?;
     require_proxy(&installation)?;
 
-    // No pooled environment is ever built without Claude Code.
-    let claude = if launch {
-        Some(exec::find_claude().map_err(claude_missing)?)
-    } else {
-        None
-    };
+    // No pooled environment is ever built without the tool.
+    let executable = executable(tool, launch)?;
 
     // One intercepted probe gives an authenticated answer within 1.5 s, or
     // nothing launches; the snapshot stays best-effort.
@@ -161,7 +207,7 @@ pub fn prepare(request: Request, launch: bool) -> Result<Prepared, Refusal> {
         .enable_all()
         .build()
         .expect("runtime");
-    runtime.block_on(reachable(&mut installation, &secret))?;
+    runtime.block_on(reachable(&mut installation, &secret, tool))?;
     let snapshot = runtime
         .block_on(client::snapshot(&installation, &secret, None, READ_TIMEOUT))
         .ok();
@@ -181,10 +227,12 @@ pub fn prepare(request: Request, launch: bool) -> Result<Prepared, Refusal> {
     let token = runtime.block_on(async {
         match &intent {
             IntentFlag::Account(reference) => {
-                intent::resolve(&installation, &secret, reference, &mut notices).await
+                let provider = tool.provider();
+                intent::resolve(&installation, &secret, reference, provider, &mut notices).await
             }
             IntentFlag::Pick => {
-                intent::pick(&installation, &secret, picker_kind.expect("pick mode")).await
+                let kind = picker_kind.expect("pick mode");
+                intent::pick(&installation, &secret, tool.provider(), kind).await
             }
             IntentFlag::Auto => Ok(None),
             IntentFlag::Direct => unreachable!("handled above"),
@@ -192,22 +240,34 @@ pub fn prepare(request: Request, launch: bool) -> Result<Prepared, Refusal> {
     })?;
 
     let mut plan = env::build(&env::Inputs {
+        tool,
         installation: &installation,
         secret: &secret,
         token: token.as_deref(),
         hold_hint,
         inherited_timeout: std::env::var("API_TIMEOUT_MS").ok(),
     });
-    if launch {
+    // The status line is Claude Code's alone.
+    if launch && tool == Tool::Claude {
         plan.set(crate::statusline::ACTIVE_ENV, "1");
     } else {
         plan.unset(crate::statusline::ACTIVE_ENV);
     }
     Ok(Prepared {
         plan,
-        claude,
+        executable,
         notices,
     })
+}
+
+/// The tool's executable for a launch; `env` looks nothing up.
+fn executable(tool: Tool, launch: bool) -> Result<Option<PathBuf>, Refusal> {
+    if !launch {
+        return Ok(None);
+    }
+    exec::find(tool.name())
+        .map(Some)
+        .map_err(|why| missing(tool, why))
 }
 
 /// Every launch is MITM mode, so the enrollment must name a proxy origin.
@@ -224,7 +284,11 @@ fn require_proxy(installation: &ClientInstallation) -> Result<(), Refusal> {
 
 /// The launch check. A missing `ca.pem`, or one the proxy's handshake fails,
 /// is fetched from the server first, once.
-async fn reachable(installation: &mut ClientInstallation, secret: &str) -> Result<(), Refusal> {
+async fn reachable(
+    installation: &mut ClientInstallation,
+    secret: &str,
+    tool: Tool,
+) -> Result<(), Refusal> {
     let origin = installation.proxy.clone().unwrap_or_default();
     let ca = installation.directory.join("ca.pem");
     if !ca.is_file() {
@@ -253,14 +317,14 @@ async fn reachable(installation: &mut ClientInstallation, secret: &str) -> Resul
         },
         other => other.map_err(|code| (code, String::new())),
     };
-    checked.map_err(|(code, why)| check_refusal(&origin, code, &why))
+    checked.map_err(|(code, why)| check_refusal(&origin, code, &why, tool))
 }
 
 /// A failed check names the origin and the `--direct` way out, and keeps
 /// the failure's class — 4 no answer, 5 the credential refused, 6 no
 /// snapshot under that origin, 10 a failed or incompatible server, 12 the CA
 /// failed.
-fn check_refusal(origin: &str, code: i32, why: &str) -> Refusal {
+fn check_refusal(origin: &str, code: i32, why: &str, tool: Tool) -> Refusal {
     let (code, slug, what) = match code {
         4 => (
             4,
@@ -290,7 +354,9 @@ fn check_refusal(origin: &str, code: i32, why: &str) -> Refusal {
         code,
         slug,
         format!(
-            "{origin} {what}{why}. `jaynshare claude --direct` launches Claude Code outside the pool, under your own login"
+            "{origin} {what}{why}. `jaynshare {} --direct` launches {} outside the pool, under your own login",
+            tool.name(),
+            tool.product()
         ),
     )
 }
@@ -305,12 +371,17 @@ fn installation_refusal((code, message): (i32, String)) -> Refusal {
     Refusal::new(code, slug, message)
 }
 
-fn claude_missing(why: String) -> Refusal {
+fn missing(tool: Tool, why: String) -> Refusal {
+    let (slug, home) = match tool {
+        Tool::Claude => ("cli_claude_missing", "https://code.claude.com"),
+        Tool::Codex => ("cli_codex_missing", "https://github.com/openai/codex"),
+    };
+    let product = tool.product();
     Refusal::new(
         13,
-        "cli_claude_missing",
+        slug,
         format!(
-            "Claude Code is not installed or not on the search path ({why}); install Claude Code (https://code.claude.com) and launch again"
+            "{product} is not installed or not on the search path ({why}); install {product} ({home}) and launch again"
         ),
     )
 }

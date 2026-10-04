@@ -2,9 +2,10 @@
 //! catalogue, or the picker's choice, as the `pin.` intent token of the
 //! canonical handle — never the string the engineer typed.
 
-use crate::client::{self, ClientInstallation};
+use crate::client::{self, CatalogueEntry, ClientInstallation};
 use crate::data_plane::intent::encode_token;
 use crate::picker;
+use crate::provider::Provider;
 
 use super::{READ_TIMEOUT, Refusal};
 
@@ -16,9 +17,10 @@ pub(super) async fn resolve(
     installation: &ClientInstallation,
     secret: &str,
     reference: &str,
+    provider: Provider,
     notices: &mut Vec<String>,
 ) -> Result<Option<String>, Refusal> {
-    let entry = client::resolve(installation, secret, reference, READ_TIMEOUT)
+    let entry = client::resolve(installation, secret, reference, provider, READ_TIMEOUT)
         .await
         .map_err(|(code, message)| {
             let slug = match code {
@@ -39,11 +41,12 @@ pub(super) async fn resolve(
     Ok(Some(encode_token(true, &entry.handle)))
 }
 
-/// The picker over the catalogue; its selection is a pin, its
-/// automatic row is no token.
+/// The picker over `provider`'s part of the catalogue; its selection is a
+/// pin, its automatic row is no token.
 pub(super) async fn pick(
     installation: &ClientInstallation,
     secret: &str,
+    provider: Provider,
     kind: picker::Kind,
 ) -> Result<Option<String>, Refusal> {
     let entries = client::catalogue(installation, secret, READ_TIMEOUT)
@@ -56,17 +59,7 @@ pub(super) async fn pick(
             };
             Refusal::new(code, slug, message)
         })?;
-    let rows: Vec<picker::Row> = entries
-        .into_iter()
-        .map(|e| picker::Row {
-            handle: e.handle,
-            display_name: e.display_name,
-            selectable: e.selectable,
-            five_hour: e.five_hour,
-            weekly: e.weekly,
-        })
-        .collect();
-    match picker::pick(&rows, kind) {
+    match picker::pick(&rows(entries, provider), kind) {
         Ok(picker::Choice::Automatic) => Ok(None),
         Ok(picker::Choice::Account(handle)) => Ok(Some(encode_token(true, &handle))),
         Err(picker::PickError::Cancelled) => {
@@ -82,5 +75,50 @@ pub(super) async fn pick(
             "cli_internal",
             format!("the account picker failed: {why}"),
         )),
+    }
+}
+
+/// The picker's rows: the catalogue entries of `provider`, in order.
+fn rows(entries: Vec<CatalogueEntry>, provider: Provider) -> Vec<picker::Row> {
+    entries
+        .into_iter()
+        .filter(|e| e.provider == provider)
+        .map(|e| picker::Row {
+            handle: e.handle,
+            display_name: e.display_name,
+            selectable: e.selectable,
+            five_hour: e.five_hour,
+            weekly: e.weekly,
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_picker_shows_one_provider_s_accounts() {
+        let entry = |handle: &str, provider| CatalogueEntry {
+            handle: handle.into(),
+            display_name: handle.into(),
+            selectable: true,
+            five_hour: None,
+            weekly: None,
+            provider,
+        };
+        let catalogue = vec![
+            entry("claude-1", Provider::Anthropic),
+            entry("codex-1", Provider::Codex),
+            entry("claude-2", Provider::Anthropic),
+        ];
+        let handles = |provider| -> Vec<String> {
+            rows(catalogue.clone(), provider)
+                .into_iter()
+                .map(|r| r.handle)
+                .collect()
+        };
+        assert_eq!(handles(Provider::Anthropic), ["claude-1", "claude-2"]);
+        assert_eq!(handles(Provider::Codex), ["codex-1"]);
     }
 }

@@ -34,7 +34,8 @@ able to choose from which account to draw for your session.
 > [!WARNING]
 > Pooling Claude subscriptions conflicts with Anthropic's published terms and
 > can lead to suspension or termination of every account involved, without a
-> refund. Whether a particular deployment also raises legal issues depends on
+> refund. Pooling ChatGPT subscriptions for Codex conflicts with OpenAI's terms
+> too. Whether a particular deployment also raises legal issues depends on
 > its facts and jurisdiction; this project does not claim that it is legal or
 > authorized. Read the [subscription-sharing risk summary](is_this_safe.md), the
 > [security and privacy model](docs/security-and-privacy.md), and the
@@ -177,10 +178,15 @@ and connectivity, `jaynshare account login` adds your account later, and
 `jaynshare alias` prints a shell alias so that `claude` itself goes through the
 pool.
 
+`jaynshare codex` does the same for Codex over the pool's ChatGPT accounts,
+added with `jaynshare account login --provider codex`. Codex still needs your
+own `codex login`; the pool replaces it on every request.
+
 ## Roadmap / Ideas
 
 - [x] Rust v2
-- [ ] `jaynshare codex`
+- [x] `jaynshare codex`
+- [ ] OpenAI API-key accounts for `jaynshare codex`
 - [ ] API-key subscriptions from other providers, like OpenCode Go
 - [ ] Account features (settings, plugins, skills, MCP servers) when you draw
       from your own account (the pool refuses them for everyone today)
