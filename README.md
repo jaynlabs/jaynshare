@@ -106,7 +106,7 @@ a product of Anthropic.
   account
 - A one-line join for macOS and Windows from a single-use invite, with a secret
   per client, rotation and revocation
-- Claude accounts added by their owners while joining
+- Claude and ChatGPT accounts added by their owners while joining
 - Private-network listeners only, TLS pinned to the server's own identity, and
   an audit log that never holds a body or a credential
 - Signed releases, a one-command systemd install, optional nightly updates,
@@ -166,7 +166,8 @@ On Windows, in PowerShell:
 ```
 
 The join checks that the server is the one the invite names, installs that
-server's client and offers to add your Claude account to the pool. Then run
+server's client and offers to add your Claude account, then a ChatGPT account
+for Codex, to the pool. Then run
 `jaynshare claude` wherever you would have run `claude`. The client updates
 itself whenever the server does.
 

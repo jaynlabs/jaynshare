@@ -193,13 +193,29 @@ fetch_release() {
     ln -sf "$dir/client-kit.zip" "$KIT"
 }
 
+# Whether the server holds an account of this provider (a 2.1.x one names none).
+has_account() {
+    as_server account list --json | python3 -c 'import json, sys
+sys.exit(not any(a.get("provider", "anthropic") == sys.argv[1] for a in json.load(sys.stdin)["result"]["accounts"]))' "$1"
+}
+
 ensure_account() {
-    [ "$(as_server account list --json | result_field accounts)" != "[]" ] && return 0
+    if ! has_account anthropic; then
+        if [ -t 0 ]; then
+            echo "quickstart: no Claude account yet; logging one in (once, kept in $SERVER_HOME)" >&2
+            as_server account login
+        else
+            echo "quickstart: no Claude account yet; run: $SELF op account login" >&2
+        fi
+    fi
+    # Codex is offered when it is installed and this client logs it in.
+    command -v codex >/dev/null && as_client account login --provider codex --help >/dev/null 2>&1 || return 0
+    has_account codex && return 0
     if [ -t 0 ]; then
-        echo "quickstart: no account yet; logging one in (once, kept in $SERVER_HOME)" >&2
-        as_server account login
+        read -rp "quickstart: add a ChatGPT account for Codex? [y/N] " reply || true
+        case $reply in [yY]*) as_client account login --provider codex ;; esac
     else
-        echo "quickstart: no account yet; run: $SELF op account login" >&2
+        echo "quickstart: no Codex account; run: $SELF client account login --provider codex" >&2
     fi
 }
 

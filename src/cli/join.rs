@@ -7,7 +7,7 @@
 
 use std::io::{IsTerminal, Write};
 use std::path::Path;
-use std::process::ExitStatus;
+use std::process::{ExitStatus, Stdio};
 use std::time::Duration;
 
 use http::Method;
@@ -351,39 +351,68 @@ async fn check(cli: &Cli, installation: &ClientInstallation, secret: &str) -> Re
 
 const ACCOUNT_LATER: &str =
     "add your Claude account to the pool later with `jaynshare account login`";
+const CODEX_LATER: &str =
+    "add a ChatGPT account for Codex later with `jaynshare account login --provider codex`";
 
 /// The invite's account step, run by the installed client so it speaks its
-/// server's API. Without a terminal to ask on, or under `--json`, it is
-/// left for later.
+/// server's API: a Claude account, then a ChatGPT one when the client logs
+/// Codex in. Without a terminal to ask on, or under `--json`, each is left
+/// for later; `--yes` answers the Claude question only.
 async fn account_step(cli: &Cli, binary: &Path) {
-    if cli.json || !std::io::stdin().is_terminal() {
+    let asks = !cli.json && std::io::stdin().is_terminal();
+    if asks && (cli.yes || answer("Add your Claude account to the pool? [Y/n] ") != Some(false)) {
+        log_in(binary, &[], "Claude account").await;
+    } else {
         progress(cli, ACCOUNT_LATER);
+    }
+    if !logs_in_codex(binary).await {
         return;
     }
-    if !cli.yes && !agrees("Add your Claude account to the pool? [Y/n] ") {
-        progress(cli, ACCOUNT_LATER);
-        return;
+    if asks && !cli.yes && answer("Add a ChatGPT account for Codex too? [y/N] ") == Some(true) {
+        log_in(binary, &["--provider", "codex"], "ChatGPT account").await;
+    } else {
+        progress(cli, CODEX_LATER);
     }
-    match run_in_terminal(binary, &["account", "login"]).await {
+}
+
+async fn log_in(binary: &Path, provider: &[&str], what: &str) {
+    let args = [&["account", "login"][..], provider].concat();
+    let retry = format!("jaynshare {}", args.join(" "));
+    match run_in_terminal(binary, &args).await {
         Ok(status) if status.success() => {}
-        Ok(_) => eprintln!(
-            "warning: no Claude account was added; run `jaynshare account login` to try again"
-        ),
+        Ok(_) => eprintln!("warning: no {what} was added; run `{retry}` to try again"),
         Err(why) => eprintln!(
-            "warning: {}: {why}; run `jaynshare account login` to add your Claude account",
+            "warning: {}: {why}; run `{retry}` to add your {what}",
             binary.display()
         ),
     }
 }
 
-/// A `[Y/n]` question: any answer but a no is a yes; closed input is a no.
-fn agrees(prompt: &str) -> bool {
+/// A client from a server without Codex refuses the option.
+async fn logs_in_codex(binary: &Path) -> bool {
+    tokio::process::Command::new(binary)
+        .args(["account", "login", "--provider", "codex", "--help"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await
+        .is_ok_and(|status| status.success())
+}
+
+/// A yes/no question: `None` for an empty line, any answer but a no is a
+/// yes, closed input is a no.
+fn answer(prompt: &str) -> Option<bool> {
     eprint!("{prompt}");
     std::io::stderr().flush().ok();
     let mut line = String::new();
-    std::io::stdin().read_line(&mut line).is_ok_and(|read| {
-        read > 0 && !matches!(line.trim().to_ascii_lowercase().as_str(), "n" | "no")
-    })
+    match std::io::stdin().read_line(&mut line) {
+        Ok(0) | Err(_) => Some(false),
+        Ok(_) => match line.trim().to_ascii_lowercase().as_str() {
+            "" => None,
+            "n" | "no" => Some(false),
+            _ => Some(true),
+        },
+    }
 }
 
 /// Runs `binary` on this terminal until it ends; an interrupt is its own

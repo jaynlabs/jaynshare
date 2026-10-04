@@ -60,8 +60,8 @@ other client. It works once and expires after
 `clients.enrollment_lifetime_seconds` (a day by default; `--expires` sets it
 per invite). Send it through a private channel.
 
-The join offers to add the engineer's Claude account to the pool, owned by
-that client. With `--no-account` it doesn't, and that client can only log in
+The join offers to add the engineer's Claude account, then a ChatGPT account
+for Codex, to the pool, each owned by that client. With `--no-account` it doesn't, and that client can only log in
 again the accounts it already owns. `js account login --name <name>` still
 adds an account from the server.
 
