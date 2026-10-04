@@ -1977,12 +1977,7 @@ impl Instance {
         }
         let mut child = command.spawn().expect("run the CLI");
         if let Some(text) = stdin {
-            child
-                .stdin
-                .as_mut()
-                .expect("stdin")
-                .write_all(text.as_bytes())
-                .expect("write stdin");
+            feed(&mut child, text);
         }
         let output = child.wait_with_output().expect("CLI output");
         (
@@ -2522,6 +2517,20 @@ pub(crate) const FSUB3_UUID: &str = "3c1f5a7e-0000-4000-8000-0000000000a3";
 
 /// `FSUB` first, so it is the initial default, then `FSUB2`
 /// in the same organisation.
+/// Hand `text` to the child's standard input and close it. A child may exit
+/// without reading it — a refusal before the read — so a closed pipe is not
+/// an error.
+pub(crate) fn feed(child: &mut Child, text: &str) {
+    let mut stdin = child.stdin.take().expect("stdin");
+    if let Err(why) = stdin.write_all(text.as_bytes()) {
+        assert_eq!(
+            why.kind(),
+            std::io::ErrorKind::BrokenPipe,
+            "write stdin: {why}"
+        );
+    }
+}
+
 pub(crate) fn add_two(instance: &Instance) {
     instance.add_fsub();
     instance.add_oauth("FSUB2", "fsub2@fixture.invalid", FSUB2_UUID);
@@ -2873,12 +2882,7 @@ pub(crate) fn cli_raw(
         .stderr(Stdio::piped());
     let mut child = command.spawn().expect("run the CLI");
     if let Some(text) = stdin {
-        child
-            .stdin
-            .take()
-            .expect("stdin")
-            .write_all(text.as_bytes())
-            .expect("write stdin");
+        feed(&mut child, text);
     }
     let output = child.wait_with_output().expect("CLI output");
     (

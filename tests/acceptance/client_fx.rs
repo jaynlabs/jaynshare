@@ -271,12 +271,7 @@ impl ClientHome {
             .stderr(Stdio::piped());
         let mut child = command.spawn().expect("run jaynshare");
         if let Some(text) = stdin {
-            child
-                .stdin
-                .take()
-                .expect("stdin")
-                .write_all(text.as_bytes())
-                .expect("write stdin");
+            feed(&mut child, text);
         }
         let output = child.wait_with_output().expect("jaynshare output");
         (
