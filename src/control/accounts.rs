@@ -707,7 +707,11 @@ pub(super) fn remove_account(
     if let Some(refusal) = super::csrf_refusal(server, peer, Some(principal), headers) {
         return refusal;
     }
-    let was_default = server.pool.lock().expect("pool lock").default_account() == Some(handle);
+    let was_default = {
+        let pool = server.pool.lock().expect("pool lock");
+        pool.get(handle)
+            .is_some_and(|a| pool.default_account(a.provider) == Some(handle))
+    };
     let removed = server.mutate_pool(|pool| {
         guarded(&server.config().config, pool, |pool| {
             pool.remove(handle)
@@ -763,10 +767,10 @@ pub(super) fn resolve(server: &Arc<Server>, query: Option<&str>) -> Response<Res
             // is what disambiguates, so the message names it.
             &format!(
                 "the reference matches several accounts: {}; an organisation name or full organisation UUID is the qualifier",
-                names.join(", ")
+                Resolve::listed(&names)
             ),
             Some(reference),
-            names.into_iter().map(|n| json!({ "target": n, "code": "matches", "message": "this account matches the reference" })).collect(),
+            names.into_iter().map(|(n, provider)| json!({ "target": n, "code": "matches", "message": format!("this {} account matches the reference", provider.as_str()) })).collect(),
         ),
     }
 }
@@ -972,6 +976,7 @@ pub(super) fn project_account(
     json!({
         "handle": account.handle,
         "display_name": account.display_name,
+        "provider": account.provider,
         "kind": account.kind().as_str(),
         "source_class": account.source,
         "enabled": account.enabled,
@@ -979,7 +984,7 @@ pub(super) fn project_account(
         "health": { "state": health_state, "reason": reason, "since": time_or_null(since) },
         "profile": account.profile,
         "credential": credential,
-        "priority": selection::priority_of(account.handle, std::slice::from_ref(account), settings),
+        "priority": selection::priority_of(account, settings),
         "eligibility": {
             "eligible": eligible,
             "reason": ineligible,

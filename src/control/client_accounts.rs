@@ -109,6 +109,7 @@ fn owned_object(
     json!({
         "handle": account.handle,
         "display_name": account.display_name,
+        "provider": account.provider,
         "selectable": selection::selectable(account, settings, pool.families(), now, hold),
         "rate_limits": rate_limits(account),
         "profile": account.profile,

@@ -314,6 +314,7 @@ pub async fn run(
         ));
     }
     let base_facts = RequestFacts {
+        provider,
         model: body_facts.model.as_deref(),
         advisor_model: body_facts.advisor_model.as_deref(),
         ..RequestFacts::default()
@@ -360,9 +361,11 @@ pub async fn run(
     let (pin, preference) = match &intent {
         None => (None, None),
         Some(intent) => {
+            // Another provider's account is no match: a 404.
             let resolved = {
                 let pool = server.pool.lock().expect("pool lock");
-                pool.resolve(intent.reference()).map(|a| a.handle)
+                pool.resolve_in(provider, intent.reference())
+                    .map(|a| a.handle)
             };
             let what = if intent.is_pin() { "pin" } else { "preference" };
             match resolved {
@@ -389,7 +392,7 @@ pub async fn run(
                             &format!(
                                 "the {what} {:?} matches more than one account: {}; qualify it with the organisation name or UUID",
                                 intent.reference(),
-                                names.join(", ")
+                                Resolve::listed(&names)
                             ),
                         ),
                         Some(ErrorClass::Request),

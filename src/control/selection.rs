@@ -211,7 +211,7 @@ async fn reference_body(
             "ambiguous_account_reference",
             &format!(
                 "the reference matches several accounts: {}; an organisation name or full organisation UUID is the qualifier",
-                names.join(", ")
+                Resolve::listed(&names)
             ),
             Some(reference.to_string()),
             vec![],

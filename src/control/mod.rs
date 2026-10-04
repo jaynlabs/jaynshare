@@ -31,6 +31,7 @@ use crate::data_plane::relay::ResponseBody;
 use crate::login::{Refused, Started, Starter};
 use crate::pool::Account;
 use crate::pool::selection::{self as sel, RequestFacts};
+use crate::provider::Provider;
 use crate::server::{Server, VERSION};
 use crate::state;
 use crate::timestamp::rfc3339;
@@ -854,11 +855,18 @@ fn snapshot(server: &Server) -> Value {
         .iter()
         .map(|a| accounts::project_pool_account(&pool, a, &runtime))
         .collect();
-    // The default and who set it.
-    let operator = pool.operator();
-    let default_account = operator.default.map(|h| {
-        json!({ "handle": h, "operator_chosen": operator.chosen, "since": time_or_null(operator.since) })
-    });
+    // Each provider's default and who set it; `default_account` is
+    // Anthropic's, as 2.1.x reads it.
+    let default_of = |provider| {
+        pool.operator().defaults.get(&provider).map(|d| {
+            json!({ "handle": d.handle, "operator_chosen": d.chosen, "since": rfc3339(d.since) })
+        })
+    };
+    let default_account = default_of(Provider::Anthropic);
+    let default_accounts: serde_json::Map<String, Value> = Provider::ALL
+        .into_iter()
+        .map(|p| (p.as_str().to_string(), json!(default_of(p))))
+        .collect();
     let routes: Vec<Value> = config
         .selection
         .routes
@@ -932,6 +940,7 @@ fn snapshot(server: &Server) -> Value {
         },
         "accounts": accounts,
         "default_account": default_account,
+        "default_accounts": default_accounts,
         "routes": routes,
         "blocked_models": config.selection.blocked_models,
         "sessions": { "known": session_counts.known, "active": session_counts.active, "distribution_enabled": config.selection.distribute_sessions },

@@ -20,6 +20,7 @@ use crate::data_plane::relay::ResponseBody;
 use crate::mitm::ca::Ca;
 use crate::pool::quota::{SESSION, WEEKLY};
 use crate::pool::{Account, Resolve, SessionKey, selection};
+use crate::provider::Provider;
 use crate::server::{Server, VERSION};
 
 use super::{API_VERSION, error, percent_decode, read};
@@ -64,6 +65,7 @@ pub(super) fn status(
                 .map(|account| {
                     json!({
                         "display_name": account.display_name,
+                        "provider": account.provider,
                         "rate_limits": rate_limits(account),
                     })
                 })
@@ -206,6 +208,7 @@ pub(super) fn accounts(server: &Arc<Server>) -> Response<ResponseBody> {
             json!({
                 "handle": account.handle,
                 "display_name": account.display_name,
+                "provider": account.provider,
                 "selectable": selection::selectable(
                     account,
                     settings,
@@ -220,12 +223,14 @@ pub(super) fn accounts(server: &Arc<Server>) -> Response<ResponseBody> {
     read(json!({ "accounts": accounts }))
 }
 
-/// The catalogue's read-only resolve — the same three members for the
-/// account the reference names, `400` `ambiguous_account_reference`
-/// with the matching display names, `404` `account_not_found`.
+/// The catalogue's read-only resolve within one provider (`&provider=`,
+/// absent meaning `anthropic`, as a 2.1.x client sends it) — the catalogue
+/// members for the account the reference names, `400`
+/// `ambiguous_account_reference` with the matching display names, `404`
+/// `account_not_found`.
 pub(super) fn resolve(server: &Arc<Server>, query: Option<&str>) -> Response<ResponseBody> {
-    let reference = query
-        .and_then(|q| q.split('&').find_map(|kv| kv.strip_prefix("reference=")))
+    let member = |name: &str| query.and_then(|q| q.split('&').find_map(|kv| kv.strip_prefix(name)));
+    let reference = member("reference=")
         .map(percent_decode)
         .filter(|r| !r.is_empty() && r.len() <= 1024 && !r.chars().any(char::is_control));
     let Some(reference) = reference else {
@@ -237,13 +242,28 @@ pub(super) fn resolve(server: &Arc<Server>, query: Option<&str>) -> Response<Res
             vec![],
         );
     };
+    let provider = match member("provider=") {
+        None => Provider::Anthropic,
+        Some(name) => match Provider::ALL.into_iter().find(|p| p.as_str() == name) {
+            Some(provider) => provider,
+            None => {
+                return error(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request",
+                    "provider is anthropic or codex",
+                    Some("provider".into()),
+                    vec![],
+                );
+            }
+        },
+    };
     let now = OffsetDateTime::now_utc();
     let resolved = {
         let mut pool = server.pool.lock().expect("pool lock");
         if pool.expire_quota(now) {
             server.mark_quota_dirty();
         }
-        pool.resolve(&reference).cloned()
+        pool.resolve_in(provider, &reference).cloned()
     };
     match resolved {
         Ok(account) => {
@@ -262,6 +282,7 @@ pub(super) fn resolve(server: &Arc<Server>, query: Option<&str>) -> Response<Res
                 "account": {
                     "handle": account.handle,
                     "display_name": account.display_name,
+                    "provider": account.provider,
                     "selectable": selectable,
                 }
             }))
@@ -278,7 +299,7 @@ pub(super) fn resolve(server: &Arc<Server>, query: Option<&str>) -> Response<Res
             "ambiguous_account_reference",
             &format!(
                 "the reference matches several accounts: {}; an organisation name or full organisation UUID is the qualifier",
-                names.join(", ")
+                Resolve::listed(&names)
             ),
             Some(reference),
             vec![],

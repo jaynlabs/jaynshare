@@ -28,6 +28,14 @@ impl Provider {
         *self == Provider::Anthropic
     }
 
+    /// The serialised name, as messages and query parameters spell it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Provider::Anthropic => "anthropic",
+            Provider::Codex => "codex",
+        }
+    }
+
     /// The provider whose API host the MITM listener intercepted.
     pub fn for_intercepted_host(host: &str) -> Option<Provider> {
         Self::ALL.into_iter().find(|p| p.api_host() == host)
@@ -145,10 +153,10 @@ mod tests {
 
     #[test]
     fn providers_serialize_lowercase() {
-        assert_eq!(
-            serde_json::to_value(Provider::Codex).unwrap(),
-            serde_json::json!("codex")
-        );
+        for provider in Provider::ALL {
+            assert_eq!(serde_json::to_value(provider).unwrap(), provider.as_str());
+        }
+        assert_eq!(Provider::Codex.as_str(), "codex");
         assert_eq!(
             serde_json::from_value::<Provider>(serde_json::json!("anthropic")).unwrap(),
             Provider::Anthropic
