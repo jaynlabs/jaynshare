@@ -9,7 +9,7 @@ use http::header::AUTHORIZATION;
 use http::{HeaderMap, HeaderName, Method, StatusCode, Uri, Version};
 use uuid::Uuid;
 
-use crate::anthropic::X_API_KEY;
+use crate::provider::anthropic::X_API_KEY;
 use crate::state::{ensure_private_dir, open_private};
 
 const PROXY_AUTHORIZATION: HeaderName = HeaderName::from_static("proxy-authorization");

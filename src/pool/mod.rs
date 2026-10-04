@@ -22,6 +22,7 @@ use tokio::sync::Notify;
 use uuid::Uuid;
 
 use crate::config::SelectionSettings;
+use crate::provider::anthropic;
 
 use holds::candidate_rank;
 
@@ -556,7 +557,7 @@ impl Pool {
         let Some(a) = self.get_mut(handle) else {
             return false;
         };
-        let observations = quota::observe_headers(a.kind(), headers);
+        let observations = a.provider.observe_headers(a.kind(), headers);
         if observations.is_empty() {
             return false;
         }
@@ -606,8 +607,8 @@ impl Pool {
         let Some(model) = model else { return };
         let fable = headers.iter().any(|(name, _)| {
             name.as_str()
-                .strip_prefix(crate::anthropic::RATELIMIT_UNIFIED_PREFIX)
-                .is_some_and(|rest| rest.starts_with(quota::FAMILY_FABLE_HEADER))
+                .strip_prefix(anthropic::RATELIMIT_UNIFIED_PREFIX)
+                .is_some_and(|rest| rest.starts_with(anthropic::FAMILY_FABLE_HEADER))
         });
         if fable {
             let models = self.families.entry(quota::FAMILY_FABLE.into()).or_default();
@@ -647,12 +648,14 @@ mod tests {
 
     fn oauth(email: &str, org: Option<&str>, account_uuid: Uuid) -> Account {
         Account::new(
+            crate::provider::Provider::Anthropic,
             String::new(),
             Profile {
                 email: Some(email.into()),
                 account_uuid: Some(account_uuid),
                 organization_uuid: None,
                 organization_name: org.map(String::from),
+                chatgpt_account_id: None,
             },
             Source::PortableJson,
             Credential::OAuth(account::OAuthCredential {

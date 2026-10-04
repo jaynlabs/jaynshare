@@ -12,7 +12,6 @@ use http::{HeaderMap, HeaderValue, Request, Response, StatusCode};
 use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
 
-use crate::anthropic::error_type;
 use crate::audit::{Principal, PrincipalKind};
 use crate::data_plane::connect::{Connector, Wire, enable_keepalive};
 use crate::data_plane::envelope;
@@ -22,6 +21,7 @@ use crate::data_plane::relay::ResponseBody;
 use crate::mitm::ca::{Ca, INTERCEPT_NAMES};
 use crate::mitm::counters::Kind;
 use crate::mitm::tls;
+use crate::provider::anthropic::error_type;
 use crate::server::Server;
 
 /// No connection to the target within 30 s → 504. Not configurable.
@@ -549,7 +549,7 @@ pub(crate) fn strip_request_hop_by_hop(headers: &mut HeaderMap) {
 /// header is removed on every decoded request, intercepted or absolute-form,
 /// and cannot add to or replace the tunnel's fixed intent.
 pub(crate) fn strip_proxy_metadata(headers: &mut HeaderMap) {
-    headers.remove(crate::anthropic::X_JAYNSHARE_ACCOUNT);
+    headers.remove(intent::X_JAYNSHARE_ACCOUNT);
 }
 
 #[cfg(test)]

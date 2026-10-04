@@ -24,9 +24,10 @@ use time::{Duration, OffsetDateTime};
 use tokio::net::TcpListener;
 use uuid::Uuid;
 
-use crate::anthropic::{AUTHORIZE_URL, OAUTH_CLIENT_ID, OAUTH_SCOPES, OAUTH_SUCCESS_URL};
 use crate::control::percent_decode;
 use crate::pool::{Account, Credential, OperationError, Source};
+use crate::provider::Provider;
+use crate::provider::anthropic::{AUTHORIZE_URL, OAUTH_CLIENT_ID, OAUTH_SCOPES, OAUTH_SUCCESS_URL};
 use crate::server::{MutateError, Server};
 use crate::timestamp::rfc3339;
 
@@ -569,6 +570,7 @@ async fn complete(
     let account = Account {
         owner: secret.owner.clone(),
         ..Account::new(
+            Provider::Anthropic,
             // `pool.add` derives the name from the profile when none is given.
             name.clone().unwrap_or_default(),
             profile,

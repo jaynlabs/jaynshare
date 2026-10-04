@@ -106,6 +106,7 @@ mod tests {
 
     fn key(name: &str) -> Account {
         Account::new(
+            crate::provider::Provider::Anthropic,
             name.into(),
             Profile::default(),
             Source::ApiKeyEntry,

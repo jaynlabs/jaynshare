@@ -910,7 +910,7 @@ fn snapshot(server: &Server) -> Value {
             "signing_key": crate::deploy::release::active_key().ok().map(|key| key.encoded()),
             "control_api_versions": [API_VERSION],
             "telemetry_policy": config.data_plane.telemetry_policy,
-            "upstream_origin_override": server.upstream.override_active().then(|| server.upstream.origin().to_string()),
+            "upstream_origin_override": server.upstream.override_origin().map(ToString::to_string),
             "egress": {
                 "mode": config.data_plane.egress.mode,
                 "pinned_addresses": egress.pinned_addresses,

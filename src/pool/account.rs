@@ -9,6 +9,7 @@ use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
 use super::quota::{self, Bucket};
+use crate::provider::Provider;
 
 /// A credential value that never prints itself.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -79,6 +80,9 @@ pub struct Profile {
     pub account_uuid: Option<Uuid>,
     pub organization_uuid: Option<Uuid>,
     pub organization_name: Option<String>,
+    /// The ChatGPT workspace a Codex credential speaks for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chatgpt_account_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -145,6 +149,7 @@ pub struct Errored {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Account {
     pub handle: Uuid,
+    pub provider: Provider,
     pub display_name: String,
     pub profile: Profile,
     pub source: Source,
@@ -158,6 +163,7 @@ pub struct Account {
 
 impl Account {
     pub fn new(
+        provider: Provider,
         display_name: String,
         profile: Profile,
         source: Source,
@@ -166,6 +172,7 @@ impl Account {
         let quota = quota::expected_buckets(credential.kind());
         Self {
             handle: Uuid::new_v4(),
+            provider,
             display_name,
             profile,
             source,
@@ -245,12 +252,14 @@ impl Account {
         }
         let mut account = Self {
             handle: record.handle,
+            provider: record.provider,
             display_name: record.display_name,
             profile: Profile {
                 email: record.profile_email,
                 account_uuid: record.account_uuid,
                 organization_uuid: record.organization_uuid,
                 organization_name: record.organization_name,
+                chatgpt_account_id: record.chatgpt_account_id,
             },
             source: record.source,
             enabled: record.enabled,
@@ -271,11 +280,16 @@ impl Account {
 struct Record {
     kind: Kind,
     handle: Uuid,
+    // Absent for Anthropic, so a 2.1.x rollback still reads the state.
+    #[serde(default, skip_serializing_if = "Provider::is_anthropic")]
+    provider: Provider,
     display_name: String,
     profile_email: Option<String>,
     account_uuid: Option<Uuid>,
     organization_uuid: Option<Uuid>,
     organization_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    chatgpt_account_id: Option<String>,
     source: Source,
     enabled: bool,
     errored: bool,
@@ -340,11 +354,13 @@ impl From<&Account> for Record {
         Self {
             kind: a.kind(),
             handle: a.handle,
+            provider: a.provider,
             display_name: a.display_name.clone(),
             profile_email: a.profile.email.clone(),
             account_uuid: a.profile.account_uuid,
             organization_uuid: a.profile.organization_uuid,
             organization_name: a.profile.organization_name.clone(),
+            chatgpt_account_id: a.profile.chatgpt_account_id.clone(),
             source: a.source,
             enabled: a.enabled,
             errored,
@@ -417,12 +433,14 @@ mod tests {
 
     fn oauth() -> Account {
         Account::new(
+            crate::provider::Provider::Anthropic,
             "alice@example.com".into(),
             Profile {
                 email: Some("alice@example.com".into()),
                 account_uuid: Some(Uuid::nil()),
                 organization_uuid: None,
                 organization_name: Some("Acme".into()),
+                chatgpt_account_id: None,
             },
             Source::PortableJson,
             Credential::OAuth(OAuthCredential {
@@ -443,11 +461,14 @@ mod tests {
         let keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
         assert!(keys.contains(&"refresh_token"));
         assert!(!keys.contains(&"api_key"));
+        // A 2.1.x rollback refuses unknown fields.
+        assert!(!keys.contains(&"provider") && !keys.contains(&"chatgpt_account_id"));
         assert_eq!(v["refresh_token"], Value::Null);
         assert_eq!(v["error_at"], Value::Null);
         assert_eq!(Account::from_record(&v).unwrap(), a);
 
         let k = Account::new(
+            crate::provider::Provider::Anthropic,
             "k".into(),
             Profile::default(),
             Source::ApiKeyEntry,
@@ -456,6 +477,16 @@ mod tests {
         let v = k.to_record();
         assert!(v.get("access_token").is_none());
         assert_eq!(Account::from_record(&v).unwrap(), k);
+
+        let mut c = oauth();
+        c.provider = crate::provider::Provider::Codex;
+        c.profile.chatgpt_account_id = Some("acct".into());
+        let v = c.to_record();
+        assert_eq!(
+            (&v["provider"], &v["chatgpt_account_id"]),
+            (&json!("codex"), &json!("acct"))
+        );
+        assert_eq!(Account::from_record(&v).unwrap(), c);
     }
 
     #[test]

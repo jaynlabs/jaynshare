@@ -42,6 +42,7 @@ use crate::data_plane::upstream::Upstream;
 use crate::identity::{self, Identity};
 use crate::pool::refresh::{self, Trigger};
 use crate::pool::{Credential, Errored, Pool, probe};
+use crate::provider::Provider;
 use crate::server::{COMMIT, Server, Stop, TARGET, VERSION};
 use crate::{data_plane, logging, mitm, state};
 
@@ -1004,15 +1005,16 @@ fn serve_inner(cli: &Cli) -> Result<i32, (i32, String)> {
             });
         }
         // The startup line always names the upstream it will use.
+        let upstream = server.upstream.origin(Provider::Anthropic);
         let upstream_note = if server.upstream.override_active() {
-            format!(" upstream override {}", server.upstream.origin())
+            format!(" upstream override {upstream}")
         } else {
-            format!(" upstream {} verified against the system trust store", server.upstream.origin())
+            format!(" upstream {upstream} verified against the system trust store")
         };
         // The one startup line; the scheme names the transport.
         let scheme = if server.config().config.data_plane.tls.is_on() { "https" } else { "http" };
         println!("jaynshare {VERSION} listening on {scheme}://{listen} configuration {} digest {digest}{upstream_note}", path.display());
-        tracing::info!(event = "server_started", listen = %listen, configuration = %path.display(), digest = %digest, upstream = %server.upstream.origin(), upstream_override = server.upstream.override_active(), "server started");
+        tracing::info!(event = "server_started", listen = %listen, configuration = %path.display(), digest = %digest, upstream = %upstream, upstream_override = server.upstream.override_active(), "server started");
         // The bootstrap exception says so, once, until it ends.
         if server.bootstrap() {
             tracing::warn!(event = "bootstrap_authorisation", "no client is enrolled and no operator secret exists: every loopback caller is the loopback operator whatever it presents; the first issue or operator secret ends this");

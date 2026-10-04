@@ -26,6 +26,9 @@ use time::{Duration, OffsetDateTime};
 use x509_parser::extensions::{GeneralName, ParsedExtension};
 use x509_parser::pem::{Pem, parse_x509_pem};
 
+use crate::mitm::probe::PROBE_HOST;
+use crate::provider::anthropic;
+
 /// The three fixed names, relative to the state directory.
 pub const CA_CERT_FILE: &str = "mitm-ca.pem";
 pub const LEAF_CERT_FILE: &str = "mitm-leaf.pem";
@@ -36,7 +39,7 @@ pub const NEXT_FILE: &str = "mitm-ca-next.pem";
 
 /// The whole intercept set, one port; the leaf carries every name and the
 /// listener intercepts exactly these.
-pub const INTERCEPT_NAMES: [&str; 2] = ["api.anthropic.com", "probe.jaynshare.invalid"];
+pub const INTERCEPT_NAMES: [&str; 2] = [anthropic::API_HOST, PROBE_HOST];
 
 /// Both certificates, valid from one hour before generation until
 /// 730 days after it. Not configurable.
@@ -553,6 +556,17 @@ mod tests {
 
     fn read(dir: &Path, name: &str) -> String {
         fs::read_to_string(dir.join(name)).expect("the generated file")
+    }
+
+    #[test]
+    fn every_intercepted_name_but_the_probe_s_is_a_provider_s() {
+        for name in INTERCEPT_NAMES {
+            assert_eq!(
+                crate::provider::Provider::for_intercepted_host(name).is_some(),
+                name != PROBE_HOST,
+                "{name}"
+            );
+        }
     }
 
     /// The parsed certificate of a generated file; the buffer stays alive

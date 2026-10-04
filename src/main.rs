@@ -1,6 +1,5 @@
 //! `jaynshare`: one executable for the server and every role's verbs.
 
-mod anthropic;
 mod audit;
 mod bundle;
 mod capture;
@@ -21,6 +20,7 @@ mod mitm;
 mod picker;
 mod pool;
 mod probe_client;
+mod provider;
 mod registry;
 mod secret;
 mod server;

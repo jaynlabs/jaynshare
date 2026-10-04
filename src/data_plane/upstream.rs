@@ -1,4 +1,4 @@
-//! The one place the process connects to Anthropic.
+//! The one place the process connects to the providers' APIs.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -16,12 +16,12 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use super::connect::Connector;
 use super::tls::client_config;
-use crate::anthropic::{
-    ANTHROPIC_BETA, API_ORIGIN, OAUTH_BETA, OAUTH_CLIENT_ID, PROFILE_PATH, TOKEN_ORIGIN,
-    TOKEN_PATH, USAGE_PATH,
-};
 use crate::config::DataPlaneSettings;
 use crate::pool::{OAuthCredential, Profile, Secret};
+use crate::provider::Provider;
+use crate::provider::anthropic::{
+    ANTHROPIC_BETA, OAUTH_BETA, OAUTH_CLIENT_ID, PROFILE_PATH, TOKEN_ORIGIN, TOKEN_PATH, USAGE_PATH,
+};
 
 #[derive(Debug)]
 pub enum SendError {
@@ -66,8 +66,8 @@ fn describe(error: &dyn std::error::Error) -> String {
 
 pub struct Upstream {
     client: Client<Connector, Full<Bytes>>,
-    origin: Uri,
-    override_active: bool,
+    /// Stands in for every provider's origins, the token endpoints included.
+    override_origin: Option<Uri>,
     slots: Arc<Semaphore>,
     first_byte: Duration,
 }
@@ -79,44 +79,43 @@ impl Upstream {
         let client = Client::builder(TokioExecutor::new())
             .pool_max_idle_per_host(settings.max_connections)
             .build(connector);
-        let (origin, override_active) = match &settings.upstream_origin {
-            Some(o) => (o.clone(), true),
-            None => (API_ORIGIN.parse().expect("constant origin"), false),
-        };
         Ok(Self {
             client,
-            origin,
-            override_active,
+            override_origin: settings.upstream_origin.clone(),
             slots: Arc::new(Semaphore::new(settings.max_connections)),
             first_byte: Duration::from_secs(settings.first_byte_timeout_seconds),
         })
     }
 
-    pub fn origin(&self) -> &Uri {
-        &self.origin
+    pub fn override_origin(&self) -> Option<&Uri> {
+        self.override_origin.as_ref()
     }
 
     pub fn override_active(&self) -> bool {
-        self.override_active
+        self.override_origin.is_some()
     }
 
-    pub fn host_header(&self) -> HeaderValue {
-        HeaderValue::from_str(self.origin.authority().map_or("", |a| a.as_str()))
+    pub fn origin(&self, provider: Provider) -> Uri {
+        self.override_origin
+            .clone()
+            .unwrap_or_else(|| Uri::from_static(provider.api_origin()))
+    }
+
+    pub fn host_header(&self, provider: Provider) -> HeaderValue {
+        HeaderValue::from_str(self.origin(provider).authority().map_or("", |a| a.as_str()))
             .expect("valid authority")
     }
 
     /// The OAuth code-exchange origin: the loopback override when one is active
     /// for the harness, otherwise the token endpoint's host.
     fn token_origin(&self) -> Uri {
-        if self.override_active {
-            self.origin.clone()
-        } else {
-            TOKEN_ORIGIN.parse().expect("constant origin")
-        }
+        self.override_origin
+            .clone()
+            .unwrap_or_else(|| Uri::from_static(TOKEN_ORIGIN))
     }
 
-    pub fn uri_for(&self, path_and_query: &str) -> Uri {
-        Self::uri_on(&self.origin, path_and_query)
+    pub fn uri_for(&self, provider: Provider, path_and_query: &str) -> Uri {
+        Self::uri_on(&self.origin(provider), path_and_query)
     }
 
     /// The token endpoint lives on its own origin, not the one attempts
@@ -268,8 +267,8 @@ impl Upstream {
     pub async fn fetch_profile(&self, access_token: &str) -> Result<Profile, String> {
         let request = Request::builder()
             .method(Method::GET)
-            .uri(self.uri_for(PROFILE_PATH))
-            .header(HOST, self.host_header())
+            .uri(self.uri_for(Provider::Anthropic, PROFILE_PATH))
+            .header(HOST, self.host_header(Provider::Anthropic))
             .header(AUTHORIZATION, format!("Bearer {access_token}"))
             .header(ANTHROPIC_BETA, OAUTH_BETA)
             .header(ACCEPT, "application/json")
@@ -297,6 +296,7 @@ impl Upstream {
             account_uuid: uuid(&value["account"]["uuid"]),
             organization_uuid: uuid(&value["organization"]["uuid"]),
             organization_name: text(&value["organization"]["name"]),
+            chatgpt_account_id: None,
         })
     }
 
@@ -305,8 +305,8 @@ impl Upstream {
     pub async fn fetch_usage(&self, access_token: &str) -> Result<Value, UsageFailure> {
         let request = Request::builder()
             .method(Method::GET)
-            .uri(self.uri_for(USAGE_PATH))
-            .header(HOST, self.host_header())
+            .uri(self.uri_for(Provider::Anthropic, USAGE_PATH))
+            .header(HOST, self.host_header(Provider::Anthropic))
             .header(AUTHORIZATION, format!("Bearer {access_token}"))
             .header(ANTHROPIC_BETA, OAUTH_BETA)
             .header(ACCEPT, "application/json")
@@ -423,7 +423,7 @@ mod tests {
     /// with no override.
     #[test]
     fn token_uri_uses_the_token_origin_not_the_attempt_origin() {
-        let attempts: Uri = API_ORIGIN.parse().expect("constant origin");
+        let attempts = Uri::from_static(Provider::Anthropic.api_origin());
         let token: Uri = TOKEN_ORIGIN.parse().expect("constant origin");
 
         let uri = Upstream::uri_on(&token, TOKEN_PATH);

@@ -348,12 +348,14 @@ mod tests {
 
     fn oauth(email: &str, org: Option<&str>, account_uuid: Uuid) -> Account {
         Account::new(
+            crate::provider::Provider::Anthropic,
             String::new(),
             Profile {
                 email: Some(email.into()),
                 account_uuid: Some(account_uuid),
                 organization_uuid: None,
                 organization_name: org.map(String::from),
+                chatgpt_account_id: None,
             },
             Source::PortableJson,
             Credential::OAuth(family("t", None)),
@@ -362,6 +364,7 @@ mod tests {
 
     fn api_key(name: &str) -> Account {
         Account::new(
+            crate::provider::Provider::Anthropic,
             name.into(),
             Profile::default(),
             Source::ApiKeyEntry,
@@ -591,6 +594,7 @@ mod tests {
             account_uuid: Some(Uuid::new_v4()),
             organization_uuid: None,
             organization_name: Some("One".into()),
+            chatgpt_account_id: None,
         };
         assert_eq!(
             pool.replace_credential(
@@ -632,6 +636,7 @@ mod tests {
             account_uuid: Some(id),
             organization_uuid: None,
             organization_name: Some("One".into()),
+            chatgpt_account_id: None,
         };
         pool.replace_credential(
             sub,

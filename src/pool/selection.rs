@@ -735,6 +735,7 @@ mod tests {
 
     fn account(name: &str) -> Account {
         Account::new(
+            crate::provider::Provider::Anthropic,
             name.into(),
             Profile::default(),
             Source::ApiKeyEntry,
@@ -744,6 +745,7 @@ mod tests {
 
     fn oauth(name: &str, weekly_utilization: f64) -> Account {
         let mut a = Account::new(
+            crate::provider::Provider::Anthropic,
             name.into(),
             Profile::default(),
             Source::PortableJson,

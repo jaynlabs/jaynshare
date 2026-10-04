@@ -388,6 +388,7 @@ mod tests {
 
     fn account(now: OffsetDateTime) -> Account {
         Account::new(
+            crate::provider::Provider::Anthropic,
             "FSUB".into(),
             crate::pool::Profile::default(),
             crate::pool::Source::PortableJson,

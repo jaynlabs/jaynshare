@@ -11,9 +11,9 @@ use uuid::Uuid;
 
 use crate::config::QuotaSettings;
 use crate::data_plane::upstream::UsageFailure;
+use crate::provider::Provider;
 use crate::server::Server;
 
-use super::quota;
 use super::refresh::{self, Outcome as RefreshOutcome, Trigger as RefreshTrigger};
 use super::{Credential, Kind, Secret};
 
@@ -306,14 +306,14 @@ async fn probe_oauth(
 async fn probe_oauth_inner(server: &Arc<Server>, handle: Uuid) -> Result<(), String> {
     ready_to_probe(server, handle, RefreshTrigger::Proactive).await?;
     let first = fetch_usage(server, handle).await;
-    let usage = match first {
+    let (provider, usage) = match first {
         Err(UsageFailure::Unauthorized) => {
             ready_to_probe(server, handle, RefreshTrigger::Forced).await?;
             fetch_usage(server, handle).await.map_err(usage_error)?
         }
         result => result.map_err(usage_error)?,
     };
-    let observations = quota::observe_usage(&usage)?;
+    let observations = provider.observe_usage(&usage)?;
     let applied = server.pool.lock().expect("pool lock").observe_usage(
         handle,
         observations,
@@ -341,18 +341,22 @@ async fn ready_to_probe(
     }
 }
 
-async fn fetch_usage(server: &Server, handle: Uuid) -> Result<serde_json::Value, UsageFailure> {
-    let token = access_token(server, handle).map_err(UsageFailure::Failed)?;
-    server.upstream.fetch_usage(token.expose()).await
+async fn fetch_usage(
+    server: &Server,
+    handle: Uuid,
+) -> Result<(Provider, serde_json::Value), UsageFailure> {
+    let (provider, token) = access_token(server, handle).map_err(UsageFailure::Failed)?;
+    let usage = server.upstream.fetch_usage(token.expose()).await?;
+    Ok((provider, usage))
 }
 
-fn access_token(server: &Server, handle: Uuid) -> Result<Secret, String> {
+fn access_token(server: &Server, handle: Uuid) -> Result<(Provider, Secret), String> {
     let pool = server.pool.lock().expect("pool lock");
     let account = pool
         .get(handle)
         .ok_or_else(|| "account left the pool before probing".to_string())?;
     match &account.credential {
-        Credential::OAuth(family) => Ok(family.access_token.clone()),
+        Credential::OAuth(family) => Ok((account.provider, family.access_token.clone())),
         Credential::ApiKey(_) => Err("usage probing does not apply to API-key accounts".into()),
     }
 }

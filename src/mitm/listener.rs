@@ -197,7 +197,7 @@ async fn dispatch(
 fn method_not_allowed(message: &str) -> Response<ResponseBody> {
     let mut response = crate::data_plane::envelope::proxy_response(
         StatusCode::METHOD_NOT_ALLOWED,
-        crate::anthropic::error_type::PROXY,
+        crate::provider::anthropic::error_type::PROXY,
         message,
     );
     use http::header::CONNECTION;

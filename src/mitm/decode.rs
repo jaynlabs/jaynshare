@@ -11,13 +11,14 @@ use hyper::body::Incoming;
 use hyper::service::service_fn;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 
-use crate::anthropic::error_type;
 use crate::audit::Mode;
 use crate::data_plane::envelope;
 use crate::data_plane::exchange::{self, Entry};
 use crate::data_plane::relay::ResponseBody;
 use crate::mitm::probe::{self, PROBE_HOST};
 use crate::mitm::tunnel::{self, Tunnel};
+use crate::provider::Provider;
+use crate::provider::anthropic::error_type;
 use crate::server::Server;
 
 /// The ALPN chosen at the handshake decides the framing; concurrent HTTP/2
@@ -70,6 +71,8 @@ async fn one(
     peer: SocketAddr,
     mut request: Request<Incoming>,
 ) -> Result<Response<ResponseBody>, exchange::CloseConnection> {
+    // `None` only for the probe host, which never reaches the exchange.
+    let provider = Provider::for_intercepted_host(&tunnel.host);
     // Re-validated per request, so a revoke or a rotate
     // lands inside an open tunnel.
     let Some(principal) = tunnel.credential.principal_now(&server) else {
@@ -79,6 +82,7 @@ async fn one(
             peer,
             &request,
             Mode::Mitm,
+            provider,
         ));
     };
     let Some(authority) = authority(&request) else {
@@ -132,6 +136,7 @@ async fn one(
         Entry {
             principal,
             mode: Mode::Mitm,
+            provider: provider.expect("every intercepted host but the probe's is a provider's"),
             // The tunnel's intent, never the request's.
             intent: tunnel.credential.intent.clone(),
         },

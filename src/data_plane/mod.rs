@@ -23,7 +23,8 @@ use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto;
 use tokio::net::TcpListener;
 
-use crate::anthropic::error_type;
+use crate::provider::Provider;
+use crate::provider::anthropic::error_type;
 use crate::server::Server;
 
 use exchange::CloseConnection;
@@ -172,6 +173,7 @@ async fn dispatch(
             peer,
             &request,
             crate::audit::Mode::BaseUrl,
+            Some(Provider::Anthropic),
         ));
     };
     if server.stopping() {

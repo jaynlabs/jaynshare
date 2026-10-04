@@ -296,6 +296,7 @@ mod tests {
 
     fn pool() -> (Pool, Uuid) {
         let account = Account::new(
+            crate::provider::Provider::Anthropic,
             "A".into(),
             Profile::default(),
             Source::ApiKeyEntry,

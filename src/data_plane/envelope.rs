@@ -5,7 +5,7 @@ use http::header::{CACHE_CONTROL, CONTENT_TYPE};
 use http::{Response, StatusCode};
 use http_body_util::{BodyExt, Full};
 
-use crate::anthropic::{error_envelope, error_type};
+use crate::provider::anthropic::{error_envelope, error_type};
 
 use super::relay::ResponseBody;
 

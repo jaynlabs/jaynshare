@@ -21,6 +21,7 @@ use crate::pool::{
     Account, Credential, OAuthCredential, OperationError, Pool, Profile, ReferenceConflict,
     Resolve, Secret, Source,
 };
+use crate::provider::Provider;
 use crate::server::{MutateError, Server};
 use crate::state;
 use crate::timestamp::rfc3339;
@@ -459,7 +460,13 @@ pub(super) async fn add_account(
         .clone()
         .or_else(|| profile.email.clone())
         .unwrap_or_else(|| format!("account {}", profile.account_uuid.unwrap_or_default()));
-    let account = Account::new(name, profile, imported.source, imported.credential);
+    let account = Account::new(
+        Provider::Anthropic,
+        name,
+        profile,
+        imported.source,
+        imported.credential,
+    );
     let added = server.mutate_pool(|pool| {
         guarded(&server.config().config, pool, |pool| {
             let known: Vec<Uuid> = pool.accounts().iter().map(|a| a.handle).collect();
@@ -1012,6 +1019,7 @@ mod tests {
         let attempted = now - Duration::seconds(1);
         let started = now - Duration::seconds(2);
         let mut account = Account::new(
+            crate::provider::Provider::Anthropic,
             "FSUB".into(),
             Profile::default(),
             Source::PortableJson,
@@ -1073,6 +1081,7 @@ mod tests {
             .expect("default settings")
             .selection;
         let mut account = Account::new(
+            crate::provider::Provider::Anthropic,
             "FSUB".into(),
             Profile::default(),
             Source::PortableJson,

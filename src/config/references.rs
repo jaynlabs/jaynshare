@@ -142,12 +142,14 @@ mod tests {
 
     fn oauth(email: &str, org: &str) -> Account {
         Account::new(
+            crate::provider::Provider::Anthropic,
             String::new(),
             Profile {
                 email: Some(email.into()),
                 account_uuid: Some(Uuid::new_v4()),
                 organization_uuid: None,
                 organization_name: Some(org.into()),
+                chatgpt_account_id: None,
             },
             Source::PortableJson,
             Credential::OAuth(crate::pool::OAuthCredential {

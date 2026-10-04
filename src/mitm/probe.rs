@@ -8,11 +8,11 @@ use serde_json::{Value, json};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
-use crate::anthropic::error_type;
 use crate::data_plane::envelope;
 use crate::data_plane::relay::ResponseBody;
 use crate::mitm::ca::STATE_UNUSABLE;
 use crate::mitm::tunnel::Credential;
+use crate::provider::anthropic::error_type;
 use crate::server::{Server, VERSION};
 
 /// The name reserved for this purpose, so no real host is ever shadowed. It

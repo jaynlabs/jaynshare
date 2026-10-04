@@ -14,7 +14,6 @@ use hyper::body::Incoming;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use crate::anthropic::{TELEMETRY_PATH, X_CLAUDE_CODE_SESSION_ID, error_type, is_account_bound};
 use crate::audit::{ErrorClass, Mode, Principal, Record, ServingAccount};
 use crate::capture::ExchangeCapture;
 use crate::config::{Config, TelemetryPolicy};
@@ -23,6 +22,8 @@ use crate::pool::ramp::Admit;
 use crate::pool::refresh::{self, Outcome, Trigger};
 use crate::pool::selection::{self, Cause, NoService, RequestFacts};
 use crate::pool::{Resolve, SessionKey};
+use crate::provider::Provider;
+use crate::provider::anthropic::error_type;
 use crate::server::Server;
 
 use super::attempt;
@@ -149,6 +150,9 @@ impl Drop for Exchange {
 pub struct Entry {
     pub principal: Principal,
     pub mode: Mode,
+    /// Whose API the request speaks: the base-URL listener's is Anthropic's,
+    /// a tunnel's is its intercepted host's.
+    pub provider: Provider,
     /// `Ok(None)` reads the request's own headers, `Ok(Some)` is the
     /// tunnel's fixed intent, `Err` is a malformed user field — every request
     /// inside that tunnel is a 400.
@@ -161,6 +165,7 @@ impl Entry {
         Entry {
             principal,
             mode: Mode::BaseUrl,
+            provider: Provider::Anthropic,
             intent: Ok(None),
         }
     }
@@ -176,15 +181,15 @@ pub fn unauthenticated(
     peer: SocketAddr,
     request: &Request<Incoming>,
     mode: Mode,
+    provider: Option<Provider>,
 ) -> Response<ResponseBody> {
     server.record_exchange(&Record {
         timestamp: OffsetDateTime::now_utc(),
         duration_ms: 0,
         principal: None,
         source_address: peer.to_string(),
-        session_id: request
-            .headers()
-            .get(X_CLAUDE_CODE_SESSION_ID)
+        session_id: provider
+            .and_then(|p| request.headers().get(p.session_header()))
             .and_then(|v| v.to_str().ok())
             .map(String::from),
         method: request.method().to_string(),
@@ -213,6 +218,7 @@ pub async fn run(
     let Entry {
         principal,
         mode,
+        provider,
         intent: fixed_intent,
     } = entry;
     // The configuration in force when the exchange begins is the one
@@ -228,7 +234,7 @@ pub async fn run(
         .to_string();
     let session_id = parts
         .headers
-        .get(X_CLAUDE_CODE_SESSION_ID)
+        .get(provider.session_header())
         .and_then(|v| v.to_str().ok())
         .map(String::from);
     let principal_key = principal.key();
@@ -289,19 +295,16 @@ pub async fn run(
     let body_facts = attempt::body_facts(&body);
     exchange.record.model = body_facts.model.clone();
 
-    // Telemetry under `block` is answered here, never forwarded. The
-    // path and anything under it: `A` records the prefix, not a fixed subpath.
-    let telemetry = path == TELEMETRY_PATH
-        || path
-            .strip_prefix(TELEMETRY_PATH)
-            .is_some_and(|rest| rest.starts_with('/'));
-    if telemetry && settings.data_plane.telemetry_policy == TelemetryPolicy::Block {
+    // Telemetry under `block` is answered here, never forwarded.
+    if provider.is_telemetry(&path)
+        && settings.data_plane.telemetry_policy == TelemetryPolicy::Block
+    {
         return Ok(exchange.respond(json_response(StatusCode::OK, &serde_json::json!({})), None));
     }
     // An account-bound path is refused before any selection,
     // so no pooled credential answers for it and no family 401 errors an
     // account.
-    if is_account_bound(&path) {
+    if provider.is_account_bound(&path) {
         return Ok(exchange.proxy_error(
             StatusCode::FORBIDDEN,
             format!(
@@ -441,8 +444,8 @@ pub async fn run(
 
     let mut headers = parts.headers;
     attempt::strip_request_headers(&mut headers);
-    headers.insert(HOST, server.upstream.host_header());
-    let uri = server.upstream.uri_for(&path_and_query);
+    headers.insert(HOST, server.upstream.host_header(provider));
+    let uri = server.upstream.uri_for(provider, &path_and_query);
 
     // A failure that is neither a network failure nor a status is the one
     // path that may try another account, and only for an exchange that is
@@ -545,11 +548,7 @@ pub async fn run(
                 continue;
             };
             let mut h = headers.clone();
-            let account_uuid = match &account.credential {
-                crate::pool::Credential::OAuth(_) => account.profile.account_uuid,
-                crate::pool::Credential::ApiKey(_) => None,
-            };
-            let rewritten = attempt::rewrite_body(body.clone(), &path, account_uuid);
+            let rewritten = provider.rewrite_body(body.clone(), &path, account);
             if !rewritten.is_empty() || headers.contains_key(CONTENT_LENGTH) {
                 attempt::set_content_length(&mut h, rewritten.len());
             }
@@ -559,6 +558,7 @@ pub async fn run(
 
         let attempt = attempt_candidate(AttemptInput {
             server: &server,
+            provider,
             capture: capture.as_mut(),
             handle,
             display_name: &display_name,
@@ -615,7 +615,10 @@ pub async fn run(
                     tracing::warn!(event = "account_refused_403", account = %display_name, "403 upstream; ending the exchange");
                     return Ok(exchange.proxy_error(
                         StatusCode::BAD_GATEWAY,
-                        format!("Anthropic answered 403 for {display_name}; check the server's egress address"),
+                        format!(
+                            "{} answered 403 for {display_name}; check the server's egress address",
+                            provider.upstream_name()
+                        ),
                         ErrorClass::Upstream,
                     ));
                 }
@@ -681,7 +684,8 @@ pub async fn run(
                 return Ok(exchange.proxy_error(
                     StatusCode::BAD_GATEWAY,
                     format!(
-                        "Anthropic refused the credential of {display_name}; the operator must re-add the account"
+                        "{} refused the credential of {display_name}; the operator must re-add the account",
+                        provider.upstream_name()
                     ),
                     ErrorClass::Authentication,
                 ));
@@ -763,6 +767,7 @@ fn build_request(method: &Method, uri: &Uri, headers: &HeaderMap, body: Bytes) -
 /// Everything one candidate's attempt loop needs from the exchange.
 struct AttemptInput<'a> {
     server: &'a Arc<Server>,
+    provider: Provider,
     capture: Option<&'a mut ExchangeCapture>,
     handle: Uuid,
     display_name: &'a str,
@@ -861,6 +866,7 @@ impl Retries {
 async fn attempt_candidate(input: AttemptInput<'_>) -> Attempt {
     let AttemptInput {
         server,
+        provider,
         mut capture,
         handle,
         display_name,
@@ -889,7 +895,7 @@ async fn attempt_candidate(input: AttemptInput<'_>) -> Attempt {
                 break Attempt::Other("the account left the pool mid-attempt".into());
             };
             let mut h = headers.clone();
-            attempt::inject_credential(&mut h, &account.credential);
+            provider.inject_credential(&mut h, account);
             (h, account.kind())
         };
         // The slot is held from here until the response headers
