@@ -146,7 +146,7 @@ pub(super) static DOCS: &[VerbDoc] = &[
         "status",
         Engineer,
         None,
-        "As the enrolled client: this client's view of the pool (--client, --line, --session)",
+        "As the enrolled client: rate-limit table; --verbose adds diagnostics (--client, --line, --session)",
         [4, 5, 11, 12],
         ["jaynshare status --client", "jaynshare status --line"]
     ),
@@ -198,7 +198,7 @@ pub(super) static DOCS: &[VerbDoc] = &[
         "status",
         Operator,
         None,
-        "Read the pool table with utilisation bars; --verbose adds the diagnostics; --check prints nothing",
+        "Read the rate-limit table; --verbose adds the diagnostics; --check prints nothing",
         [3, 4, 5, 10],
         ["jaynshare status", "jaynshare status --verbose"]
     ),

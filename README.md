@@ -180,7 +180,10 @@ pick, and `--direct` runs the tool outside the pool under your own login.
 with each account's five-hour and weekly usage, and launches the tool of the
 account you pick.
 Arguments after `--` go to the tool unchanged. `jaynshare status` checks enrollment
-and connectivity, `jaynshare account login` adds your account later, and
+and connectivity and shows every pooled account's five-hour and weekly usage
+in a colored table (`?` means unknown); `--verbose` adds the other status
+details. A cyan `┃` marks the elapsed share of the reset period when the reset
+time is known. `jaynshare account login` adds your account later, and
 `jaynshare alias` prints a shell alias so that `claude` itself goes through the
 pool.
 

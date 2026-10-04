@@ -2306,7 +2306,9 @@ const CLIENT_ALLOW: &[&str] = &[
     "tls_pin",
     "version",
     "five_hour",
+    "five_hour_reset_at",
     "weekly",
+    "weekly_reset_at",
     "wire_capture_enabled",
 ];
 

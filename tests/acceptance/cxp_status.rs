@@ -8,8 +8,8 @@ use crate::client_fx::*;
 use crate::harness::*;
 
 /// `status` shows the
-/// allow-listed facts only, in both forms: no other account, no other
-/// principal, no identity, no quota.
+/// allow-listed facts only, in both forms: shared rate-limit windows and resets,
+/// no other principal, identity or detailed quota.
 #[tokio::test(flavor = "multi_thread")]
 async fn status_shows_the_allow_listed_facts_only() {
     let _leak_sweep = crate::leaks::LeakGuard::default();
@@ -52,6 +52,7 @@ async fn status_shows_the_allow_listed_facts_only() {
                 "ca_fingerprint",
                 "ca_next_fingerprint",
                 "pool",
+                "accounts",
                 "sessions",
                 "wire_capture_enabled",
                 "hold_hint_seconds",
@@ -70,6 +71,7 @@ async fn status_shows_the_allow_listed_facts_only() {
         "client",
         "server",
         "pool",
+        "accounts",
         "sessions",
         "wire_capture_enabled",
         "session",
@@ -126,29 +128,92 @@ async fn status_shows_the_allow_listed_facts_only() {
         result["session"]["serving_account_display_name"],
         json!("FSUB")
     );
+    let accounts = result["accounts"].as_array().expect("pooled accounts");
+    assert_eq!(accounts.len(), 2, "every pooled account: {result}");
+    for account in accounts {
+        assert_eq!(
+            account
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["display_name", "provider", "rate_limits"],
+            "the shared account projection: {account}"
+        );
+        assert_eq!(
+            account["rate_limits"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            [
+                "five_hour",
+                "weekly",
+                "five_hour_reset_at",
+                "weekly_reset_at"
+            ],
+            "only the shared windows: {account}"
+        );
+        let operator = instance.account(account["display_name"].as_str().unwrap());
+        for (window, bucket_name) in [("five_hour", "session"), ("weekly", "weekly")] {
+            let bucket = operator["buckets"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|bucket| bucket["name"] == bucket_name)
+                .unwrap();
+            assert_eq!(
+                account["rate_limits"][format!("{window}_reset_at")],
+                bucket["reset"]
+            );
+        }
+    }
 
-    let (code, human, stderr) = machine.jaynshare(&["status", "--session", SID], &[], None);
+    let (code, table, stderr) = machine.jaynshare(&["status", "--session", SID], &[], None);
     assert_eq!(code, 0, "{stderr}");
-    let first = human.lines().next().expect("the first line");
-    assert!(first.starts_with("client:"), "{human}");
+    assert!(table.starts_with("accounts\n"), "{table}");
+    for label in [
+        "client:", "server:", "pool:", "session:", "capture:", "hold:", "probe:",
+    ] {
+        assert!(
+            !table.contains(label),
+            "diagnostics require --verbose: {table}"
+        );
+    }
+    let (code, human, stderr) =
+        machine.jaynshare(&["status", "--verbose", "--session", SID], &[], None);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        human.starts_with(table.trim_end()),
+        "verbose includes the table: {human}"
+    );
+    let first = human
+        .lines()
+        .find(|line| line.starts_with("client:"))
+        .expect("the client line");
     assert!(
         first.contains("engineer-1")
             && first.contains("Engineer One")
             && first.contains(&machine.base_url),
-        "the first line names the client and the origins: {first}"
+        "the client line names the client and the origins: {first}"
     );
     assert!(human.contains("served by FSUB"), "{human}");
     assert!(human.contains("capture:"), "{human}");
     assert!(human.contains("pool:"), "{human}");
+    assert!(human.contains("FSUB2"), "every account: {human}");
+    assert!(
+        human.contains("5h used") && human.contains("Weekly used"),
+        "{human}"
+    );
 
-    // No other account, no other principal, no identity, no quota.
+    // No other principal, identity or detailed quota.
     let forbidden = [
-        "FSUB2",
         "other-1",
         "Other Desk",
         "@",
         "utilization",
-        "reset",
         "eligib",
         FIXTURE_ORG_UUID,
     ];
@@ -216,7 +281,7 @@ async fn the_probe_tells_the_four_outcomes_apart() {
     assert_eq!(probe["fingerprint_matches"], json!(true), "{probe}");
     assert_eq!(probe["tunnel"]["tls"], json!(true), "{probe}");
     assert_eq!(probe["absolute"]["tls"], json!(false), "{probe}");
-    let (code, stdout, stderr) = machine.jaynshare(&["status"], &[], None);
+    let (code, stdout, stderr) = machine.jaynshare(&["status", "--verbose"], &[], None);
     assert_eq!(code, 0, "status: {stderr}");
     assert!(
         stdout.contains("probe:"),
@@ -552,13 +617,26 @@ async fn the_three_forms_of_status_agree() {
     body["accounts"] = json!([
         {
             "display_name": "Zed Account",
+            "provider": "codex",
             "rate_limits": { "five_hour": 0.12, "weekly": 0.34 },
         },
         {
             "display_name": "Other Account",
+            "provider": "anthropic",
             "rate_limits": { "five_hour": null, "weekly": 1.0 },
         },
     ]);
+    let now = time::OffsetDateTime::now_utc();
+    for (window, period) in [
+        ("five_hour", time::Duration::hours(5)),
+        ("weekly", time::Duration::days(7)),
+    ] {
+        body["accounts"][0]["rate_limits"][format!("{window}_reset_at")] = json!(
+            (now + period / 2_i32)
+                .format(&time::format_description::well_known::Rfc3339)
+                .unwrap()
+        );
+    }
     let fake = FakeControl::answering(200, body);
     machine.set("base_url", &format!("{:?}", fake.origin()));
     const SID: &str = "3f7a2c1e-0000-4000-8000-00000000c0de";
@@ -573,10 +651,21 @@ async fn the_three_forms_of_status_agree() {
             before + 1,
             "{args:?}: one request per form"
         );
+        assert!(
+            fake.seen()
+                .last()
+                .unwrap()
+                .lines()
+                .next()
+                .unwrap()
+                .contains("rate_limits=true"),
+            "{args:?}: request every account's limits"
+        );
         stdout
     };
     let line = form(&["status", "--line", "--session", SID]);
     let human = form(&["status", "--session", SID]);
+    let verbose = form(&["status", "--verbose", "--session", SID]);
     let json_out = form(&["status", "--json", "--session", SID]);
     let result =
         serde_json::from_str::<Value>(json_out.trim()).expect("the envelope")["result"].clone();
@@ -598,10 +687,55 @@ async fn the_three_forms_of_status_agree() {
             "line includes {unrelated:?}: {line}"
         );
     }
-    // The human form keeps its broader diagnostic facts.
-    for fact in ["Zed Account", "7 of 9", "4 active", "11 known", "ON", "45"] {
-        assert!(human.contains(fact), "human form lacks {fact:?}: {human}");
+    assert!(human.starts_with("accounts\n"), "only the table: {human}");
+    for label in [
+        "client:", "server:", "pool:", "session:", "capture:", "hold:", "probe:",
+    ] {
+        assert!(
+            !human.contains(label),
+            "diagnostics require --verbose: {human}"
+        );
     }
+    assert!(
+        verbose.starts_with(human.trim_end()),
+        "verbose adds to the table: {verbose}"
+    );
+    // --verbose keeps the broader diagnostic facts.
+    for fact in ["Zed Account", "7 of 9", "4 active", "11 known", "ON", "45"] {
+        assert!(
+            verbose.contains(fact),
+            "verbose form lacks {fact:?}: {verbose}"
+        );
+    }
+    let zed = human
+        .lines()
+        .find(|line| line.contains("│") && line.contains("Zed Account"))
+        .unwrap();
+    assert!(
+        zed.contains("codex") && zed.contains("12%") && zed.contains("34%"),
+        "{zed}"
+    );
+    assert_eq!(
+        zed.matches('┃').count(),
+        2,
+        "both windows have a linear marker: {zed}"
+    );
+    assert!(
+        human.lines().last() == Some("  ┃ = elapsed share of the reset period"),
+        "explain the marker: {human}"
+    );
+    let other = human
+        .lines()
+        .find(|line| line.contains("Other Account"))
+        .unwrap();
+    assert!(
+        other.contains("anthropic")
+            && other.contains("[??????????????????]")
+            && other.contains("100%"),
+        "{other}"
+    );
+    assert!(!other.contains('┃'), "no invented resets: {other}");
+    assert!(!human.contains('\x1b'), "piped status is plain: {human:?}");
     // And every human fact is in the JSON, at its path.
     assert_eq!(
         result["session"]["serving_account_display_name"],
@@ -613,10 +747,59 @@ async fn the_three_forms_of_status_agree() {
     assert_eq!(result["sessions"]["known"], json!(11));
     assert_eq!(result["wire_capture_enabled"], json!(true));
     assert_eq!(result["hold_hint_seconds"], json!(45));
-    for text in [&line, &human, &json_out] {
+    assert_eq!(
+        result["accounts"][0]["rate_limits"]["five_hour"],
+        json!(0.12)
+    );
+    assert_eq!(
+        result["accounts"][1]["rate_limits"]["five_hour"],
+        Value::Null
+    );
+    assert_eq!(result["accounts"][1]["rate_limits"]["weekly"], json!(1.0));
+    for text in [&line, &human, &verbose, &json_out] {
         assert!(
             !text.contains("FSUB"),
             "a value the server did not send: {text}"
         );
+    }
+
+    #[cfg(unix)]
+    {
+        let args = ["status", "--session", SID];
+        let (code, terminal) = cli_pty("status-account-table-color", &args, &machine.env(), None);
+        assert_eq!(code, 0, "{terminal}");
+        assert!(
+            terminal.contains("\x1b[38;2;"),
+            "colored usage bars: {terminal:?}"
+        );
+        assert!(
+            terminal.contains("\x1b[1;36m┃"),
+            "cyan pace marker: {terminal:?}"
+        );
+        let mut no_color_env = machine.env();
+        no_color_env.push(("NO_COLOR".into(), "1".into()));
+        let (code, with_variable) =
+            cli_pty("status-account-table-variable", &args, &no_color_env, None);
+        assert_eq!(code, 0, "{with_variable}");
+        let (code, with_flag) = cli_pty(
+            "status-account-table-flag",
+            &["status", "--session", SID, "--no-color"],
+            &machine.env(),
+            None,
+        );
+        assert_eq!(code, 0, "{with_flag}");
+        for plain in [&with_variable, &with_flag] {
+            assert!(!plain.contains('\x1b'), "color disabled: {plain:?}");
+        }
+        let facts = |text: &str| {
+            strip_ansi(text)
+                .lines()
+                .map(|line| line.trim_end().to_string())
+                .filter(|line| !line.is_empty())
+                .collect::<Vec<_>>()
+        };
+        for rendering in [&terminal, &with_variable, &with_flag] {
+            assert_eq!(facts(rendering), facts(&human), "the same account table");
+        }
     }
 }

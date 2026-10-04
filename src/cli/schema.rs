@@ -46,6 +46,16 @@ fn object(members: &[(&str, Value)]) -> Value {
     json!({ "type": "object", "required": required, "additionalProperties": false, "properties": properties })
 }
 
+fn rate_limits() -> Value {
+    let mut schema = object(&[
+        ("five_hour", nullable_number()),
+        ("weekly", nullable_number()),
+    ]);
+    schema["properties"]["five_hour_reset_at"] = nullable_string();
+    schema["properties"]["weekly_reset_at"] = nullable_string();
+    schema
+}
+
 /// What every deploy verb answers.
 fn deploy_members() -> Vec<(&'static str, Value)> {
     vec![
@@ -137,13 +147,7 @@ fn defs() -> Value {
         ("display_name", string()),
         ("provider", provider.clone()),
         ("selectable", json!({ "type": "boolean" })),
-        (
-            "rate_limits",
-            object(&[
-                ("five_hour", nullable_number()),
-                ("weekly", nullable_number()),
-            ]),
-        ),
+        ("rate_limits", rate_limits()),
         ("profile", profile.clone()),
         ("health", health.clone()),
     ]);
@@ -571,6 +575,11 @@ fn result_of(path: &str) -> Option<Value> {
                 ("accounts_configured", json!({ "type": "integer" })),
                 ("accounts_selectable", json!({ "type": "integer" })),
             ]),
+            "accounts": array(object(&[
+                ("display_name", string()),
+                ("provider", json!({ "enum": Provider::ALL.map(Provider::as_str) })),
+                ("rate_limits", rate_limits()),
+            ])),
             "sessions": object(&[
                 ("known", json!({ "type": "integer" })),
                 ("active", json!({ "type": "integer" })),

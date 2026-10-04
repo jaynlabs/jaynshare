@@ -191,9 +191,9 @@ pub(super) struct StatusArgs {
     /// Print the configuration section alone.
     #[arg(long = "config-section")]
     pub(super) config_section: bool,
-    /// Add the diagnostics the default table leaves out: server, egress,
+    /// Add diagnostics to the rate-limit table: server, egress,
     /// capture, mitm, sessions, probe, clients, storage, config, and
-    /// per-account usage, holds and ramps.
+    /// routes, defaults, and per-account usage, holds and ramps.
     #[arg(long, conflicts_with = "check")]
     pub(super) verbose: bool,
     /// Force the operator role.

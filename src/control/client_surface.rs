@@ -26,8 +26,9 @@ use super::{API_VERSION, error, percent_decode, provider_named, read};
 use crate::timestamp::rfc3339;
 
 /// The client projection. Every member below is named on purpose;
-/// per-account quota, identity, health, routes, configuration and other
-/// clients have no path into it. With `?session_id=` the read
+/// only shared rate-limit usage and resets are exposed per account; identity,
+/// health, routes, configuration and other clients have no path into it.
+/// With `?session_id=` the read
 /// adds `session`: this principal's most recent serving account and when it
 /// was last routed, or `null` when it has no such session (the lookup
 /// is keyed by the client id too, so another client's session id yields
@@ -162,16 +163,14 @@ pub(super) fn status(
 }
 
 pub(super) fn rate_limits(account: &Account) -> Value {
-    let utilisation = |name| {
-        account
-            .quota
-            .iter()
-            .find(|bucket| bucket.name == name)
-            .and_then(|bucket| bucket.effective_utilization())
-    };
+    let bucket = |name| account.quota.iter().find(|bucket| bucket.name == name);
+    let utilisation = |name| bucket(name).and_then(|bucket| bucket.effective_utilization());
+    let reset = |name| bucket(name).and_then(|bucket| bucket.reset_at).map(rfc3339);
     json!({
         "five_hour": utilisation(SESSION),
         "weekly": utilisation(WEEKLY),
+        "five_hour_reset_at": reset(SESSION),
+        "weekly_reset_at": reset(WEEKLY),
     })
 }
 
