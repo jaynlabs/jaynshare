@@ -121,12 +121,12 @@ impl Pool {
             }
             None => self.derive_name(&mut account)?,
         };
-        let handle = account.handle;
+        let (handle, provider) = (account.handle, account.provider);
         self.accounts.push(account);
-        if self.operator.default.is_none() {
+        if self.default_account(provider).is_none() {
             // The pool's own move, so `since` records when this
             // account became the default and `operator_chosen` stays false.
-            self.move_default(Some(handle), OffsetDateTime::now_utc());
+            self.move_default(provider, Some(handle), OffsetDateTime::now_utc());
         }
         Ok(handle)
     }
@@ -145,9 +145,11 @@ impl Pool {
     }
 
     fn same_identity_of(&self, candidate: &Account) -> Option<&Account> {
-        self.accounts
-            .iter()
-            .find(|a| a.kind() == Kind::OAuth && same_identity(&a.profile, &candidate.profile))
+        self.accounts.iter().find(|a| {
+            a.provider == candidate.provider
+                && a.kind() == Kind::OAuth
+                && same_identity(&a.profile, &candidate.profile)
+        })
     }
 
     pub(super) fn name_taken(&self, name: &str, except: Option<Uuid>) -> bool {
@@ -320,9 +322,10 @@ impl Pool {
         self.admission.remove(&handle);
         self.sessions.unbind_account(handle);
         self.operator.route_preferences.retain(|_, h| *h != handle);
-        if self.operator.default == Some(handle) {
-            let next = self.accounts.first().map(|a| a.handle);
-            self.move_default(next, OffsetDateTime::now_utc());
+        let provider = removed.provider;
+        if self.default_account(provider) == Some(handle) {
+            let next = self.accounts_of(provider).next().map(|a| a.handle);
+            self.move_default(provider, next, OffsetDateTime::now_utc());
         }
         Some(removed)
     }
@@ -387,7 +390,10 @@ mod tests {
             .unwrap();
         assert_eq!(pool.get(first).unwrap().display_name, "a@x.io (One)");
         assert_eq!(pool.get(second).unwrap().display_name, "A@x.io (Two)");
-        assert_eq!(pool.default_account(), Some(first));
+        assert_eq!(
+            pool.default_account(crate::provider::Provider::Anthropic),
+            Some(first)
+        );
     }
 
     /// On add: the earlier holder is renamed in place at the colliding add;

@@ -129,9 +129,11 @@ fn defs() -> Value {
         ("organization_name", nullable_string()),
     ]);
     // A client's view of an account it owns.
+    let provider = json!({ "enum": ["anthropic", "codex"] });
     let owned_account = object(&[
         ("handle", string()),
         ("display_name", string()),
+        ("provider", provider.clone()),
         ("selectable", json!({ "type": "boolean" })),
         (
             "rate_limits",
@@ -146,6 +148,7 @@ fn defs() -> Value {
     let account = object(&[
         ("handle", string()),
         ("display_name", string()),
+        ("provider", provider),
         ("kind", json!({ "enum": ["oauth", "api_key"] })),
         (
             "source_class",
@@ -237,6 +240,12 @@ fn defs() -> Value {
         ("changed_keys", array(string())),
         ("rejected_restart_keys", array(string())),
     ]);
+    // One provider's default.
+    let default = nullable(object(&[
+        ("handle", string()),
+        ("operator_chosen", json!({ "type": "boolean" })),
+        ("since", nullable_string()),
+    ]));
     let snapshot = object(&[
         (
             "server",
@@ -308,13 +317,10 @@ fn defs() -> Value {
             ]),
         ),
         ("accounts", array(reference("account"))),
+        ("default_account", default.clone()),
         (
-            "default_account",
-            nullable(object(&[
-                ("handle", string()),
-                ("operator_chosen", json!({ "type": "boolean" })),
-                ("since", nullable_string()),
-            ])),
+            "default_accounts",
+            object(&[("anthropic", default.clone()), ("codex", default)]),
         ),
         ("routes", array(reference("route"))),
         ("blocked_models", array(string())),
