@@ -2,7 +2,8 @@
 # A whole pool on one Mac: a server and an enrolled client, each under its own
 # scratch home, so neither touches a real installation or your Claude Code
 # settings. Claude Code runs in the client's home too, but reads your own login
-# from the keychain (the pool drops it).
+# from the keychain (the pool drops it). Codex runs in your real home, with its
+# own login and config (the pool drops that login too).
 #
 # In a checkout it builds that checkout into .quickstart/; with --release, or
 # when the script was downloaded alone, it runs a published release in
@@ -10,6 +11,7 @@
 #
 # Usage: quickstart.sh [--release[=<version>]] [up]   build or download, (re)start the server, update the client
 #        quickstart.sh [--release] claude [args]      run `jaynshare claude` as the client
+#        quickstart.sh codex [args]                    run `jaynshare codex` as the client
 #        quickstart.sh [--release] op <verb...>       an operator verb on the server
 #        quickstart.sh [--release] client <verb...>
 #        quickstart.sh [--release] logs | down
@@ -80,6 +82,15 @@ if not config.get("hasCompletedOnboarding"):
     config["hasCompletedOnboarding"] = True
     json.dump(config, open(path, "w"), indent=2)
 EOF
+}
+
+# The launcher finds `codex` on PATH; this one runs it with your real home.
+prepare_codex() {
+    local codex
+    codex=$(command -v codex) || die "codex is missing; install Codex and log in to it first"
+    mkdir -p "$SCRATCH/bin"
+    printf '#!/bin/bash\nHOME=%q exec %q "$@"\n' "$HOME" "$codex" >"$SCRATCH/bin/codex"
+    chmod +x "$SCRATCH/bin/codex"
 }
 
 result_field() { python3 -c 'import json, sys; print(json.load(sys.stdin)["result"][sys.argv[1]])' "$1"; }
@@ -226,6 +237,7 @@ up) up ;;
 down) stop_server ;;
 logs) tail -f "$SCRATCH/server.log" ;;
 claude) shift; prepare_claude; HOME="$CLIENT_HOME" PATH="$SCRATCH/bin:$PATH" exec "$(client_bin)" claude "$@" ;;
+codex) shift; prepare_codex; HOME="$CLIENT_HOME" PATH="$SCRATCH/bin:$PATH" exec "$(client_bin)" codex "$@" ;;
 op) shift; as_server "$@" ;;
 client) shift; as_client "$@" ;;
 *) die "unknown command $1; see the usage at the top of $0" ;;
