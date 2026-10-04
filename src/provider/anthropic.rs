@@ -8,6 +8,7 @@ use serde_json::Value;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
+use super::{Grant, TokenRequest};
 use crate::pool::quota::{
     API_KEY_BUCKETS, FAMILY_FABLE, Observation, SESSION, Scope, WEEKLY, parse_reset,
 };
@@ -82,6 +83,62 @@ pub const OAUTH_SCOPES: &str = "org:create_api_key user:profile user:inference u
 /// where the browser may land after a completed login.
 pub const OAUTH_SUCCESS_URL: &str =
     "https://platform.claude.com/oauth/code/success?app=claude-code";
+
+pub fn authorization_url(challenge: &str, redirect_uri: &str, state: &str) -> String {
+    let query = super::form(&[
+        ("code", "true"),
+        ("client_id", OAUTH_CLIENT_ID),
+        ("response_type", "code"),
+        ("redirect_uri", redirect_uri),
+        ("scope", OAUTH_SCOPES),
+        ("code_challenge", challenge),
+        ("code_challenge_method", "S256"),
+        ("state", state),
+    ]);
+    format!("{AUTHORIZE_URL}?{query}")
+}
+
+pub fn redirect_uri(port: u16) -> String {
+    format!("http://localhost:{port}/callback")
+}
+
+/// JSON both ways; the refresh call looks like Claude Code's own.
+pub fn token_request(grant: Grant<'_>) -> TokenRequest {
+    match grant {
+        Grant::Code {
+            code,
+            state,
+            verifier,
+            redirect_uri,
+        } => TokenRequest {
+            path: TOKEN_PATH,
+            content_type: "application/json",
+            accept: "application/json",
+            user_agent: None,
+            body: serde_json::json!({
+                "grant_type": "authorization_code",
+                "code": code,
+                "state": state,
+                "client_id": OAUTH_CLIENT_ID,
+                "redirect_uri": redirect_uri,
+                "code_verifier": verifier,
+            })
+            .to_string(),
+        },
+        Grant::Refresh { refresh_token } => TokenRequest {
+            path: TOKEN_PATH,
+            content_type: "application/json",
+            accept: "application/json, text/plain, */*",
+            user_agent: Some("axios/1.13.6"),
+            body: serde_json::json!({
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
+                "client_id": OAUTH_CLIENT_ID,
+            })
+            .to_string(),
+        },
+    }
+}
 
 /// error classes by status, plus our own `proxy_error`.
 pub mod error_type {

@@ -22,9 +22,9 @@ use crate::server::Server;
 use super::accounts::health_of;
 use super::client_surface::rate_limits;
 use super::{
-    error, insecure_channel, insecure_channel_refusal, login_display_name, login_started,
-    member_errors, method_not_allowed, mutation_body, mutation_line, not_found, operation_cancel,
-    operation_code, operation_show, read, refusal_line, time_or_null,
+    error, insecure_channel, insecure_channel_refusal, login_display_name, login_provider,
+    login_started, member_errors, method_not_allowed, mutation_body, mutation_line, not_found,
+    operation_cancel, operation_code, operation_show, read, refusal_line, time_or_null,
 };
 
 /// `path` is what follows `/control/v1/client/accounts/`.
@@ -135,6 +135,7 @@ async fn login_start(
         &[
             ("redirect_port", "integer", true),
             ("display_name", "string", false),
+            ("provider", "string", false),
         ],
     );
     if !details.is_empty() {
@@ -159,6 +160,21 @@ async fn login_start(
             vec![],
         );
     };
+    let provider = match login_provider(&body) {
+        Ok(provider) => provider,
+        Err(refusal) => return *refusal,
+    };
+    if let Some(fixed) = provider.callback_port()
+        && fixed != port
+    {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            &format!("this provider's login redirect is fixed at port {fixed}"),
+            Some("redirect_port".into()),
+            vec![],
+        );
+    }
     let client = principal
         .client_id()
         .expect("the route admits clients only");
@@ -178,7 +194,12 @@ async fn login_start(
     };
     match server
         .logins
-        .start(Arc::clone(server), starter, login_display_name(&body))
+        .start(
+            Arc::clone(server),
+            starter,
+            provider,
+            login_display_name(&body),
+        )
         .await
     {
         Ok(started) => {
