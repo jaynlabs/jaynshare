@@ -1,5 +1,5 @@
-//! What a picker line reads: a heading as is, the automatic row, and
-//! each display name with control characters removed and truncated to its
+//! What a picker line reads: the automatic row, after its section's heading
+//! if any, and each display name with control characters removed and truncated to its
 //! column, its five-hour and weekly utilisation, and whether it can be chosen
 //! now. The
 //! character set is ASCII on Windows and wherever the locale names
@@ -95,14 +95,15 @@ pub fn rate_limits(five_hour: Option<f64>, weekly: Option<f64>) -> String {
     )
 }
 
-/// The lines' texts, without markers or numbers, which the pickers add.
+/// The lines' texts, without indents, markers or numbers, which the
+/// pickers add.
 pub(super) fn labels(lines: &[Line], width: usize, charset: Charset) -> Vec<String> {
     lines
         .iter()
-        .map(|line| match line {
-            Line::Heading(heading) => heading.to_string(),
-            Line::Automatic(_) => AUTOMATIC.to_string(),
-            Line::Account(_, row) => label(row, width, charset),
+        .map(|line| match (line.row, line.heading) {
+            (None, None) => AUTOMATIC.to_string(),
+            (None, Some(heading)) => format!("{heading} - {AUTOMATIC}"),
+            (Some(row), _) => label(row, width.saturating_sub(line.indent().len()), charset),
         })
         .collect()
 }
@@ -172,7 +173,7 @@ mod tests {
     }
 
     #[test]
-    fn each_section_has_its_heading_and_its_own_automatic_row() {
+    fn each_section_s_automatic_row_carries_its_heading() {
         let sections = [
             Section {
                 heading: Some("Claude Code"),
@@ -187,11 +188,9 @@ mod tests {
         assert_eq!(
             labels,
             [
-                "Claude Code",
-                AUTOMATIC,
+                "Claude Code - Automatic (the pool chooses)",
                 "A | 5h 12% | weekly 34%",
-                "Codex",
-                AUTOMATIC,
+                "Codex - Automatic (the pool chooses)",
                 "B | 5h 12% | weekly 34%"
             ]
         );

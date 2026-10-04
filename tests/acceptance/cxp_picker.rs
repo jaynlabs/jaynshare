@@ -640,9 +640,9 @@ async fn cancel_interrupt_and_end_of_input_each_end_with_15() {
     );
 }
 
-/// Bare `jaynshare` offers every provider's accounts, each provider under
-/// its tool's name with its own automatic row, and launches the tool of the
-/// row picked; `JAYNSHARE_ACCOUNT` does not skip it. Without a terminal it
+/// Bare `jaynshare` offers every provider's accounts, each provider's
+/// indented under its own automatic row named after its tool, and launches
+/// the tool of the row picked; `JAYNSHARE_ACCOUNT` does not skip it. Without a terminal it
 /// refuses like any pick, and without an installation it is the help.
 #[tokio::test(flavor = "multi_thread")]
 async fn bare_jaynshare_picks_across_providers_and_launches_the_picked_tool() {
@@ -677,12 +677,10 @@ async fn bare_jaynshare_picks_across_providers_and_launches_the_picked_tool() {
     let (code, transcript) = machine.pty(&[], &numbered, &[("or q to cancel", "4\r")]);
     assert_eq!(code, 0, "the fake exits 0: {transcript}");
     let lines = [
-        "\nClaude Code\r",
-        "  1) Automatic (the pool chooses)",
-        "  2) FSUB | 5h ? | weekly ?",
-        "\nCodex\r",
-        "  3) Automatic (the pool chooses)",
-        "  4) FSUB2 | 5h ? | weekly ?",
+        "\n  1) Claude Code - Automatic (the pool chooses)\r",
+        "\n    2) FSUB | 5h ? | weekly ?\r",
+        "\n  3) Codex - Automatic (the pool chooses)\r",
+        "\n    4) FSUB2 | 5h ? | weekly ?\r",
         "Enter a number (1-4)",
     ];
     let at: Vec<usize> = lines
@@ -700,15 +698,26 @@ async fn bare_jaynshare_picks_across_providers_and_launches_the_picked_tool() {
     assert_eq!(code, 0);
     assert_eq!(ran("1: Claude Code's automatic row"), ("claude", None));
 
-    // The keyboard skips headings: up wraps to FSUB2, and down twice from
-    // the first automatic row lands on Codex's.
+    // The marker starts on Claude Code's line and follows an account's
+    // indent: up wraps to FSUB2, and down twice lands on Codex's line.
     let keyboard = [("JAYNSHARE_PICKER", "keyboard")];
-    for (keys, want) in [
-        (format!("{KEY_UP}{KEY_ENTER}"), ("codex", pin("FSUB2"))),
-        (format!("{KEY_DOWN}{KEY_DOWN}{KEY_ENTER}"), ("codex", None)),
+    for (keys, drawn, want) in [
+        (
+            format!("{KEY_UP}{KEY_ENTER}"),
+            "  ❯ FSUB2 | 5h ? | weekly ?",
+            ("codex", pin("FSUB2")),
+        ),
+        (
+            format!("{KEY_DOWN}{KEY_DOWN}{KEY_ENTER}"),
+            "❯ Codex - Automatic (the pool chooses)",
+            ("codex", None),
+        ),
     ] {
         let (code, transcript) = machine.pty(&[], &keyboard, &[("Esc cancels", &keys)]);
         assert_eq!(code, 0, "{keys:?}: {transcript}");
+        for text in ["❯ Claude Code - Automatic (the pool chooses)", drawn] {
+            assert!(transcript.contains(text), "{text:?}: {transcript}");
+        }
         assert_eq!(ran(&format!("{keys:?}")), want, "{keys:?}");
     }
 

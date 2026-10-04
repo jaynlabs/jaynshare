@@ -1,5 +1,5 @@
-//! The numbered picker — numbered rows under unnumbered headings, the first
-//! automatic row is 1, one line read from the controlling terminal per attempt. An unselectable or
+//! The numbered picker — numbered rows, the first automatic row is 1, one
+//! line read from the controlling terminal per attempt. An unselectable or
 //! out-of-range entry is refused with a message and the prompt repeats; the
 //! cancel word or end of input cancels, and a closed input never selects.
 
@@ -76,11 +76,7 @@ pub(super) fn pick(lines: &[Line]) -> Result<(usize, Choice), PickError> {
     let charset = super::render::charset();
     let width = super::render::name_width();
     let labels = super::render::labels(lines, width, charset);
-    let numbered: Vec<&Line> = lines
-        .iter()
-        .filter(|line| !matches!(line, Line::Heading(_)))
-        .collect();
-    let last = numbered.len();
+    let last = lines.len();
     let prompt = format!("Enter a number (1-{last}), or q to cancel: ");
 
     let prompt_once = |output: &mut File| -> Result<(), PickError> {
@@ -95,14 +91,8 @@ pub(super) fn pick(lines: &[Line]) -> Result<(usize, Choice), PickError> {
         .map_err(|_| PickError::Io("the interrupt watcher ended".into()))?;
 
     writeln!(output, "Choose the account for this session:").map_err(io)?;
-    let mut number = 0;
-    for (line, label) in lines.iter().zip(&labels) {
-        if matches!(line, Line::Heading(_)) {
-            writeln!(output, "{label}").map_err(io)?;
-        } else {
-            number += 1;
-            writeln!(output, "  {number}) {label}").map_err(io)?;
-        }
+    for (n, (line, label)) in lines.iter().zip(&labels).enumerate() {
+        writeln!(output, "  {}{}) {label}", line.indent(), n + 1).map_err(io)?;
     }
     prompt_once(&mut output)?;
 
@@ -121,13 +111,13 @@ pub(super) fn pick(lines: &[Line]) -> Result<(usize, Choice), PickError> {
             .parse::<usize>()
             .ok()
             .filter(|&n| (1..=last).contains(&n))
-            .map(|n| numbered[n - 1])
+            .map(|n| &lines[n - 1])
         {
             if let Some(choice) = line.choice() {
                 return Ok(choice);
             }
             // Only an account row can be unselectable.
-            if let Line::Account(_, row) = line {
+            if let Some(row) = line.row {
                 let name = super::render::sanitize(&row.display_name, width, charset);
                 writeln!(output, "{name} cannot be chosen now; choose another.").map_err(io)?;
             }

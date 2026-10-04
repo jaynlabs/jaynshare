@@ -1,5 +1,4 @@
-//! The keyboard picker — a moving marker that skips headings, up/down wrap
-//! at both ends, confirm does nothing on an unselectable row, the cancel key
+//! The keyboard picker — a moving marker, up/down wrap at both ends, confirm does nothing on an unselectable row, the cancel key
 //! and Ctrl-C (a byte in raw mode) cancel. Drawn inline on the controlling
 //! terminal (`/dev/tty` where there is one), raw mode and the cursor
 //! restored on every exit path by a guard's `Drop`.
@@ -33,23 +32,12 @@ pub(super) fn pick(lines: &[Line]) -> Result<(usize, Choice), PickError> {
     let labels = super::render::labels(lines, super::render::name_width(), charset);
     let marker = super::render::marker(charset);
     let n = labels.len();
-    let heading = |i: usize| matches!(lines[i], Line::Heading(_));
-    // Every section has its automatic row, so a non-heading line exists.
-    let step = |from: usize, by: usize| {
-        let mut i = from;
-        loop {
-            i = (i + by) % n;
-            if !heading(i) {
-                return i;
-            }
-        }
-    };
 
     terminal::enable_raw_mode().map_err(io)?;
     queue!(terminal.output, cursor::Hide).map_err(io)?;
     let restore = Restore(&mut terminal.output);
 
-    let mut current = (0..n).find(|&i| !heading(i)).expect("an automatic row");
+    let mut current = 0usize;
     queue!(
         restore.0,
         terminal::Clear(terminal::ClearType::FromCursorDown)
@@ -73,11 +61,11 @@ pub(super) fn pick(lines: &[Line]) -> Result<(usize, Choice), PickError> {
         }
         match (key.code, key.modifiers) {
             (KeyCode::Up, _) | (KeyCode::Char('k'), _) => {
-                current = step(current, n - 1);
+                current = (current + n - 1) % n;
                 redraw(restore.0, lines, &labels, marker, current)?;
             }
             (KeyCode::Down, _) | (KeyCode::Char('j'), _) => {
-                current = step(current, 1);
+                current = (current + 1) % n;
                 redraw(restore.0, lines, &labels, marker, current)?;
             }
             (KeyCode::Enter, _) => {
@@ -93,12 +81,10 @@ pub(super) fn pick(lines: &[Line]) -> Result<(usize, Choice), PickError> {
     }
 }
 
-/// A heading flush left; any other line behind the marker or its blank.
+/// The line after its indent and the marker or its blank.
 fn row_text(line: &Line, label: &str, marker: &str, current: bool) -> String {
-    match line {
-        Line::Heading(_) => label.to_string(),
-        _ => format!("{} {label}", if current { marker } else { " " }),
-    }
+    let marker = if current { marker } else { " " };
+    format!("{}{marker} {label}", line.indent())
 }
 
 /// Rewrite the lines in place after a move.
