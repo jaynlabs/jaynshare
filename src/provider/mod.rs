@@ -8,7 +8,7 @@ pub mod codex;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use bytes::Bytes;
-use http::{HeaderMap, HeaderName};
+use http::{HeaderMap, HeaderName, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -109,6 +109,30 @@ impl Provider {
         match self {
             Provider::Anthropic => anthropic::is_account_bound(path),
             Provider::Codex => codex::is_account_bound(path),
+        }
+    }
+
+    /// A request the proxy answers itself, whatever the pool's state.
+    pub fn local_answer(self, path: &str, headers: &HeaderMap) -> Option<Value> {
+        match self {
+            Provider::Anthropic => None,
+            Provider::Codex => codex::local_answer(path, headers),
+        }
+    }
+
+    /// The proxy's own error body; `resets_at` (Unix seconds) on a 429.
+    pub fn error_envelope(self, error_type: &str, message: &str, resets_at: Option<i64>) -> Value {
+        match self {
+            Provider::Anthropic => anthropic::error_envelope(error_type, message),
+            Provider::Codex => codex::error_envelope(error_type, message, resets_at),
+        }
+    }
+
+    /// The status refusing an upgrade inside an intercepted tunnel.
+    pub fn upgrade_refusal(self) -> StatusCode {
+        match self {
+            Provider::Anthropic => anthropic::UPGRADE_REFUSAL,
+            Provider::Codex => codex::UPGRADE_REFUSAL,
         }
     }
 

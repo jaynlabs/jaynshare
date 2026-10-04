@@ -25,6 +25,8 @@ pub const PROFILE_PATH: &str = "/api/oauth/profile";
 pub const USAGE_PATH: &str = "/api/oauth/usage";
 /// Claude Code's telemetry path.
 pub const TELEMETRY_PATH: &str = "/api/event_logging";
+/// The answer to an upgrade inside an intercepted tunnel.
+pub const UPGRADE_REFUSAL: http::StatusCode = http::StatusCode::NOT_IMPLEMENTED;
 
 /// The telemetry path and anything under it.
 pub fn is_telemetry(path: &str) -> bool {

@@ -116,6 +116,7 @@ set is enforced in CI by `cargo-deny` (`deny.toml`).
 | `rustls-pki-types` | 1.15.1 | MIT OR Apache-2.0 | https://github.com/rustls/pki-types |
 | `rustls-webpki` | 0.103.15 | ISC | https://github.com/rustls/webpki |
 | `rustversion` | 1.0.23 | MIT OR Apache-2.0 | https://github.com/dtolnay/rustversion |
+| `ruzstd` | 0.9.0 | MIT | https://github.com/KillingSpark/zstd-rs |
 | `schannel` | 0.1.29 | MIT | https://github.com/steffengy/schannel-rs |
 | `scopeguard` | 1.2.0 | MIT OR Apache-2.0 | https://github.com/bluss/scopeguard |
 | `security-framework` | 3.7.0 | MIT OR Apache-2.0 | https://github.com/kornelski/rust-security-framework |

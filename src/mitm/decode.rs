@@ -112,10 +112,13 @@ async fn one(
             ),
         ));
     }
-    // No upgrade is carried inside an intercepted tunnel.
+    let provider = provider.expect("every intercepted host but the probe's is a provider's");
+    // No upgrade is carried inside an intercepted tunnel; the status is the
+    // one that makes the provider's client fall back fastest.
     if request.headers().contains_key(UPGRADE) || request.method() == Method::CONNECT {
-        return Ok(envelope::proxy_response(
-            StatusCode::NOT_IMPLEMENTED,
+        return Ok(envelope::error(
+            provider,
+            provider.upgrade_refusal(),
             error_type::PROXY,
             "the proxy does not carry protocol upgrades on an intercepted target",
         ));
@@ -136,7 +139,7 @@ async fn one(
         Entry {
             principal,
             mode: Mode::Mitm,
-            provider: provider.expect("every intercepted host but the probe's is a provider's"),
+            provider,
             // The tunnel's intent, never the request's.
             intent: tunnel.credential.intent.clone(),
         },

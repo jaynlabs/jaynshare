@@ -530,6 +530,12 @@ pub(crate) fn default_reply(path: &str) -> Reply {
     if path == "/api/oauth/usage" {
         return reply_usage("25", "40");
     }
+    if path == CODEX_RESPONSES_PATH {
+        return reply_codex_responses();
+    }
+    if path == "/backend-api/codex/models" {
+        return Reply::status(200, json!({ "models": [] }).to_string());
+    }
     let mut headers = vec![
         ("content-type".to_string(), "application/json".to_string()),
         ("request-id".to_string(), "req_fixture_0001".to_string()),
@@ -870,6 +876,39 @@ pub(crate) fn sse_events() -> Vec<String> {
         )
     })
     .collect()
+}
+
+/// Codex's turn on the fake chatgpt.com.
+pub(crate) const CODEX_RESPONSES_PATH: &str = "/backend-api/codex/responses";
+
+/// The fake chatgpt.com's Codex turn: one SSE answer with its
+/// `x-codex-*` quota headers.
+pub(crate) fn reply_codex_responses() -> Reply {
+    let events: String = [
+        json!({"type":"response.created","response":{"id":"resp_fixture"}}),
+        json!({"type":"response.output_item.done","item":{"type":"message","role":"assistant","id":"msg_fixture","content":[{"type":"output_text","text":"hello from the fake chatgpt"}]}}),
+        json!({"type":"response.completed","response":{"id":"resp_fixture","usage":{"input_tokens":11,"output_tokens":7,"total_tokens":18}}}),
+    ]
+    .iter()
+    .map(|event| format!("event: {}\ndata: {event}\n\n", event["type"].as_str().expect("event type")))
+    .collect();
+    let mut headers = vec![("content-type".to_string(), "text/event-stream".to_string())];
+    headers.extend(
+        [
+            ("x-codex-primary-used-percent", "12.5"),
+            ("x-codex-primary-window-minutes", "300"),
+            ("x-codex-primary-reset-at", "1900000000"),
+            ("x-codex-secondary-used-percent", "40"),
+            ("x-codex-secondary-window-minutes", "10080"),
+            ("x-codex-secondary-reset-at", "1900500000"),
+        ]
+        .map(|(name, value)| (name.to_string(), value.to_string())),
+    );
+    Reply::Raw {
+        status: 200,
+        headers,
+        body: events,
+    }
 }
 
 /// A body that yields one frame per scripted chunk with a gap between them, so

@@ -235,14 +235,14 @@ async fn connect_through(proxy: SocketAddr, target: &str, credential: Option<&st
 
 /// The CA certificate the instance generated (the name), as a client
 /// imports it: `NODE_EXTRA_CA_CERTS` for Claude Code, a root store here.
-fn ca_file(instance: &Instance) -> PathBuf {
+pub(crate) fn ca_file(instance: &Instance) -> PathBuf {
     instance.root.join("state").join("mitm-ca.pem")
 }
 
 /// What a client offers at the handshake. The default is what Claude Code
 /// does — the CA trusted, both protocols, SNI sent, both TLS versions
 /// available — and a row varies one thing at a time from it.
-struct Offer {
+pub(crate) struct Offer {
     /// `false` is the row: a client that does not trust the CA.
     trust_ca: bool,
     /// The ALPN protocols offered; empty sends no ALPN extension.
@@ -266,7 +266,7 @@ impl Default for Offer {
 }
 
 impl Offer {
-    fn alpn(protocols: &[&str]) -> Offer {
+    pub(crate) fn alpn(protocols: &[&str]) -> Offer {
         Offer {
             alpn: protocols.iter().map(|p| p.as_bytes().to_vec()).collect(),
             ..Offer::default()
@@ -294,7 +294,7 @@ const TLS13_ONLY: &[&rustls::SupportedProtocolVersion] = &[&rustls::version::TLS
 
 /// An intercepted tunnel from the client's side: what the handshake settled
 /// and a sender for the requests inside it.
-struct Intercepted {
+pub(crate) struct Intercepted {
     /// The negotiated protocol, `None` when the client offered no ALPN.
     alpn: Option<String>,
     /// `TLSv1.2` or `TLSv1.3`, as the proxy's own debug line names it.
@@ -312,7 +312,7 @@ enum Sender {
 impl Intercepted {
     /// One request inside the tunnel. The authority is the request's own, so
     /// a row can send a foreign one.
-    async fn send(&mut self, request: Request<Full<Bytes>>) -> Answer {
+    pub(crate) async fn send(&mut self, request: Request<Full<Bytes>>) -> Answer {
         let response = match &mut self.sender {
             Sender::H1(sender) => sender.send_request(request).await,
             Sender::H2(sender) => sender.send_request(request).await,
@@ -333,7 +333,7 @@ impl Intercepted {
     /// The shape Claude Code puts inside a tunnel: origin-form path, the
     /// authority in `host`, the client's own credential headers included
     /// the proxy removes them unread.
-    fn request(
+    pub(crate) fn request(
         &self,
         method: Method,
         authority: &str,
@@ -382,7 +382,7 @@ fn intercept_config(ca: &Path, offer: &Offer) -> Arc<rustls::ClientConfig> {
 /// `CONNECT` an intercepted name, then meet the proxy's own TLS server on the
 /// tunnel bytes. `Err` carries the handshake failure itself — these
 /// tests are about the failure, not about what follows it.
-async fn intercept(
+pub(crate) async fn intercept(
     proxy: SocketAddr,
     target: &str,
     credential: Option<&str>,
@@ -1647,7 +1647,11 @@ async fn an_intercepted_target_is_served_by_our_own_tls() {
     names.sort();
     assert_eq!(
         names,
-        vec!["api.anthropic.com", "probe.jaynshare.invalid"],
+        vec![
+            "api.anthropic.com",
+            "chatgpt.com",
+            "probe.jaynshare.invalid"
+        ],
         "the leaf names the whole intercept set"
     );
 }

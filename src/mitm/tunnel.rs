@@ -18,7 +18,7 @@ use crate::data_plane::envelope;
 use crate::data_plane::intent::{self, Intent};
 use crate::data_plane::principal;
 use crate::data_plane::relay::ResponseBody;
-use crate::mitm::ca::{Ca, INTERCEPT_NAMES};
+use crate::mitm::ca::{Authorities, Ca, INTERCEPT_NAMES};
 use crate::mitm::counters::Kind;
 use crate::mitm::tls;
 use crate::provider::anthropic::error_type;
@@ -398,7 +398,7 @@ pub(crate) async fn handle(
     server: Arc<Server>,
     connector: Option<Arc<Connector>>,
     host_addresses: Arc<[IpAddr]>,
-    ca: Option<Arc<Ca>>,
+    authorities: Authorities,
     peer: SocketAddr,
     request: Request<Incoming>,
 ) -> Response<ResponseBody> {
@@ -406,7 +406,7 @@ pub(crate) async fn handle(
         Arc::clone(&server),
         connector,
         host_addresses,
-        ca,
+        authorities,
         peer,
         request,
     )
@@ -421,7 +421,7 @@ async fn connect(
     server: Arc<Server>,
     connector: Option<Arc<Connector>>,
     host_addresses: Arc<[IpAddr]>,
-    ca: Option<Arc<Ca>>,
+    authorities: Authorities,
     peer: SocketAddr,
     mut request: Request<Incoming>,
 ) -> Response<ResponseBody> {
@@ -452,6 +452,7 @@ async fn connect(
         && host.parse::<IpAddr>().is_err()
         && INTERCEPT_NAMES.iter().any(|set| *set == name)
     {
+        let ca = authorities.for_host(&name);
         let tunnel = Tunnel {
             credential,
             target: target.clone(),

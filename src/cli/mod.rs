@@ -1004,8 +1004,12 @@ fn serve_inner(cli: &Cli) -> Result<i32, (i32, String)> {
                 refresh::ensure_fresh(&server, handle, Trigger::Startup).await;
             });
         }
-        // The startup line always names the upstream it will use.
-        let upstream = server.upstream.origin(Provider::Anthropic);
+        // The startup line always names the upstreams it will use; the
+        // override stages every provider on one origin.
+        let mut origins: Vec<String> =
+            Provider::ALL.iter().map(|p| server.upstream.origin(*p).to_string()).collect();
+        origins.dedup();
+        let upstream = origins.join(", ");
         let upstream_note = if server.upstream.override_active() {
             format!(" upstream override {upstream}")
         } else {
