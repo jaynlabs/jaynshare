@@ -43,6 +43,8 @@ zip = { version = "4", default-features = false, features = ["deflate"] }
 # The Linux platform archive is a `.tar.gz`; native install reads it.
 flate2 = "1"
 tar = { version = "0.4", default-features = false }
+# Codex sends `/responses` zstd-compressed; decoded only to read its model.
+ruzstd = { version = "0.9", default-features = false, features = ["std"] }
 # minisign-compatible Ed25519 verification of the release manifest.
 ring = "0.17"
 socket2 = "0.6.5"

@@ -27,7 +27,7 @@ use x509_parser::extensions::{GeneralName, ParsedExtension};
 use x509_parser::pem::{Pem, parse_x509_pem};
 
 use crate::mitm::probe::PROBE_HOST;
-use crate::provider::anthropic;
+use crate::provider::{anthropic, codex};
 
 /// The three fixed names, relative to the state directory.
 pub const CA_CERT_FILE: &str = "mitm-ca.pem";
@@ -39,7 +39,7 @@ pub const NEXT_FILE: &str = "mitm-ca-next.pem";
 
 /// The whole intercept set, one port; the leaf carries every name and the
 /// listener intercepts exactly these.
-pub const INTERCEPT_NAMES: [&str; 2] = [anthropic::API_HOST, PROBE_HOST];
+pub const INTERCEPT_NAMES: [&str; 3] = [anthropic::API_HOST, codex::API_HOST, PROBE_HOST];
 
 /// Both certificates, valid from one hour before generation until
 /// 730 days after it. Not configurable.
@@ -64,13 +64,15 @@ pub struct Ca {
     leaf_key: PrivateKeyDer<'static>,
     not_before: OffsetDateTime,
     not_after: OffsetDateTime,
+    /// The names the leaf covers.
+    names: Vec<String>,
 }
 
 impl Ca {
     /// Generate CA and leaf, write the three files (certificates `0644`,
     /// leaf key `0600` on POSIX).
     pub fn generate(state_dir: &Path, now: OffsetDateTime) -> Result<Ca, String> {
-        let ca = Self::mint(now)?;
+        let ca = Self::mint(now, &INTERCEPT_NAMES)?;
         ca.write_current(state_dir)?;
         Ok(ca)
     }
@@ -78,7 +80,7 @@ impl Ca {
     /// Generate the next CA into [`NEXT_FILE`] (`0600`), the current one
     /// untouched.
     pub fn stage(state_dir: &Path, now: OffsetDateTime) -> Result<Ca, String> {
-        let next = Self::mint(now)?;
+        let next = Self::mint(now, &INTERCEPT_NAMES)?;
         let text = [
             next.certificate_pem(),
             pem("CERTIFICATE", next.leaf_certificate.as_ref()),
@@ -109,8 +111,8 @@ impl Ca {
         Self::check([NEXT_FILE; 3], &pem_ca, &pem_leaf, rest, now).map(Some)
     }
 
-    /// CA and leaf in memory; the CA key is dropped on return.
-    fn mint(now: OffsetDateTime) -> Result<Ca, String> {
+    /// CA and a leaf for `names` in memory; the CA key is dropped on return.
+    fn mint(now: OffsetDateTime, names: &[&str]) -> Result<Ca, String> {
         let ca_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256)
             .map_err(|e| format!("CA key generation: {e}"))?;
         let mut ca_params = CertificateParams::default();
@@ -139,13 +141,9 @@ impl Ca {
 
         let leaf_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256)
             .map_err(|e| format!("leaf key generation: {e}"))?;
-        let mut leaf_params = CertificateParams::new(
-            INTERCEPT_NAMES
-                .iter()
-                .map(|n| (*n).to_owned())
-                .collect::<Vec<_>>(),
-        )
-        .map_err(|e| format!("leaf parameters: {e}"))?;
+        let names: Vec<String> = names.iter().map(|n| (*n).to_owned()).collect();
+        let mut leaf_params =
+            CertificateParams::new(names.clone()).map_err(|e| format!("leaf parameters: {e}"))?;
         // `new` leaves rcgen's placeholder subject; name the leaf for what it is.
         leaf_params.distinguished_name = DistinguishedName::new();
         leaf_params
@@ -170,6 +168,7 @@ impl Ca {
             leaf_key: PrivateKeyDer::Pkcs8(leaf_key.serialize_der().into()),
             not_before,
             not_after,
+            names,
         })
     }
 
@@ -204,9 +203,8 @@ impl Ca {
 
     /// The start-time check: all three files absent → generate and
     /// log that clients must import the new CA; all present, chain valid,
-    /// leaf covering the intercept set, not expired → use them; anything
-    /// else → an error naming the file and the rotate verb, never a
-    /// regeneration.
+    /// not expired → use them; anything else → an error naming the file and
+    /// the rotate verb, never a regeneration.
     pub fn load_or_generate(state_dir: &Path, now: OffsetDateTime) -> Result<Ca, String> {
         let ca_path = state_dir.join(CA_CERT_FILE);
         let leaf_path = state_dir.join(LEAF_CERT_FILE);
@@ -266,8 +264,9 @@ impl Ca {
         )
     }
 
-    /// Chain valid, leaf covering the intercept set, both in their validity;
-    /// an error names the file (`names`: CA, leaf, key) at fault.
+    /// Chain valid, both in their validity; an error names the file
+    /// (`names`: CA, leaf, key) at fault. A leaf missing an intercepted name
+    /// still loads: [`Authorities::load`] stages a CA that covers it.
     fn check(
         names: [&str; 3],
         pem_ca: &Pem,
@@ -300,14 +299,6 @@ impl Ca {
                 _ => None,
             })
             .collect();
-        for expected in INTERCEPT_NAMES {
-            if !sans.iter().any(|got| got.eq_ignore_ascii_case(expected)) {
-                return Err(unusable(
-                    leaf_name,
-                    format!("the leaf does not cover {expected}"),
-                ));
-            }
-        }
         for (what, validity) in [(ca_name, ca.validity()), (leaf_name, leaf.validity())] {
             if validity.not_after.to_datetime() < now {
                 return Err(unusable(what, "the certificate has expired".into()));
@@ -324,7 +315,15 @@ impl Ca {
             leaf_key,
             not_before: ca.validity().not_before.to_datetime(),
             not_after: leaf.validity().not_after.to_datetime(),
+            names: sans,
         })
+    }
+
+    /// Whether the leaf covers `host`, an intercepted name.
+    pub fn covers(&self, host: &str) -> bool {
+        self.names
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case(host))
     }
 
     /// SHA-256 of the DER-encoded CA certificate, colon-separated
@@ -392,6 +391,12 @@ impl Authorities {
     /// the current one is unusable; without one, the current CA is loaded,
     /// or generated when none exists. `Err` is the `unusable` state.
     pub fn load(state_dir: &Path, now: OffsetDateTime) -> Result<Authorities, String> {
+        let mut authorities = Self::load_files(state_dir, now)?;
+        authorities.stage_missing_names(state_dir, now);
+        Ok(authorities)
+    }
+
+    fn load_files(state_dir: &Path, now: OffsetDateTime) -> Result<Authorities, String> {
         let next = Ca::load_next(state_dir, now).unwrap_or_else(|e| {
             tracing::error!(event = "ca_next_unusable", error = %e, "the staged CA is ignored");
             None
@@ -416,6 +421,43 @@ impl Authorities {
             authorities.promote(state_dir)?;
         }
         Ok(authorities)
+    }
+
+    /// No CA key is kept, so a leaf can't gain a name the intercept set
+    /// grew: the newest CA missing one gets a staged successor that covers
+    /// it, and the usual switch follows.
+    fn stage_missing_names(&mut self, state_dir: &Path, now: OffsetDateTime) {
+        let Some(newest) = self.next.as_ref().or(self.current.as_ref()) else {
+            return;
+        };
+        let missing: Vec<&str> = INTERCEPT_NAMES
+            .into_iter()
+            .filter(|name| !newest.covers(name))
+            .collect();
+        if missing.is_empty() {
+            return;
+        }
+        tracing::info!(
+            event = "ca_names_missing",
+            names = %missing.join(", "),
+            "the CA's leaf predates these intercepted names; staging a CA that covers them"
+        );
+        match Ca::stage(state_dir, now) {
+            Ok(next) => self.next = Some(Arc::new(next)),
+            Err(e) => {
+                tracing::error!(event = "ca_stage_failed", error = %e, "the names stay unserved until a CA covering them is staged")
+            }
+        }
+    }
+
+    /// The CA a tunnel to `host` presents: the current one when its leaf
+    /// covers the host, otherwise the staged one.
+    pub fn for_host(&self, host: &str) -> Option<Arc<Ca>> {
+        self.current
+            .as_ref()
+            .filter(|ca| ca.covers(host))
+            .or(self.next.as_ref())
+            .cloned()
     }
 
     /// When the next CA takes over: [`OVERLAP`] after it was staged, when
@@ -858,6 +900,55 @@ mod tests {
         let current = authorities.current.expect("a current CA");
         assert_eq!(current.fingerprint(), staged.fingerprint());
         assert!(authorities.next.is_none());
+    }
+
+    /// A current CA as a server before Codex minted it.
+    fn pre_codex(dir: &Path, now: OffsetDateTime) -> Ca {
+        let ca = Ca::mint(now, &[anthropic::API_HOST, PROBE_HOST]).expect("mint");
+        ca.write_current(dir).expect("write");
+        ca
+    }
+
+    #[test]
+    fn a_leaf_missing_a_name_stays_current_and_a_covering_ca_is_staged_once() {
+        let dir = temp_dir("stage-missing");
+        let now = OffsetDateTime::now_utc();
+        let old = pre_codex(&dir, now);
+        let first = Authorities::load(&dir, now).expect("the old CA stays usable");
+        let current = first.current.as_ref().expect("a current CA");
+        let next = first.next.as_ref().expect("a staged CA");
+        assert_eq!(current.fingerprint(), old.fingerprint());
+        assert!(INTERCEPT_NAMES.iter().all(|name| next.covers(name)));
+
+        let second = Authorities::load(&dir, now).expect("load");
+        let again = second.next.expect("still staged");
+        assert_eq!(again.fingerprint(), next.fingerprint(), "not staged twice");
+    }
+
+    #[test]
+    fn a_tunnel_takes_the_current_ca_when_it_covers_the_host_else_the_staged_one() {
+        let now = OffsetDateTime::now_utc();
+        let dir = temp_dir("for-host");
+        pre_codex(&dir, now);
+        let staged = Authorities::load(&dir, now).expect("load");
+        let fingerprint = |ca: Option<Arc<Ca>>| ca.map(|ca| ca.fingerprint());
+        let current = fingerprint(staged.current.clone());
+        let next = fingerprint(staged.next.clone());
+        assert_eq!(fingerprint(staged.for_host(anthropic::API_HOST)), current);
+        assert_eq!(fingerprint(staged.for_host(codex::API_HOST)), next);
+
+        let covering = Authorities::load(&temp_dir("for-host-covering"), now).expect("load");
+        assert!(covering.next.is_none());
+        assert_eq!(
+            fingerprint(covering.for_host(codex::API_HOST)),
+            fingerprint(covering.current.clone())
+        );
+
+        let unstaged = Authorities {
+            current: Some(Arc::new(pre_codex(&temp_dir("for-host-unstaged"), now))),
+            next: None,
+        };
+        assert!(unstaged.for_host(codex::API_HOST).is_none());
     }
 
     #[test]

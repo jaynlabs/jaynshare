@@ -28,7 +28,7 @@ use crate::server::Server;
 
 use super::attempt;
 use super::egress;
-use super::envelope::{self, json_response, proxy_response};
+use super::envelope::{self, json_response};
 use super::intent::{self, Intent};
 use super::relay::{self, BodyEnd, RelayBody, ResponseBody, strip_response_headers};
 use tokio::sync::OwnedSemaphorePermit;
@@ -37,7 +37,7 @@ use super::upstream::SendError;
 use super::usage::UsageExtractor;
 
 /// Never forwarded above this; Anthropic refuses larger bodies anyway.
-const BODY_LIMIT: usize = 32 * 1024 * 1024;
+pub(super) const BODY_LIMIT: usize = 32 * 1024 * 1024;
 /// The one inline wait before a synthetic 429.
 const INLINE_WAIT_MAX: u64 = 15;
 /// Hold poll interval bound.
@@ -64,6 +64,8 @@ impl std::error::Error for CloseConnection {}
 /// The audit record under construction; written exactly once, on every path.
 struct Exchange {
     server: Arc<Server>,
+    /// Whose envelope the proxy's own answers take.
+    provider: Provider,
     started: Instant,
     record: Record,
     /// The session this exchange counts against, once begun.
@@ -131,7 +133,7 @@ impl Exchange {
         error_class: ErrorClass,
     ) -> Response<ResponseBody> {
         self.respond(
-            proxy_response(status, error_type::PROXY, &message),
+            envelope::error(self.provider, status, error_type::PROXY, &message),
             Some(error_class),
         )
     }
@@ -240,6 +242,7 @@ pub async fn run(
     let principal_key = principal.key();
     let mut exchange = Exchange {
         server: Arc::clone(&server),
+        provider,
         started: Instant::now(),
         record: Record {
             timestamp: OffsetDateTime::now_utc(),
@@ -284,7 +287,8 @@ pub async fn run(
     };
     let Some(body) = body else {
         return Ok(exchange.respond(
-            proxy_response(
+            envelope::error(
+                provider,
                 StatusCode::PAYLOAD_TOO_LARGE,
                 error_type::REQUEST_TOO_LARGE,
                 "request body exceeds 32 MiB and was not forwarded",
@@ -292,14 +296,18 @@ pub async fn run(
             Some(ErrorClass::Request),
         ));
     };
-    let body_facts = attempt::body_facts(&body);
+    let body_facts = attempt::body_facts(&parts.headers, &body);
     exchange.record.model = body_facts.model.clone();
 
-    // Telemetry under `block` is answered here, never forwarded.
+    // Telemetry under `block` and the provider's local answers are
+    // answered here, never forwarded.
     if provider.is_telemetry(&path)
         && settings.data_plane.telemetry_policy == TelemetryPolicy::Block
     {
         return Ok(exchange.respond(json_response(StatusCode::OK, &serde_json::json!({})), None));
+    }
+    if let Some(answer) = provider.local_answer(&path, &parts.headers) {
+        return Ok(exchange.respond(json_response(StatusCode::OK, &answer), None));
     }
     // An account-bound path is refused before any selection,
     // so no pooled credential answers for it and no family 401 errors an
@@ -327,7 +335,8 @@ pub async fn run(
             .or(body_facts.advisor_model.as_deref())
             .unwrap_or("");
         return Ok(exchange.respond(
-            proxy_response(
+            envelope::error(
+                provider,
                 StatusCode::BAD_REQUEST,
                 error_type::INVALID_REQUEST,
                 &format!("model {model} is blocked by the operator pattern {pattern}"),
@@ -348,7 +357,8 @@ pub async fn run(
         Ok(intent) => intent,
         Err(message) => {
             return Ok(exchange.respond(
-                proxy_response(
+                envelope::error(
+                    provider,
                     StatusCode::BAD_REQUEST,
                     error_type::INVALID_REQUEST,
                     &message,
@@ -373,7 +383,8 @@ pub async fn run(
                 Ok(handle) => (None, Some(handle)),
                 Err(Resolve::NotFound) => {
                     return Ok(exchange.respond(
-                        proxy_response(
+                        envelope::error(
+                            provider,
                             StatusCode::NOT_FOUND,
                             error_type::NOT_FOUND,
                             &format!("no account matches the {what} {:?}", intent.reference()),
@@ -383,7 +394,8 @@ pub async fn run(
                 }
                 Err(Resolve::Ambiguous(names)) => {
                     return Ok(exchange.respond(
-                        proxy_response(
+                        envelope::error(
+                            provider,
                             StatusCode::BAD_REQUEST,
                             error_type::INVALID_REQUEST,
                             &format!(
@@ -1244,16 +1256,13 @@ fn refuse_refresh_wait(
         exchange.record.serving_account = None;
     }
     exchange.record.no_service_reason = Some("refresh_wait".to_string());
-    let mut response = proxy_response(
-        StatusCode::TOO_MANY_REQUESTS,
-        error_type::RATE_LIMIT,
+    let response = envelope::rate_limited(
+        exchange.provider,
         &format!(
             "the token refresh for {display_name} is waiting out a transient failure; retry after the wait"
         ),
+        retry_after,
     );
-    response
-        .headers_mut()
-        .insert(RETRY_AFTER, retry_after.into());
     exchange.respond(response, Some(ErrorClass::RateLimit))
 }
 
@@ -1330,14 +1339,7 @@ fn refuse_nobody(exchange: &mut Exchange, nobody: selection::Nobody) -> Response
         }
     };
     tracing::info!(event = "no_account", reason = %reason_name(&nobody.reason), retry_after, "nobody eligible");
-    let mut response = proxy_response(
-        StatusCode::TOO_MANY_REQUESTS,
-        error_type::RATE_LIMIT,
-        &message,
-    );
-    response
-        .headers_mut()
-        .insert(RETRY_AFTER, retry_after.into());
+    let response = envelope::rate_limited(exchange.provider, &message, retry_after);
     exchange.respond(response, Some(ErrorClass::RateLimit))
 }
 

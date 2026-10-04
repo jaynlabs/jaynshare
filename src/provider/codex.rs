@@ -2,8 +2,8 @@
 //! speaks to it under a ChatGPT login.
 
 use http::header::AUTHORIZATION;
-use http::{HeaderMap, HeaderName, HeaderValue};
-use serde_json::Value;
+use http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
+use serde_json::{Value, json};
 
 use crate::pool::quota::Observation;
 use crate::pool::{Account, Credential};
@@ -12,15 +12,58 @@ pub const API_HOST: &str = "chatgpt.com";
 pub const API_ORIGIN: &str = "https://chatgpt.com";
 pub const SESSION_ID: HeaderName = HeaderName::from_static("session-id");
 pub const CHATGPT_ACCOUNT_ID: HeaderName = HeaderName::from_static("chatgpt-account-id");
+/// Codex's own paths; the rest of chatgpt.com is account features.
+const CODEX_PREFIX: &str = "/backend-api/codex/";
+const TELEMETRY_PATH: &str = "/backend-api/codex/analytics-events";
+/// The workspace check Codex makes before a turn.
+const ACCOUNTS_CHECK_PATH: &str = "/backend-api/wham/accounts/check";
+/// Codex falls back from its WebSocket to HTTP on this answer at once.
+pub const UPGRADE_REFUSAL: StatusCode = StatusCode::UPGRADE_REQUIRED;
+/// The one 429 type Codex shows rather than retrying silently.
+const USAGE_LIMIT_REACHED: &str = "usage_limit_reached";
 
-// Lane C: `/backend-api/codex/analytics-events` and below.
-pub fn is_telemetry(_path: &str) -> bool {
-    false
+/// The telemetry path and anything under it.
+pub fn is_telemetry(path: &str) -> bool {
+    path.strip_prefix(TELEMETRY_PATH)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
 }
 
-// Lane C: everything outside `/backend-api/codex/`.
-pub fn is_account_bound(_path: &str) -> bool {
-    false
+/// Everything outside Codex's own paths, and any path a dot segment or an
+/// escape could move out of them upstream.
+pub fn is_account_bound(path: &str) -> bool {
+    !path.starts_with(CODEX_PREFIX) || path.contains("..") || path.contains('%')
+}
+
+/// Codex refuses a turn unless the check lists its own login's account, so
+/// the proxy answers it for the caller's account id, whatever the pool holds.
+pub fn local_answer(path: &str, headers: &HeaderMap) -> Option<Value> {
+    if path != ACCOUNTS_CHECK_PATH {
+        return None;
+    }
+    let id = headers
+        .get(CHATGPT_ACCOUNT_ID)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    Some(json!({
+        "accounts": [{
+            "id": id,
+            "workspace_backend_origin": "NO_CONSTRAINT",
+            "account_routing_override": "NO_CONSTRAINT",
+        }],
+        "account_ordering": [id],
+        "default_account_id": id,
+    }))
+}
+
+/// Codex shows `error.message`. A 429 carries `resets_at` (Unix seconds)
+/// under the type Codex reports instead of retrying.
+pub fn error_envelope(error_type: &str, message: &str, resets_at: Option<i64>) -> Value {
+    match resets_at {
+        Some(at) => json!({
+            "error": { "type": USAGE_LIMIT_REACHED, "message": message, "resets_at": at },
+        }),
+        None => json!({ "error": { "type": error_type, "message": message } }),
+    }
 }
 
 /// Codex accounts are ChatGPT logins; an API key has no Codex form, so it
@@ -88,5 +131,34 @@ mod tests {
         inject_credential(&mut h, &account);
         assert_eq!(h[AUTHORIZATION], "Bearer pooled");
         assert_eq!(h[CHATGPT_ACCOUNT_ID], "acct-pool");
+    }
+
+    #[test]
+    fn only_codex_s_own_paths_are_pooled_and_its_analytics_are_telemetry() {
+        for pooled in ["/backend-api/codex/responses", "/backend-api/codex/models"] {
+            assert!(!is_account_bound(pooled), "{pooled}");
+        }
+        for bound in [
+            "/backend-api/wham/settings/user",
+            "/backend-api/ps/mcp",
+            "/backend-api/codex",
+            "/backend-api/codex/../wham/usage",
+            "/backend-api/codex/%2e%2e/wham/usage",
+        ] {
+            assert!(is_account_bound(bound), "{bound}");
+        }
+        assert!(is_telemetry("/backend-api/codex/analytics-events/events"));
+        assert!(is_telemetry(TELEMETRY_PATH));
+        assert!(!is_telemetry("/backend-api/codex/analytics-eventsx"));
+    }
+
+    #[test]
+    fn the_accounts_check_echoes_the_caller_s_own_account() {
+        let mut h = HeaderMap::new();
+        h.insert(CHATGPT_ACCOUNT_ID, HeaderValue::from_static("acct-own"));
+        let answer = local_answer(ACCOUNTS_CHECK_PATH, &h).expect("answered");
+        assert_eq!(answer["accounts"][0]["id"], "acct-own");
+        assert_eq!(answer["default_account_id"], "acct-own");
+        assert!(local_answer("/backend-api/codex/responses", &h).is_none());
     }
 }
