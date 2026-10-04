@@ -691,7 +691,7 @@ pub async fn resolve(
         "/control/v1/client/accounts/resolve?reference={}",
         percent_encode(reference)
     );
-    if !provider.is_anthropic() {
+    if !provider.is_default() {
         path.push_str(&format!("&provider={}", provider.as_str()));
     }
     let request = base_url_request(installation, timeout)?;

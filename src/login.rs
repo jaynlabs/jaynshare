@@ -26,8 +26,7 @@ use uuid::Uuid;
 
 use crate::control::percent_decode;
 use crate::pool::{Account, Credential, OperationError, Source};
-use crate::provider::anthropic::OAUTH_SUCCESS_URL;
-use crate::provider::{Grant, Provider, codex};
+use crate::provider::{Grant, Provider};
 use crate::server::{MutateError, Server};
 use crate::timestamp::rfc3339;
 
@@ -260,14 +259,17 @@ impl Logins {
         display_name: Option<String>,
     ) -> Result<Started, String> {
         self.sweep();
-        let (listener, port, owner) = match (starter, provider.callback_port()) {
-            // A fixed redirect lands on the operator's machine, not the server's.
-            (Starter::Operator, Some(port)) => (None, port, None),
-            (Starter::Operator, None) => {
-                let (listener, port) = callback_listener().await?;
-                (Some(listener), port, None)
+        let (listener, port, owner) = match starter {
+            Starter::Operator => {
+                let wanted = provider.callback_port();
+                match callback_listener(wanted.unwrap_or(0)).await {
+                    Ok((listener, port)) => (Some(listener), port, None),
+                    // Another process holds the fixed port: the operator pastes.
+                    Err(_) if let Some(port) = wanted => (None, port, None),
+                    Err(why) => return Err(why),
+                }
             }
-            (Starter::Client { id, port }, _) => (None, port, Some(id)),
+            Starter::Client { id, port } => (None, port, Some(id)),
         };
         let secret = LoginSecret {
             owner: owner.clone(),
@@ -443,7 +445,7 @@ async fn drive(
                 None => break End::Failed { reason: "the login operation lost its channels".into() },
             },
             accepted = accept(listener.as_ref()) => match accepted {
-                Ok((stream, _)) => match answer_callback(stream, &secret.state).await {
+                Ok((stream, _)) => match answer_callback(stream, &secret.state, secret.provider).await {
                     Ok(Some(query)) => {
                         break match parse_paste(&query, &secret.state) {
                             Paste::Code(code) => complete(&server, id, &secret, code).await,
@@ -492,8 +494,8 @@ enum End {
     Succeeded { account: Uuid },
 }
 
-async fn callback_listener() -> Result<(TcpListener, u16), String> {
-    let listener = TcpListener::bind(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
+async fn callback_listener(port: u16) -> Result<(TcpListener, u16), String> {
+    let listener = TcpListener::bind(std::net::SocketAddr::from(([127, 0, 0, 1], port)))
         .await
         .map_err(|e| format!("cannot open the loopback callback listener: {e}"))?;
     let port = listener
@@ -590,6 +592,7 @@ async fn complete(
 pub(crate) async fn await_callback(
     listener: &TcpListener,
     expected_state: &str,
+    provider: Provider,
 ) -> Result<String, String> {
     loop {
         let (stream, _) = listener
@@ -597,7 +600,7 @@ pub(crate) async fn await_callback(
             .await
             .map_err(|e| format!("the callback listener failed: {e}"))?;
         // A broken browser connection or a stray request keeps the wait going.
-        if let Ok(Some(query)) = answer_callback(stream, expected_state).await
+        if let Ok(Some(query)) = answer_callback(stream, expected_state, provider).await
             && parse_paste(&query, expected_state) != Paste::Other
         {
             return Ok(query);
@@ -611,6 +614,7 @@ pub(crate) async fn await_callback(
 async fn answer_callback(
     stream: tokio::net::TcpStream,
     expected_state: &str,
+    provider: Provider,
 ) -> Result<Option<String>, String> {
     let (query_tx, query_rx) = tokio::sync::oneshot::channel::<String>();
     let expected = expected_state.to_string();
@@ -619,22 +623,20 @@ async fn answer_callback(
     let service = service_fn(move |request: Request<Incoming>| {
         let expected = expected.clone();
         let query = request.uri().query().unwrap_or("").to_string();
-        let is_codex = request.uri().path() == codex::CALLBACK_PATH;
         if let Some(tx) = pending.lock().expect("query cell").take() {
             let _ = tx.send(query.clone());
         }
         async move {
-            let response = match parse_paste(&query, &expected) {
-                // Anthropic hosts a success page; a Codex tab gets a line here.
-                Paste::Code(_) if is_codex => Response::builder()
+            let response = match (parse_paste(&query, &expected), provider.success_page()) {
+                (Paste::Code(_), Some(page)) => Response::builder()
+                    .status(StatusCode::FOUND)
+                    .header(LOCATION, page)
+                    .body(Full::new(Bytes::new()))
+                    .expect("a static response builds"),
+                (Paste::Code(_), None) => Response::builder()
                     .body(Full::new(Bytes::from_static(
                         b"Signed in. You can close this tab.",
                     )))
-                    .expect("a static response builds"),
-                Paste::Code(_) => Response::builder()
-                    .status(StatusCode::FOUND)
-                    .header(LOCATION, OAUTH_SUCCESS_URL)
-                    .body(Full::new(Bytes::new()))
                     .expect("a static response builds"),
                 _ => Response::builder()
                     .status(StatusCode::BAD_REQUEST)
@@ -656,6 +658,7 @@ async fn answer_callback(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::codex;
 
     #[test]
     fn the_pkce_challenge_matches_the_rfc_7636_reference_vector() {
@@ -769,15 +772,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_codex_callback_is_answered_here_and_an_anthropic_one_redirected() {
+    async fn a_callback_lands_on_the_provider_s_success_page_or_is_answered_here() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        for (path, status_line) in [
-            (codex::CALLBACK_PATH, "HTTP/1.1 200"),
-            ("/callback", "HTTP/1.1 302"),
+        for (provider, path, status_line) in [
+            (Provider::Codex, codex::CALLBACK_PATH, "HTTP/1.1 200"),
+            (Provider::Anthropic, "/callback", "HTTP/1.1 302"),
         ] {
             let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
             let addr = listener.local_addr().expect("address");
-            let waiting = tokio::spawn(async move { await_callback(&listener, "s").await });
+            let waiting =
+                tokio::spawn(async move { await_callback(&listener, "s", provider).await });
             let mut browser = tokio::net::TcpStream::connect(addr).await.expect("connect");
             let request = format!("GET {path}?code=c&state=s HTTP/1.1\r\nhost: x\r\n\r\n");
             browser.write_all(request.as_bytes()).await.expect("write");

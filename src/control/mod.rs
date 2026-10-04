@@ -293,7 +293,7 @@ fn not_found() -> Response<ResponseBody> {
 /// The refusal an unauthenticated caller sees: a byte-identical
 /// answer an anonymous caller gets on any control path but the claim.
 pub(crate) fn unauthenticated_refusal(peer: SocketAddr) -> Response<ResponseBody> {
-    let response = crate::data_plane::envelope::unauthenticated();
+    let response = crate::data_plane::envelope::unauthenticated(Provider::default());
     refusal_line_plain("authentication_error", peer);
     response
 }

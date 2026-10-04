@@ -1098,7 +1098,7 @@ pub(super) fn login_body(args: &LoginArgs) -> Value {
         body["display_name"] = json!(name);
     }
     // Anthropic is the default, so a 2.1.x server is never sent the member.
-    if !args.provider.is_anthropic() {
+    if !args.provider.is_default() {
         body["provider"] = json!(args.provider);
     }
     body

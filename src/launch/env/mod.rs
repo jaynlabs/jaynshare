@@ -11,8 +11,8 @@ pub mod mitm;
 pub mod no_proxy;
 pub mod timeout;
 
-use super::Tool;
 use crate::client::ClientInstallation;
+use crate::provider::Tool;
 
 /// The child's environment changes, in the order they were decided. A name
 /// is never both set and unset: the last decision wins.
@@ -52,14 +52,14 @@ pub const NO_PROXY_VARIABLES: [&str; 2] = ["NO_PROXY", "no_proxy"];
 
 /// What every rule may read.
 pub struct Inputs<'a> {
-    pub tool: Tool,
+    pub tool: &'static Tool,
     pub installation: &'a ClientInstallation,
     pub secret: &'a str,
     /// A specific account token, `None` for automatic selection.
     pub token: Option<&'a str>,
     /// The hold hint in seconds, `None` when the snapshot was unreadable.
     pub hold_hint: Option<u64>,
-    /// The inherited `API_TIMEOUT_MS`, if any (never lowered).
+    /// The inherited deadline variable, if any (never lowered).
     pub inherited_timeout: Option<String>,
 }
 
@@ -70,9 +70,10 @@ pub fn build(inputs: &Inputs<'_>) -> EnvPlan {
     plan.unset("JAYNSHARE_ACCOUNT");
     mitm::apply(&mut plan, inputs);
     no_proxy::apply(&mut plan, &inputs.installation.no_proxy);
-    if inputs.tool == Tool::Claude {
+    if let Some(deadline) = &inputs.tool.deadline {
         timeout::apply(
             &mut plan,
+            deadline,
             inputs.hold_hint,
             inputs.inherited_timeout.as_deref(),
         );
@@ -83,6 +84,7 @@ pub fn build(inputs: &Inputs<'_>) -> EnvPlan {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::Provider;
 
     fn installation() -> ClientInstallation {
         ClientInstallation {
@@ -97,9 +99,9 @@ mod tests {
         }
     }
 
-    fn pooled(tool: Tool) -> EnvPlan {
+    fn pooled(provider: Provider) -> EnvPlan {
         build(&Inputs {
-            tool,
+            tool: provider.tool(),
             installation: &installation(),
             secret: "s",
             token: None,
@@ -114,7 +116,7 @@ mod tests {
 
     #[test]
     fn a_codex_launch_trusts_the_pool_through_codex_s_own_variables() {
-        let plan = pooled(Tool::Codex);
+        let plan = pooled(Provider::Codex);
         let ca = std::path::Path::new("client").join("ca.pem");
         assert_eq!(plan.get("CODEX_CA_CERTIFICATE"), ca.to_str());
         assert_eq!(plan.get("HTTPS_PROXY"), Some("http://:s@h:2"));
@@ -127,7 +129,7 @@ mod tests {
 
     #[test]
     fn a_claude_launch_keeps_its_variables_and_deadline() {
-        let plan = pooled(Tool::Claude);
+        let plan = pooled(Provider::Anthropic);
         assert!(plan.get("NODE_EXTRA_CA_CERTS").is_some());
         assert!(removed(&plan, "ANTHROPIC_BASE_URL"));
         assert_eq!(plan.get("CODEX_CA_CERTIFICATE"), None);
@@ -137,7 +139,7 @@ mod tests {
     #[test]
     fn direct_removes_each_tool_s_own_variables() {
         let mut codex = EnvPlan::default();
-        direct::apply(&mut codex, Tool::Codex);
+        direct::apply(&mut codex, Provider::Codex.tool());
         for name in [
             "HTTPS_PROXY",
             "NO_PROXY",
@@ -148,7 +150,7 @@ mod tests {
         }
         assert!(!removed(&codex, "API_TIMEOUT_MS"));
         let mut claude = EnvPlan::default();
-        direct::apply(&mut claude, Tool::Claude);
+        direct::apply(&mut claude, Provider::Anthropic.tool());
         for name in ["NODE_EXTRA_CA_CERTS", "ANTHROPIC_API_KEY", "API_TIMEOUT_MS"] {
             assert!(removed(&claude, name), "{name}");
         }

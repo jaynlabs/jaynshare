@@ -8,6 +8,7 @@
 use serde_json::{Value, json};
 
 use super::help::DOCS;
+use crate::provider::Provider;
 
 /// Verbs with no `--json` document at all.
 pub(super) const NO_JSON: &[&str] = &["claude", "codex", "env", "statusline", "title-hook"];
@@ -130,7 +131,7 @@ fn defs() -> Value {
         ("chatgpt_account_id", nullable_string()),
     ]);
     // A client's view of an account it owns.
-    let provider = json!({ "enum": ["anthropic", "codex"] });
+    let provider = json!({ "enum": Provider::ALL.map(Provider::as_str) });
     let owned_account = object(&[
         ("handle", string()),
         ("display_name", string()),
@@ -321,7 +322,7 @@ fn defs() -> Value {
         ("default_account", default.clone()),
         (
             "default_accounts",
-            object(&[("anthropic", default.clone()), ("codex", default)]),
+            object(&Provider::ALL.map(|p| (p.as_str(), default.clone()))),
         ),
         ("routes", array(reference("route"))),
         ("blocked_models", array(string())),

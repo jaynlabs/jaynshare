@@ -9,7 +9,6 @@
 mod alias;
 mod args;
 mod bundle;
-mod claude;
 mod client_accounts;
 mod control;
 mod deploy;
@@ -22,6 +21,7 @@ mod join;
 mod schema;
 mod search_path;
 mod tail;
+mod tool;
 mod trust_ca;
 mod uninstall;
 mod update;
@@ -40,7 +40,6 @@ use crate::capture::Capture;
 use crate::config::{self, ListenerTls};
 use crate::data_plane::upstream::Upstream;
 use crate::identity::{self, Identity};
-use crate::launch::Tool;
 use crate::pool::refresh::{self, Trigger};
 use crate::pool::{Credential, Errored, Pool, probe};
 use crate::provider::Provider;
@@ -252,8 +251,8 @@ pub fn main() -> i32 {
         Verb::Statusline => return crate::statusline::main(),
         Verb::TitleHook => return crate::title_hook::main(),
         // A launch exits with its own codes only before it replaces itself.
-        Verb::Claude(args) => return claude::launch(Tool::Claude, args),
-        Verb::Codex(args) => return claude::launch(Tool::Codex, args),
+        Verb::Claude(args) => return tool::launch(Provider::Anthropic, args),
+        Verb::Codex(args) => return tool::launch(Provider::Codex, args),
         Verb::Env(args) => return finish(&cli, path, None, env::env(args)),
         // Print-only, but still an engineer verb.
         Verb::Alias { shell } => {

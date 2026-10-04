@@ -1,21 +1,20 @@
 #!/usr/bin/env bash
 # A whole pool on one Mac: a server and an enrolled client, each under its own
-# scratch home, so neither touches a real installation or your Claude Code
-# settings. Claude Code runs in the client's home too, but reads your own login
-# from the keychain (the pool drops it). Codex runs in your real home, with its
-# own login and config (the pool drops that login too).
+# scratch home, so neither touches a real installation or your tools' settings.
+# Each tool keeps your own login, which the pool drops: Claude Code runs in the
+# client's home but reads it from your keychain, Codex runs in your real home.
 #
 # In a checkout it builds that checkout into .quickstart/; with --release, or
 # when the script was downloaded alone, it runs a published release in
 # ~/.jaynshare-quickstart/ instead, on ports of its own.
 #
 # Usage: quickstart.sh [--release[=<version>]] [up]   build or download, (re)start the server, update the client
-#        quickstart.sh [--release] claude [args]      run `jaynshare claude` as the client
-#        quickstart.sh codex [args]                    run `jaynshare codex` as the client
+#        quickstart.sh [--release] claude|codex [args]  run `jaynshare claude` or `jaynshare codex` as the client
 #        quickstart.sh [--release] op <verb...>       an operator verb on the server
 #        quickstart.sh [--release] client <verb...>
 #        quickstart.sh [--release] logs | down
 #
+# The join offers to add your accounts; later, `client account login` adds one.
 # The server home persists, so an account logged in once stays logged in.
 # Removing the scratch home's client/ joins the client again; removing it all starts over.
 set -euo pipefail
@@ -87,7 +86,7 @@ EOF
 # The launcher finds `codex` on PATH; this one runs it with your real home.
 prepare_codex() {
     local codex
-    codex=$(command -v codex) || die "codex is missing; install Codex and log in to it first"
+    codex=$(command -v codex) || return 0 # the launcher says it is missing
     mkdir -p "$SCRATCH/bin"
     printf '#!/bin/bash\nHOME=%q exec %q "$@"\n' "$HOME" "$codex" >"$SCRATCH/bin/codex"
     chmod +x "$SCRATCH/bin/codex"
@@ -193,32 +192,6 @@ fetch_release() {
     ln -sf "$dir/client-kit.zip" "$KIT"
 }
 
-# Whether the server holds an account of this provider (a 2.1.x one names none).
-has_account() {
-    as_server account list --json | python3 -c 'import json, sys
-sys.exit(not any(a.get("provider", "anthropic") == sys.argv[1] for a in json.load(sys.stdin)["result"]["accounts"]))' "$1"
-}
-
-ensure_account() {
-    if ! has_account anthropic; then
-        if [ -t 0 ]; then
-            echo "quickstart: no Claude account yet; logging one in (once, kept in $SERVER_HOME)" >&2
-            as_server account login
-        else
-            echo "quickstart: no Claude account yet; run: $SELF op account login" >&2
-        fi
-    fi
-    # Codex is offered when it is installed and this client logs it in.
-    command -v codex >/dev/null && as_client account login --provider codex --help >/dev/null 2>&1 || return 0
-    has_account codex && return 0
-    if [ -t 0 ]; then
-        read -rp "quickstart: add a ChatGPT account for Codex? [y/N] " reply || true
-        case $reply in [yY]*) as_client account login --provider codex ;; esac
-    else
-        echo "quickstart: no Codex account; run: $SELF client account login --provider codex" >&2
-    fi
-}
-
 # The client joins with an invite, as an engineer's machine would.
 join_client() {
     local verb invite
@@ -233,7 +206,6 @@ join_client() {
 
 up() {
     require python3 "run xcode-select --install"
-    require claude "install Claude Code and log in to it first"
     prepare_homes
     if [ -n "$RELEASE" ]; then fetch_release; else build_from_source; fi
     stop_server
@@ -243,8 +215,7 @@ up() {
     else
         join_client
     fi
-    ensure_account
-    echo "pool up on $LISTEN (proxy $PROXY_LISTEN); $SELF claude to use it"
+    echo "pool up on $LISTEN (proxy $PROXY_LISTEN); $SELF claude or $SELF codex to use it"
 }
 
 [ "$(uname)" = Darwin ] || die "the quickstart is macOS-only"
@@ -252,8 +223,7 @@ case ${1:-up} in
 up) up ;;
 down) stop_server ;;
 logs) tail -f "$SCRATCH/server.log" ;;
-claude) shift; prepare_claude; HOME="$CLIENT_HOME" PATH="$SCRATCH/bin:$PATH" exec "$(client_bin)" claude "$@" ;;
-codex) shift; prepare_codex; HOME="$CLIENT_HOME" PATH="$SCRATCH/bin:$PATH" exec "$(client_bin)" codex "$@" ;;
+claude | codex) tool=$1; shift; "prepare_$tool"; HOME="$CLIENT_HOME" PATH="$SCRATCH/bin:$PATH" exec "$(client_bin)" "$tool" "$@" ;;
 op) shift; as_server "$@" ;;
 client) shift; as_client "$@" ;;
 *) die "unknown command $1; see the usage at the top of $0" ;;

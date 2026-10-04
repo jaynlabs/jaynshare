@@ -19,6 +19,7 @@ use crate::bundle::{self, PinnedKey};
 use crate::client::{self, ClientInstallation, ClientRequest};
 use crate::config::platform;
 use crate::invite::Invite;
+use crate::provider::Provider;
 use crate::server::VERSION;
 
 fn local(code: i32, slug: &str, message: impl Into<String>) -> Failure {
@@ -98,14 +99,21 @@ pub(super) async fn join(cli: &Cli, text: &str) -> Outcome {
     }
     link(cli, &binary);
     check(cli, &installation, &secret).await?;
+    let providers = served(&binary).await;
     if adds_account {
-        account_step(cli, &binary).await;
+        account_step(cli, &binary, &providers).await;
     }
     let mut result = client::client_result(&installation);
     result["version"] = json!(version);
+    let launches: Vec<String> = providers
+        .iter()
+        .map(|provider| format!("`jaynshare {}`", provider.tool().executable))
+        .collect();
     let human = format!(
-        "joined the pool as {} ({}); start Claude Code through it with `jaynshare claude`",
-        installation.client_id, installation.display_name
+        "joined the pool as {} ({}); launch through it with {}",
+        installation.client_id,
+        installation.display_name,
+        launches.join(" or ")
     );
     Ok((result, human))
 }
@@ -349,70 +357,71 @@ async fn check(cli: &Cli, installation: &ClientInstallation, secret: &str) -> Re
     }
 }
 
-const ACCOUNT_LATER: &str =
-    "add your Claude account to the pool later with `jaynshare account login`";
-const CODEX_LATER: &str =
-    "add a ChatGPT account for Codex later with `jaynshare account login --provider codex`";
+/// The providers the installed client logs in: the default needs no
+/// option, and a client from an older server refuses `--provider`.
+async fn served(binary: &Path) -> Vec<Provider> {
+    let mut served = Vec::new();
+    for provider in Provider::ALL {
+        let accepted = provider.is_default()
+            || tokio::process::Command::new(binary)
+                .args(login_args(provider))
+                .arg("--help")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .await
+                .is_ok_and(|status| status.success());
+        if accepted {
+            served.push(provider);
+        }
+    }
+    served
+}
+
+/// `account login`, naming the provider unless it is the default.
+fn login_args(provider: Provider) -> Vec<&'static str> {
+    let mut args = vec!["account", "login"];
+    if !provider.is_default() {
+        args.extend(["--provider", provider.as_str()]);
+    }
+    args
+}
 
 /// The invite's account step, run by the installed client so it speaks its
-/// server's API: a Claude account, then a ChatGPT one when the client logs
-/// Codex in. Without a terminal to ask on, or under `--json`, each is left
-/// for later; `--yes` answers the Claude question only.
-async fn account_step(cli: &Cli, binary: &Path) {
+/// server's API: one question per provider. Without a terminal to ask on,
+/// or under `--json`, each is left for later.
+async fn account_step(cli: &Cli, binary: &Path, providers: &[Provider]) {
     let asks = !cli.json && std::io::stdin().is_terminal();
-    if asks && (cli.yes || answer("Add your Claude account to the pool? [Y/n] ") != Some(false)) {
-        log_in(binary, &[], "Claude account").await;
-    } else {
-        progress(cli, ACCOUNT_LATER);
-    }
-    if !logs_in_codex(binary).await {
-        return;
-    }
-    if asks && !cli.yes && answer("Add a ChatGPT account for Codex too? [y/N] ") == Some(true) {
-        log_in(binary, &["--provider", "codex"], "ChatGPT account").await;
-    } else {
-        progress(cli, CODEX_LATER);
-    }
-}
-
-async fn log_in(binary: &Path, provider: &[&str], what: &str) {
-    let args = [&["account", "login"][..], provider].concat();
-    let retry = format!("jaynshare {}", args.join(" "));
-    match run_in_terminal(binary, &args).await {
-        Ok(status) if status.success() => {}
-        Ok(_) => eprintln!("warning: no {what} was added; run `{retry}` to try again"),
-        Err(why) => eprintln!(
-            "warning: {}: {why}; run `{retry}` to add your {what}",
-            binary.display()
-        ),
+    for &provider in providers {
+        let account = provider.tool().account;
+        let args = login_args(provider);
+        let command = format!("jaynshare {}", args.join(" "));
+        if !(asks && (cli.yes || agrees(&format!("Add your {account} to the pool? [Y/n] ")))) {
+            progress(
+                cli,
+                &format!("add your {account} to the pool later with `{command}`"),
+            );
+            continue;
+        }
+        match run_in_terminal(binary, &args).await {
+            Ok(status) if status.success() => {}
+            Ok(_) => eprintln!("warning: no {account} was added; run `{command}` to try again"),
+            Err(why) => eprintln!(
+                "warning: {}: {why}; run `{command}` to add your {account}",
+                binary.display()
+            ),
+        }
     }
 }
 
-/// A client from a server without Codex refuses the option.
-async fn logs_in_codex(binary: &Path) -> bool {
-    tokio::process::Command::new(binary)
-        .args(["account", "login", "--provider", "codex", "--help"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .await
-        .is_ok_and(|status| status.success())
-}
-
-/// A yes/no question: `None` for an empty line, any answer but a no is a
-/// yes, closed input is a no.
-fn answer(prompt: &str) -> Option<bool> {
+/// A `[Y/n]` question: any answer but a no is a yes; closed input is a no.
+fn agrees(prompt: &str) -> bool {
     eprint!("{prompt}");
     std::io::stderr().flush().ok();
     let mut line = String::new();
-    match std::io::stdin().read_line(&mut line) {
-        Ok(0) | Err(_) => Some(false),
-        Ok(_) => match line.trim().to_ascii_lowercase().as_str() {
-            "" => None,
-            "n" | "no" => Some(false),
-            _ => Some(true),
-        },
-    }
+    std::io::stdin().read_line(&mut line).is_ok_and(|read| {
+        read > 0 && !matches!(line.trim().to_ascii_lowercase().as_str(), "n" | "no")
+    })
 }
 
 /// Runs `binary` on this terminal until it ends; an interrupt is its own

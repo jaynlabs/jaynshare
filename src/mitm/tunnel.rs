@@ -181,7 +181,7 @@ fn proxy_refusal(peer: SocketAddr) -> Box<Response<ResponseBody>> {
         peer,
         "",
         StatusCode::PROXY_AUTHENTICATION_REQUIRED,
-        "the proxy credential is missing or invalid: this is a client secret, not an Anthropic key",
+        "the proxy credential is missing or invalid: this is a client secret, not an API key",
     );
     response.headers_mut().insert(
         "proxy-authenticate",

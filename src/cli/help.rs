@@ -79,6 +79,7 @@ pub(super) static DOCS: &[VerbDoc] = &[
         [4, 6, 7, 11, 14],
         [
             "eval \"$(jaynshare env)\"",
+            "eval \"$(jaynshare env --provider codex)\"",
             "jaynshare env --shell fish --show"
         ]
     ),
@@ -781,7 +782,7 @@ pub(super) fn doc(path: &str) -> Option<&'static VerbDoc> {
 pub(super) fn top_level() -> String {
     let mut out = String::new();
     out.push_str(&format!(
-        "jaynshare {} — the pooled Anthropic proxy for Claude Code\n\n",
+        "jaynshare {} — the pooled proxy for Claude Code and Codex\n\n",
         crate::server::VERSION
     ));
     out.push_str(

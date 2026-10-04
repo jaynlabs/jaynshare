@@ -23,9 +23,9 @@ use crate::release_fx::ReleaseKey;
 
 const OTHER_PIN: &str = "sha256/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
 const QUESTION: &str = "Add your Claude account to the pool? [Y/n] ";
-const CODEX_QUESTION: &str = "Add a ChatGPT account for Codex too? [y/N] ";
+const CODEX_QUESTION: &str = "Add your ChatGPT account to the pool? [Y/n] ";
 const CODEX_LATER: &str =
-    "add a ChatGPT account for Codex later with `jaynshare account login --provider codex`";
+    "add your ChatGPT account to the pool later with `jaynshare account login --provider codex`";
 const ACCOUNT_LATER: &str =
     "add your Claude account to the pool later with `jaynshare account login`";
 
@@ -671,7 +671,7 @@ async fn a_join_adds_the_engineer_s_account_through_the_browser_callback() {
             "join-account-callback-terminal",
             &["join", &invite],
             &env,
-            &[(QUESTION, "\n"), (CODEX_QUESTION, "\n")],
+            &[(QUESTION, "\n"), (CODEX_QUESTION, "n\n")],
         )
     });
     let url = opened_url(&step.browser).await;
@@ -722,7 +722,7 @@ async fn a_join_without_a_browser_takes_the_pasted_code() {
         &[
             (QUESTION, "\n"),
             ("paste the authorisation code", "oat-fixture-pasted\n"),
-            (CODEX_QUESTION, "\n"),
+            (CODEX_QUESTION, "n\n"),
         ],
     );
     assert_eq!(exit, 0, "{transcript}");

@@ -16,6 +16,7 @@ use super::verbs::{health_cell, login_body, provider_cell, read_input};
 use super::{Failure, Outcome};
 use crate::client::{self, ClientRequest};
 use crate::login;
+use crate::provider::Provider;
 
 const ACCOUNTS: &str = "/control/v1/client/accounts";
 
@@ -49,6 +50,7 @@ pub(super) async fn account_login(cli: &Cli, args: &LoginArgs) -> Outcome {
             .as_str()
             .unwrap_or_default()
             .to_string(),
+        provider: args.provider,
     };
     let Some(state) = login::state_of(url) else {
         return Err(flow
@@ -168,6 +170,7 @@ impl Channel {
 struct Flow {
     channel: Channel,
     id: String,
+    provider: Provider,
 }
 
 impl Flow {
@@ -224,7 +227,7 @@ impl Flow {
         state: &str,
         mut forwarded: bool,
     ) -> Result<Value, Failure> {
-        let callback = login::await_callback(listener, state);
+        let callback = login::await_callback(listener, state, self.provider);
         tokio::pin!(callback);
         let mut last_state = String::new();
         loop {

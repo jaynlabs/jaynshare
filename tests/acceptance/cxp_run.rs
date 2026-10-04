@@ -801,9 +801,9 @@ async fn direct_removes_every_pool_variable() {
 }
 
 /// `codex` is the same launch with Codex's variables: its CA variable at
-/// `ca.pem`, its own upstream and API keys removed, and neither Claude Code's
-/// deadline rule nor its status line. A refusal names `jaynshare codex
-/// --direct`, which runs Codex outside the pool, and no `codex` is exit 13.
+/// `ca.pem`, its own upstream and API keys removed, and no deadline variable
+/// (Codex has none). A refusal names `jaynshare codex --direct`, which runs
+/// Codex outside the pool, and no `codex` is exit 13.
 #[tokio::test(flavor = "multi_thread")]
 async fn codex_launches_with_its_own_variables() {
     let _leak_sweep = crate::leaks::LeakGuard::default();
@@ -838,15 +838,18 @@ async fn codex_launches_with_its_own_variables() {
         "OPENAI_API_KEY",
         "CODEX_API_KEY",
         "OPENAI_BASE_URL",
-        "JAYNSHARE_STATUSLINE",
         "NODE_EXTRA_CA_CERTS",
     ] {
         assert!(!seen.env.contains_key(name), "{name} reached Codex");
     }
     assert_eq!(
+        seen.env.get("JAYNSHARE_STATUSLINE").map(String::as_str),
+        Some("1")
+    );
+    assert_eq!(
         seen.env.get("API_TIMEOUT_MS").map(String::as_str),
         Some("5000"),
-        "Claude Code's deadline floor would have raised it"
+        "Claude Code's deadline is not Codex's"
     );
 
     let (code, _, stderr) = machine.jaynshare(&["codex", "--direct"], &stale, None);

@@ -11,13 +11,13 @@ use crate::provider::anthropic::error_type;
 
 use super::relay::ResponseBody;
 
-/// A refusal outside any provider's exchange, in the Anthropic envelope.
+/// A refusal outside any provider's exchange, in the default's envelope.
 pub fn proxy_response(
     status: StatusCode,
     error_type: &str,
     message: &str,
 ) -> Response<ResponseBody> {
-    error(Provider::Anthropic, status, error_type, message)
+    error(Provider::default(), status, error_type, message)
 }
 
 /// A refusal in the envelope the provider's client reads.
@@ -43,12 +43,14 @@ pub fn rate_limited(provider: Provider, message: &str, retry_after: u64) -> Resp
     response
 }
 
-/// The one refusal every unauthenticated caller sees, byte for byte.
-pub fn unauthenticated() -> Response<ResponseBody> {
-    proxy_response(
+/// The one refusal every unauthenticated caller sees, byte for byte, in the
+/// envelope of the provider it speaks to.
+pub fn unauthenticated(provider: Provider) -> Response<ResponseBody> {
+    error(
+        provider,
         StatusCode::UNAUTHORIZED,
         error_type::AUTHENTICATION,
-        "the proxy credential is missing or invalid: this is the Jaynshare client secret, not an Anthropic key; re-enrol if it was rotated or revoked",
+        "the proxy credential is missing or invalid: this is the Jaynshare client secret, not an API key; re-enrol if it was rotated or revoked",
     )
 }
 

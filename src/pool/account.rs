@@ -281,7 +281,7 @@ struct Record {
     kind: Kind,
     handle: Uuid,
     // Absent for Anthropic, so a 2.1.x rollback still reads the state.
-    #[serde(default, skip_serializing_if = "Provider::is_anthropic")]
+    #[serde(default, skip_serializing_if = "Provider::is_default")]
     provider: Provider,
     display_name: String,
     profile_email: Option<String>,

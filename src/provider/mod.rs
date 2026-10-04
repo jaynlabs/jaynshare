@@ -38,6 +38,32 @@ pub struct TokenRequest {
     pub body: String,
 }
 
+/// The coding tool a provider's accounts serve, as the launcher runs it.
+pub struct Tool {
+    /// Its executable, and the verb that launches it.
+    pub executable: &'static str,
+    pub name: &'static str,
+    /// Where to install it.
+    pub home: &'static str,
+    /// The launcher's exit slug when it is not on the search path.
+    pub missing: &'static str,
+    /// What its accounts are called.
+    pub account: &'static str,
+    /// Its extra trust anchor variable.
+    pub ca_variable: &'static str,
+    /// Its own upstream and credential, removed from every launch.
+    pub upstream_variables: &'static [&'static str],
+    pub deadline: Option<Deadline>,
+}
+
+/// A request deadline the launcher raises to outlast a hold.
+pub struct Deadline {
+    /// The variable, in milliseconds.
+    pub variable: &'static str,
+    /// The tool's own deadline when the variable is absent.
+    pub default_ms: u64,
+}
+
 #[derive(
     Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, clap::ValueEnum,
 )]
@@ -51,8 +77,16 @@ pub enum Provider {
 impl Provider {
     pub const ALL: [Provider; 2] = [Provider::Anthropic, Provider::Codex];
 
-    pub fn is_anthropic(&self) -> bool {
-        *self == Provider::Anthropic
+    /// The default, which a 2.1.x peer knows without naming it.
+    pub fn is_default(&self) -> bool {
+        *self == Provider::default()
+    }
+
+    pub fn tool(self) -> &'static Tool {
+        match self {
+            Provider::Anthropic => &anthropic::TOOL,
+            Provider::Codex => &codex::TOOL,
+        }
     }
 
     /// The serialised name, as messages and query parameters spell it.
@@ -221,6 +255,15 @@ impl Provider {
         match self {
             Provider::Anthropic => None,
             Provider::Codex => Some(codex::CALLBACK_PORT),
+        }
+    }
+
+    /// Where the browser lands after a login, as the tool's own login sends
+    /// it; `None` is answered on the callback.
+    pub fn success_page(self) -> Option<&'static str> {
+        match self {
+            Provider::Anthropic => Some(anthropic::OAUTH_SUCCESS_URL),
+            Provider::Codex => None,
         }
     }
 

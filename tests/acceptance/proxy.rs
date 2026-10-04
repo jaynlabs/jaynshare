@@ -3231,8 +3231,8 @@ async fn a_revoked_client_loses_its_open_tunnel() {
     );
     assert_eq!(
         body["error"]["message"],
-        "the proxy credential is missing or invalid: this is the Jaynshare client secret, not an Anthropic key; re-enrol if it was rotated or revoked",
-        "the envelope::unauthenticated() message, byte for byte: {body}"
+        "the proxy credential is missing or invalid: this is the Jaynshare client secret, not an API key; re-enrol if it was rotated or revoked",
+        "the envelope::unauthenticated message, byte for byte: {body}"
     );
     assert_eq!(
         instance.upstream.calls(),

@@ -208,7 +208,7 @@ pub fn unauthenticated(
         mode,
         blocked_pattern: None,
     });
-    envelope::unauthenticated()
+    envelope::unauthenticated(provider.unwrap_or_default())
 }
 
 pub async fn run(

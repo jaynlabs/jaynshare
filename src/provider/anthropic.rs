@@ -8,7 +8,7 @@ use serde_json::Value;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use super::{Grant, TokenRequest};
+use super::{Deadline, Grant, TokenRequest, Tool};
 use crate::pool::quota::{
     API_KEY_BUCKETS, FAMILY_FABLE, Observation, SESSION, Scope, WEEKLY, parse_reset,
 };
@@ -16,6 +16,23 @@ use crate::pool::{Account, Credential, Kind};
 
 /// the API host; inference and telemetry.
 pub const API_HOST: &str = "api.anthropic.com";
+pub const TOOL: Tool = Tool {
+    executable: "claude",
+    name: "Claude Code",
+    home: "https://code.claude.com",
+    missing: "cli_claude_missing",
+    account: "Claude account",
+    ca_variable: "NODE_EXTRA_CA_CERTS",
+    upstream_variables: &[
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_CUSTOM_HEADERS",
+    ],
+    deadline: Some(Deadline {
+        variable: "API_TIMEOUT_MS",
+        default_ms: 600_000,
+    }),
+};
 pub const API_ORIGIN: &str = "https://api.anthropic.com";
 /// the beta an OAuth (subscription) bearer needs in `anthropic-beta`.
 pub const OAUTH_BETA: &str = "oauth-2025-04-20";

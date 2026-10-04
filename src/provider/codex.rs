@@ -6,12 +6,22 @@ use http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use serde_json::{Value, json};
 use time::OffsetDateTime;
 
-use super::{Grant, TokenRequest, form, jwt_claims};
+use super::{Grant, TokenRequest, Tool, form, jwt_claims};
 use crate::pool::quota::{Observation, SESSION, Scope, WEEKLY, parse_reset};
 use crate::pool::{Account, Credential, Profile};
 
 pub const API_HOST: &str = "chatgpt.com";
 pub const API_ORIGIN: &str = "https://chatgpt.com";
+pub const TOOL: Tool = Tool {
+    executable: "codex",
+    name: "Codex",
+    home: "https://github.com/openai/codex",
+    missing: "cli_codex_missing",
+    account: "ChatGPT account",
+    ca_variable: "CODEX_CA_CERTIFICATE",
+    upstream_variables: &["OPENAI_API_KEY", "CODEX_API_KEY", "OPENAI_BASE_URL"],
+    deadline: None,
+};
 pub const SESSION_ID: HeaderName = HeaderName::from_static("session-id");
 pub const CHATGPT_ACCOUNT_ID: HeaderName = HeaderName::from_static("chatgpt-account-id");
 /// Codex's own paths; the rest of chatgpt.com is account features.

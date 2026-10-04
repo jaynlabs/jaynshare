@@ -22,7 +22,7 @@ pub fn apply(plan: &mut EnvPlan, inputs: &Inputs<'_>) {
         plan.set(name, url.clone());
     }
     plan.set(
-        inputs.tool.ca_variable(),
+        inputs.tool.ca_variable,
         inputs
             .installation
             .directory
@@ -30,7 +30,7 @@ pub fn apply(plan: &mut EnvPlan, inputs: &Inputs<'_>) {
             .display()
             .to_string(),
     );
-    for name in inputs.tool.upstream_variables() {
+    for name in inputs.tool.upstream_variables {
         plan.unset(name);
     }
 }

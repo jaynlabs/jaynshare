@@ -3,8 +3,9 @@
 //! refusal code, and after it the exit code is the tool's.
 
 use super::args::{LaunchArgs, Picker, ToolArgs};
-use crate::launch::{self, IntentFlag, Tool};
+use crate::launch::{self, IntentFlag};
 use crate::picker;
+use crate::provider::Provider;
 
 pub(super) fn intent(args: &LaunchArgs) -> IntentFlag {
     if let Some(reference) = &args.account {
@@ -25,9 +26,9 @@ pub(super) fn picker_kind(picker: Option<Picker>) -> Option<picker::Kind> {
     })
 }
 
-pub(super) fn launch(tool: Tool, args: &ToolArgs) -> i32 {
+pub(super) fn launch(provider: Provider, args: &ToolArgs) -> i32 {
     let request = launch::Request {
-        tool,
+        provider,
         intent: intent(&args.launch),
         picker: picker_kind(args.picker),
         args: args.args.clone(),

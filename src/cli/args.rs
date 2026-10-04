@@ -746,6 +746,9 @@ pub(super) struct ToolArgs {
 pub(super) struct EnvArgs {
     #[command(flatten)]
     pub(super) launch: LaunchArgs,
+    /// Whose tool the environment is for.
+    #[arg(long, value_enum, value_name = "provider", default_value_t)]
+    pub(super) provider: Provider,
     /// The shell to quote for; detected from the parent when omitted.
     #[arg(long, value_enum, value_name = "shell")]
     pub(super) shell: Option<Shell>,
