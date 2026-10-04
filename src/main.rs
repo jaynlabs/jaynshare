@@ -1,6 +1,9 @@
 //! `jaynshare`: one executable for the server and every role's verbs.
 
 mod audit;
+#[cfg(test)]
+#[path = "../build.rs"]
+mod build_metadata;
 mod bundle;
 mod capture;
 mod cli;

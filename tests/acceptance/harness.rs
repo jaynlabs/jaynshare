@@ -196,7 +196,6 @@ pub(crate) struct Fake {
     pub(crate) token_script: Arc<Mutex<VecDeque<Reply>>>,
     pub(crate) usage_script: Arc<Mutex<VecDeque<Reply>>>,
     pub(crate) token_delay: Arc<Mutex<Option<Duration>>>,
-    pub(crate) usage_delay: Arc<Mutex<Option<Duration>>>,
 }
 
 impl Fake {
@@ -209,7 +208,6 @@ impl Fake {
             token_script: Arc::new(Mutex::new(VecDeque::new())),
             usage_script: Arc::new(Mutex::new(VecDeque::new())),
             token_delay: Arc::new(Mutex::new(None)),
-            usage_delay: Arc::new(Mutex::new(None)),
         };
         let accept = fake.clone();
         tokio::spawn(async move {
@@ -246,7 +244,6 @@ impl Fake {
             token_script: Arc::new(Mutex::new(VecDeque::new())),
             usage_script: Arc::new(Mutex::new(VecDeque::new())),
             token_delay: Arc::new(Mutex::new(None)),
-            usage_delay: Arc::new(Mutex::new(None)),
         };
         let (cert, key) = stage_tls_pair(&fake_addr_dir(&fake.addr));
         let acceptor = test_acceptor(&cert, &key);
@@ -294,10 +291,6 @@ impl Fake {
 
     pub(crate) fn delay_token(&self, delay: Duration) {
         *self.token_delay.lock().expect("token delay") = Some(delay);
-    }
-
-    pub(crate) fn delay_usage(&self, delay: Duration) {
-        *self.usage_delay.lock().expect("usage delay") = Some(delay);
     }
 
     pub(crate) fn token_calls(&self) -> Vec<Seen> {
@@ -358,12 +351,6 @@ impl Fake {
             .then(|| *self.token_delay.lock().expect("token delay"))
             .flatten();
         if let Some(delay) = token_delay {
-            tokio::time::sleep(delay).await;
-        }
-        let usage_delay = (path == "/api/oauth/usage")
-            .then(|| *self.usage_delay.lock().expect("usage delay"))
-            .flatten();
-        if let Some(delay) = usage_delay {
             tokio::time::sleep(delay).await;
         }
         let reply = if path == "/v1/oauth/token" {
@@ -1206,16 +1193,6 @@ pub(crate) fn binary() -> PathBuf {
     }
 }
 
-/// A port nobody else holds. Reserved and released so the CLI, which reads the
-/// listen address out of the configuration, can find the instance.
-///
-/// The reservation has to be released before the server can take it, and the
-/// suite runs tests in parallel, so the gap between the two is a race: a second
-/// test reserving in that window gets the same port and one of the two servers
-/// exits with `Address already in use`. `PORT_HANDOFF` closes the window by
-/// letting only one instance be between reservation and a bound listener.
-pub(crate) static PORT_HANDOFF: Mutex<()> = Mutex::new(());
-
 /// Starts of one instance before a port taken under it is the scenario's failure.
 const STARTUP_ATTEMPTS: u32 = 3;
 
@@ -1562,9 +1539,6 @@ impl Instance {
             private_dir(&root.join("cap"));
         }
 
-        // Held until the server has printed its startup line, so no other test
-        // can reserve this port in the window where nobody is bound to it.
-        let handoff = PORT_HANDOFF.lock().unwrap_or_else(|e| e.into_inner());
         let origin = setup
             .upstream_origin
             .clone()
@@ -1603,7 +1577,6 @@ impl Instance {
                 ),
             }
         }
-        drop(handoff);
         instance
     }
 
@@ -1617,7 +1590,17 @@ impl Instance {
             .env("PATH", self.root.join("no-browser-on-path"))
             // The managed store the server reads is this root's
             // home, never the developer's.
-            .envs(platform_home(&self.root.join("home")));
+            .envs(platform_home(&self.root.join("home")))
+            // Loopback fixtures need their CA, not repeated native trust-store scans.
+            // A scenario's explicit trust store below still takes precedence.
+            .env(
+                "SSL_CERT_FILE",
+                concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/tests/acceptance/fixtures/tls/test-ca.pem"
+                ),
+            )
+            .env_remove("SSL_CERT_DIR");
         for (name, value) in &self.server_env {
             command.env(name, value);
         }
@@ -2149,7 +2132,6 @@ impl Instance {
         self.upstream.script([reply_auth_401()]);
         let answer = send(self.addr, pinned(messages(haiku_prompt()), name)).await;
         assert_eq!(answer.status, StatusCode::BAD_GATEWAY);
-        self.settle();
         assert_eq!(self.account(name)["health"]["state"], "errored");
     }
 
@@ -2241,6 +2223,30 @@ impl Instance {
 impl Drop for Instance {
     fn drop(&mut self) {
         self.kill_child();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_startups_bind_distinct_ports() {
+    let _leak_sweep = crate::leaks::LeakGuard::default();
+    let starts: Vec<_> = (0..4)
+        .map(|i| tokio::spawn(async move { Instance::start(&format!("parallel-start-{i}")).await }))
+        .collect();
+    let mut instances = Vec::new();
+    for start in starts {
+        instances.push(start.await.expect("parallel server startup"));
+    }
+    let mut ports = std::collections::HashSet::new();
+    for instance in &instances {
+        assert!(
+            ports.insert(instance.addr.port()),
+            "distinct base-URL ports"
+        );
+        assert!(
+            ports.insert(instance.mitm_addr.expect("proxy listener").port()),
+            "distinct proxy ports"
+        );
+        assert_eq!(instance.status()["accounts"], json!([]));
     }
 }
 // ------------------------------------------------------------------ the client side

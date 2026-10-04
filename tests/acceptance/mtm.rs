@@ -33,9 +33,6 @@ struct MitmInstance {
 }
 
 fn spawn(scenario: &str, faults: Option<std::sync::Arc<crate::faults::Faults>>) -> MitmInstance {
-    let _guard = crate::harness::PORT_HANDOFF
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
     let port = reserve_port();
     let mitm_port = reserve_port();
     let root = scratch(scenario);
@@ -65,6 +62,14 @@ fn spawn(scenario: &str, faults: Option<std::sync::Arc<crate::faults::Faults>>) 
         .args(["--config", &config.display().to_string(), "serve"])
         .env("PATH", root.join("no-browser-on-path"))
         .envs(crate::harness::platform_home(&root.join("home")))
+        .env(
+            "SSL_CERT_FILE",
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/acceptance/fixtures/tls/test-ca.pem"
+            ),
+        )
+        .env_remove("SSL_CERT_DIR")
         .stdout(Stdio::from(
             fs::File::create(root.join("stdout.txt")).expect("stdout file"),
         ))
@@ -82,7 +87,6 @@ fn spawn(scenario: &str, faults: Option<std::sync::Arc<crate::faults::Faults>>) 
         faults,
     };
     instance.await_startup();
-    drop(_guard);
     instance
 }
 

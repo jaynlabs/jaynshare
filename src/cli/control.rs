@@ -112,7 +112,7 @@ impl Control {
         // Https on an operator certificate trusts the system store plus every
         // certificate of the configured chain.
         let (scheme, client) = match &loaded.config.data_plane.tls {
-            ListenerTls::Off => ("http", http_client_identity(&[], address)?),
+            ListenerTls::Off => ("http", http_client_plain()?),
             ListenerTls::Identity => ("https", http_client_pinned(&server_pin(&state_path)?)?),
             ListenerTls::Certificate(tls) => (
                 "https",

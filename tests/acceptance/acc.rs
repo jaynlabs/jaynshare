@@ -777,9 +777,9 @@ async fn acc_login_times_out_past_its_ttl_with_the_retry_action() {
 
 // ---- step 3, session A: the refresh engine
 
-/// 20 concurrent prompts against an in-margin FSUB with
-/// `delay_token(500 ms)` share one refresh: exactly one token call,
-/// `health.state == "refreshing"` during the delay, every attempt answered
+/// 20 concurrent prompts against an in-margin FSUB with a held token reply
+/// share one refresh: exactly one token call,
+/// `health.state == "refreshing"` before release, every attempt answered
 /// 200 on the rotated bearer.
 #[tokio::test(flavor = "multi_thread")]
 async fn concurrent_prompts_share_one_refresh() {
@@ -794,16 +794,19 @@ async fn concurrent_prompts_share_one_refresh() {
         &instance.needles.refresh_token,
         OffsetDateTime::now_utc() + time::Duration::seconds(60),
     );
-    instance.upstream.script_token([Reply::status(
-        200,
-        json!({
-            "access_token": rotated,
-            "refresh_token": needle("refresh token", "ort-rotated"),
-            "expires_in": 3600,
-        })
-        .to_string(),
+    let gate = Arc::new(Notify::new());
+    instance.upstream.script_token([Reply::HoldThen(
+        gate.clone(),
+        Box::new(Reply::status(
+            200,
+            json!({
+                "access_token": rotated,
+                "refresh_token": needle("refresh token", "ort-rotated"),
+                "expires_in": 3600,
+            })
+            .to_string(),
+        )),
     )]);
-    instance.upstream.delay_token(Duration::from_millis(500));
 
     let prompts: Vec<_> = (0..20)
         .map(|_| {
@@ -819,6 +822,7 @@ async fn concurrent_prompts_share_one_refresh() {
     }
     assert_eq!(instance.upstream.token_calls().len(), 1);
     assert_eq!(instance.account("FSUB")["health"]["state"], "refreshing");
+    gate.notify_one();
 
     for prompt in prompts {
         assert_eq!(prompt.await.expect("prompt task").status, StatusCode::OK);
