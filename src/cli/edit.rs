@@ -1032,8 +1032,8 @@ pub(super) async fn priority(control: &Control, verb: &PriorityVerb) -> Outcome 
             ))
         }
         PriorityVerb::Set { reference, value } => {
-            let handle = resolved_handle(control, reference).await?;
-            let existing = entries_for(control, &handle).await?;
+            let account = control.resolve(reference).await?;
+            let existing = entries_for(control, &account["account"]).await?;
             let result = edit_and_reload(control, |document| {
                 set_priority(document, reference, *value, &existing)
             })
@@ -1047,8 +1047,8 @@ pub(super) async fn priority(control: &Control, verb: &PriorityVerb) -> Outcome 
             ))
         }
         PriorityVerb::Clear { reference } => {
-            let handle = resolved_handle(control, reference).await?;
-            let existing = entries_for(control, &handle).await?;
+            let account = control.resolve(reference).await?;
+            let existing = entries_for(control, &account["account"]).await?;
             if existing.is_empty() {
                 return Err(Failure::local(
                     6,
@@ -1069,24 +1069,21 @@ pub(super) async fn priority(control: &Control, verb: &PriorityVerb) -> Outcome 
     }
 }
 
-async fn resolved_handle(control: &Control, reference: &str) -> Result<String, Failure> {
-    Ok(control.resolve(reference).await?["account"]["handle"]
-        .as_str()
-        .unwrap_or_default()
-        .to_string())
-}
-
-/// The priority entries of the file that resolve to `handle`, by
-/// their literal `account` strings — the server resolves each, the CLI cannot.
-async fn entries_for(control: &Control, handle: &str) -> Result<Vec<String>, Failure> {
+/// The priority entries of the file that resolve to `account`, by their
+/// literal `account` strings — the server resolves each within the account's
+/// provider, as the configuration does; the CLI cannot.
+async fn entries_for(control: &Control, account: &Value) -> Result<Vec<String>, Failure> {
     let (_, mut document) = read_document(control.config_path()?)?;
     let literals = priorities_of(&mut document, false)?
         .map(|p| p.strings("account"))
         .unwrap_or_default();
     let mut matching = Vec::new();
     for literal in literals {
-        let resolves = match control.resolve(&literal).await {
-            Ok(body) => body["account"]["handle"] == handle,
+        let resolves = match control
+            .resolve_within(&literal, account["provider"].as_str())
+            .await
+        {
+            Ok(body) => body["account"]["handle"] == account["handle"],
             Err(f) if f.code == 6 || f.code == 7 => false,
             Err(f) => return Err(f),
         };

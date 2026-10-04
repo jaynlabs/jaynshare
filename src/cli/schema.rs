@@ -127,6 +127,7 @@ fn defs() -> Value {
         ("account_uuid", nullable_string()),
         ("organization_uuid", nullable_string()),
         ("organization_name", nullable_string()),
+        ("chatgpt_account_id", nullable_string()),
     ]);
     // A client's view of an account it owns.
     let provider = json!({ "enum": ["anthropic", "codex"] });

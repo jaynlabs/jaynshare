@@ -576,18 +576,25 @@ fn login_display_name(body: &Value) -> Option<String> {
 
 /// A login's `provider` member; absent is Anthropic.
 fn login_provider(body: &Value) -> Result<Provider, Box<Response<ResponseBody>>> {
-    if body["provider"].is_null() {
-        return Ok(Provider::Anthropic);
+    provider_named(&body["provider"]).map(Option::unwrap_or_default)
+}
+
+/// A `provider` member or query value; absent is `None`.
+fn provider_named(value: &Value) -> Result<Option<Provider>, Box<Response<ResponseBody>>> {
+    if value.is_null() {
+        return Ok(None);
     }
-    serde_json::from_value(body["provider"].clone()).map_err(|_| {
-        Box::new(error(
-            StatusCode::BAD_REQUEST,
-            "invalid_request",
-            "provider is anthropic or codex",
-            Some("provider".into()),
-            vec![],
-        ))
-    })
+    serde_json::from_value(value.clone())
+        .map(Some)
+        .map_err(|_| {
+            Box::new(error(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                "provider is anthropic or codex",
+                Some("provider".into()),
+                vec![],
+            ))
+        })
 }
 
 /// The `202` that answers a started login.

@@ -28,7 +28,7 @@ use crate::timestamp::rfc3339;
 
 use super::{
     base, error, insecure_channel, insecure_channel_refusal, member_errors, mutation_body,
-    mutation_line, percent_decode, persist_failed, read, time_or_null,
+    mutation_line, percent_decode, persist_failed, provider_named, read, time_or_null,
 };
 
 /// The four credential sources, shared by add and replace.
@@ -737,9 +737,10 @@ pub(super) fn remove_account(
     }
 }
 
+/// Among every account, or within one provider's with `&provider=`.
 pub(super) fn resolve(server: &Arc<Server>, query: Option<&str>) -> Response<ResponseBody> {
-    let reference = query
-        .and_then(|q| q.split('&').find_map(|kv| kv.strip_prefix("reference=")))
+    let member = |name: &str| query.and_then(|q| q.split('&').find_map(|kv| kv.strip_prefix(name)));
+    let reference = member("reference=")
         .map(percent_decode)
         .filter(|r| !r.is_empty() && r.len() <= 1024 && !r.chars().any(char::is_control));
     let Some(reference) = reference else {
@@ -751,12 +752,18 @@ pub(super) fn resolve(server: &Arc<Server>, query: Option<&str>) -> Response<Res
             vec![],
         );
     };
-    let found = server
-        .pool
-        .lock()
-        .expect("pool lock")
-        .resolve(&reference)
-        .map(|a| a.handle);
+    let provider = match provider_named(&json!(member("provider="))) {
+        Ok(provider) => provider,
+        Err(refusal) => return *refusal,
+    };
+    let found = {
+        let pool = server.pool.lock().expect("pool lock");
+        match provider {
+            Some(provider) => pool.resolve_in(provider, &reference),
+            None => pool.resolve(&reference),
+        }
+        .map(|a| a.handle)
+    };
     match found {
         Ok(handle) => read(json!({ "account": account_object(server, handle) })),
         Err(Resolve::NotFound) => error(StatusCode::NOT_FOUND, "account_not_found", "no account matches the reference", Some(reference), vec![]),

@@ -81,7 +81,7 @@ pub struct Profile {
     pub organization_uuid: Option<Uuid>,
     pub organization_name: Option<String>,
     /// The ChatGPT workspace a Codex credential speaks for.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub chatgpt_account_id: Option<String>,
 }
 

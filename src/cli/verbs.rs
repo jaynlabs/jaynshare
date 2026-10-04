@@ -11,8 +11,8 @@ use serde_json::{Value, json};
 use time::OffsetDateTime;
 
 use super::args::{
-    AddArgs, ApiArgs, Cli, LoginArgs, LoginProvider, ProbeArgs, ReplaceArgs, SecretChannel,
-    SourceFlags, StatusArgs, SwitchArgs,
+    AddArgs, ApiArgs, Cli, LoginArgs, ProbeArgs, ReplaceArgs, SecretChannel, SourceFlags,
+    StatusArgs, SwitchArgs,
 };
 use super::control::Control;
 use super::{Failure, Outcome, colour_wanted};
@@ -161,12 +161,12 @@ fn render_status(body: &Value, cli: &Cli, args: &StatusArgs) -> String {
         colour: colour_wanted(cli),
     };
     let now = OffsetDateTime::now_utc();
-    let default_handle = s["default_account"]["handle"].as_str();
+    let default_handles = default_handles(s);
     let verbose = args.verbose;
 
     if args.accounts {
         let mut out = String::new();
-        accounts_into(s, default_handle, &paint, verbose, now, &mut out);
+        accounts_into(s, &default_handles, &paint, verbose, now, &mut out);
         return out.trim_end().to_owned();
     }
     if args.routes {
@@ -198,7 +198,7 @@ fn render_status(body: &Value, cli: &Cli, args: &StatusArgs) -> String {
         probe_into(s, &paint, &mut out);
     }
     routes_into(s, &paint, verbose, &mut out);
-    accounts_into(s, default_handle, &paint, verbose, now, &mut out);
+    accounts_into(s, &default_handles, &paint, verbose, now, &mut out);
     default_into(s, &paint, verbose, &mut out);
     if verbose {
         clients_into(s, &paint, &mut out);
@@ -334,7 +334,7 @@ fn routes_into(s: &Value, paint: &Paint, verbose: bool, out: &mut String) {
 
 fn accounts_into(
     s: &Value,
-    default_handle: Option<&str>,
+    default_handles: &[&str],
     paint: &Paint,
     verbose: bool,
     now: OffsetDateTime,
@@ -346,13 +346,13 @@ fn accounts_into(
         return;
     }
     for account in accounts {
-        account_block(account, default_handle, paint, verbose, now, out);
+        account_block(account, default_handles, paint, verbose, now, out);
     }
 }
 
 fn account_block(
     a: &Value,
-    default_handle: Option<&str>,
+    default_handles: &[&str],
     paint: &Paint,
     verbose: bool,
     now: OffsetDateTime,
@@ -360,7 +360,9 @@ fn account_block(
 ) {
     let name = a["display_name"].as_str().unwrap_or("");
     let kind = a["kind"].as_str().unwrap_or("");
-    let is_default = default_handle.is_some_and(|h| a["handle"].as_str() == Some(h));
+    let is_default = a["handle"]
+        .as_str()
+        .is_some_and(|h| default_handles.contains(&h));
     let marker = if is_default {
         paint.green(">")
     } else {
@@ -493,27 +495,44 @@ fn bucket_line(b: &Value, paint: &Paint, now: OffsetDateTime, out: &mut String) 
     out.push('\n');
 }
 
+/// Each provider's default; a 2.1.x server names Anthropic's alone.
+fn defaults(s: &Value) -> Vec<&Value> {
+    let defaults: Vec<&Value> = match s["default_accounts"].as_object() {
+        Some(by_provider) => by_provider.values().collect(),
+        None => vec![&s["default_account"]],
+    };
+    defaults.into_iter().filter(|d| !d.is_null()).collect()
+}
+
+fn default_handles(s: &Value) -> Vec<&str> {
+    defaults(s)
+        .into_iter()
+        .filter_map(|d| d["handle"].as_str())
+        .collect()
+}
+
 fn default_into(s: &Value, paint: &Paint, verbose: bool, out: &mut String) {
     let label = paint.bold("default");
-    match &s["default_account"] {
-        Value::Null => out.push_str(&format!("{label}  none\n")),
-        d => {
-            let name = s["accounts"]
-                .as_array()
-                .and_then(|a| a.iter().find(|x| x["handle"] == d["handle"]))
-                .and_then(|x| x["display_name"].as_str())
-                .unwrap_or("?");
-            let mut line = format!(
-                "{label}  {name} ({}) operator-chosen {}",
-                d["handle"].as_str().unwrap_or(""),
-                d["operator_chosen"]
-            );
-            if verbose {
-                line += &format!(" since {}", d["since"].as_str().unwrap_or("null"));
-            }
-            out.push_str(&line);
-            out.push('\n');
+    let defaults = defaults(s);
+    if defaults.is_empty() {
+        out.push_str(&format!("{label}  none\n"));
+    }
+    for d in defaults {
+        let name = s["accounts"]
+            .as_array()
+            .and_then(|a| a.iter().find(|x| x["handle"] == d["handle"]))
+            .and_then(|x| x["display_name"].as_str())
+            .unwrap_or("?");
+        let mut line = format!(
+            "{label}  {name} ({}) operator-chosen {}",
+            d["handle"].as_str().unwrap_or(""),
+            d["operator_chosen"]
+        );
+        if verbose {
+            line += &format!(" since {}", d["since"].as_str().unwrap_or("null"));
         }
+        out.push_str(&line);
+        out.push('\n');
     }
 }
 
@@ -1034,18 +1053,19 @@ pub(super) async fn switch(control: &Control, cli: &Cli, args: &SwitchArgs) -> O
     Ok((result, format!("{target}; ineligible: {reason} {detail}")))
 }
 
-/// One row per account, the default marked with `*`.
+/// One row per account, each provider's default marked with `*`.
 async fn switch_listing(control: &Control) -> Outcome {
     let body = control
         .expect(Method::GET, "/control/v1/status", None)
         .await?;
-    let default = body["status"]["default_account"]["handle"].clone();
+    let defaults = default_handles(&body["status"]);
     let rows: Vec<String> = body["status"]["accounts"]
         .as_array()
         .map(|a| {
             a.iter()
                 .map(|x| {
-                    let mark = if x["handle"] == default { "* " } else { "  " };
+                    let is_default = x["handle"].as_str().is_some_and(|h| defaults.contains(&h));
+                    let mark = if is_default { "* " } else { "  " };
                     format!("{mark}{}", account_row(x))
                 })
                 .collect()
@@ -1077,8 +1097,9 @@ pub(super) fn login_body(args: &LoginArgs) -> Value {
     if let Some(name) = args.name.as_deref() {
         body["display_name"] = json!(name);
     }
-    if args.provider == Some(LoginProvider::Codex) {
-        body["provider"] = json!("codex");
+    // Anthropic is the default, so a 2.1.x server is never sent the member.
+    if !args.provider.is_anthropic() {
+        body["provider"] = json!(args.provider);
     }
     body
 }

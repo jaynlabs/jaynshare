@@ -38,7 +38,9 @@ pub struct TokenRequest {
     pub body: String,
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, clap::ValueEnum,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum Provider {
     #[default]

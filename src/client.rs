@@ -691,8 +691,8 @@ pub async fn resolve(
         "/control/v1/client/accounts/resolve?reference={}",
         percent_encode(reference)
     );
-    if provider == Provider::Codex {
-        path.push_str("&provider=codex");
+    if !provider.is_anthropic() {
+        path.push_str(&format!("&provider={}", provider.as_str()));
     }
     let request = base_url_request(installation, timeout)?;
     let (status, body) = request.call(Method::GET, &path, Some(secret), None).await?;

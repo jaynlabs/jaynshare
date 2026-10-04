@@ -2833,6 +2833,19 @@ async fn a_codex_login_is_scoped_to_its_provider() {
         "{message}"
     );
 
+    // A priority literal covering one account per provider is the Codex
+    // account's entry too: `set` updates it, `clear` drops it.
+    instance.reload_with_setup(&Setup {
+        selection: priorities(&[(FIXTURE_ORG_UUID, 1)]),
+        ..Setup::default()
+    });
+    let envelope = instance.cli_json(&["priority", "set", "FSUB2", "3"], None);
+    assert_eq!(envelope["exit_code"], 0, "{envelope}");
+    assert_eq!(instance.account("FSUB2")["priority"], 3);
+    let envelope = instance.cli_json(&["priority", "clear", "FSUB2"], None);
+    assert_eq!(envelope["exit_code"], 0, "{envelope}");
+    assert_eq!(instance.account("FSUB2")["priority"], 0);
+
     let calls = instance.upstream.calls();
     let answer = send(addr, pinned(messages(haiku_prompt()), "FSUB2")).await;
     assert_eq!(answer.status, StatusCode::NOT_FOUND, "{}", answer.text());

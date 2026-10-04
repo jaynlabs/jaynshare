@@ -905,6 +905,47 @@ async fn codex_account_resolves_among_codex_accounts() {
     }
 }
 
+/// Against a server holding both providers' accounts, each tool resolves
+/// among its own: a reference matching one account per provider is not
+/// ambiguous, and a Claude account is not found from `jaynshare codex`.
+#[tokio::test(flavor = "multi_thread")]
+async fn each_tool_resolves_among_its_own_provider_s_accounts() {
+    let _leak_sweep = crate::leaks::LeakGuard::default();
+    let mut instance = Instance::start_client("each-tool-own-provider").await;
+    add_two(&instance);
+    instance.restart_with_state(|state| {
+        let record = state["accounts"]
+            .as_array_mut()
+            .expect("accounts")
+            .iter_mut()
+            .find(|r| r["display_name"] == "FSUB2")
+            .expect("the FSUB2 record");
+        record["provider"] = json!("codex");
+        record["chatgpt_account_id"] = json!("ws-fsub2");
+    });
+    let machine = install_client(&instance).await;
+    for (tool, reference, pinned) in [
+        ("claude", FIXTURE_ORG_UUID, "FSUB"),
+        ("codex", FIXTURE_ORG_UUID, "FSUB2"),
+    ] {
+        let (code, _, stderr) = machine.jaynshare(&[tool, "--account", reference], &[], None);
+        assert_eq!(code, 0, "{tool}: {stderr}");
+        let seen = machine.claude_ran().expect("the tool was launched");
+        assert_eq!(
+            seen.pin(),
+            Some(token(true, &instance.handle(pinned))),
+            "{tool}"
+        );
+    }
+    let (code, _, stderr) = machine.jaynshare(&["codex", "--account", "FSUB"], &[], None);
+    assert_eq!(code, 6, "{stderr}");
+    assert!(
+        machine.claude_ran().is_none(),
+        "refused before Codex started"
+    );
+    instance.stop();
+}
+
 /// The account intent is a pin: the
 /// `JAYNSHARE_ACCOUNT` variable is the same input as `--account`, the child
 /// gets the pin as its proxy URL's user field and never the variable, and an

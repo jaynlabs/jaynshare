@@ -7,6 +7,8 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
+use crate::provider::Provider;
+
 #[derive(Parser)]
 #[command(
     name = "jaynshare",
@@ -170,12 +172,6 @@ pub(super) enum Shell {
 pub(super) enum Picker {
     Keyboard,
     Numbered,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub(super) enum LoginProvider {
-    Anthropic,
-    Codex,
 }
 
 #[derive(Args)]
@@ -428,8 +424,8 @@ pub(super) struct LoginArgs {
     #[arg(long)]
     pub(super) name: Option<String>,
     /// Whose login: a Claude account (the default) or a ChatGPT one for Codex.
-    #[arg(long, value_enum, value_name = "provider")]
-    pub(super) provider: Option<LoginProvider>,
+    #[arg(long, value_enum, value_name = "provider", default_value_t)]
+    pub(super) provider: Provider,
     /// Print the URL and the operation id and exit at once.
     #[arg(long)]
     pub(super) no_wait: bool,

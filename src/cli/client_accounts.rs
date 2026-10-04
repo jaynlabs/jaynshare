@@ -10,7 +10,7 @@ use http::Method;
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
 
-use super::args::{Cli, LoginArgs, LoginProvider};
+use super::args::{Cli, LoginArgs};
 use super::engineer::{client_failure_pair, installation, request, secret};
 use super::verbs::{health_cell, login_body, provider_cell, read_input};
 use super::{Failure, Outcome};
@@ -18,8 +18,6 @@ use crate::client::{self, ClientRequest};
 use crate::login;
 
 const ACCOUNTS: &str = "/control/v1/client/accounts";
-/// OpenAI registered Codex's redirect on this one loopback port.
-const CODEX_CALLBACK_PORT: u16 = 1455;
 
 /// Log in an account this client owns: a new one, or one of its own again.
 pub(super) async fn account_login(cli: &Cli, args: &LoginArgs) -> Outcome {
@@ -31,11 +29,7 @@ pub(super) async fn account_login(cli: &Cli, args: &LoginArgs) -> Outcome {
         ));
     }
     let channel = Channel::open(cli)?;
-    let port = if args.provider == Some(LoginProvider::Codex) {
-        CODEX_CALLBACK_PORT
-    } else {
-        0
-    };
+    let port = args.provider.callback_port().unwrap_or(0);
     let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], port)))
         .await
         .map_err(|e| internal(format!("cannot open the loopback callback listener: {e}")))?;

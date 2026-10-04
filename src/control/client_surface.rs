@@ -20,10 +20,9 @@ use crate::data_plane::relay::ResponseBody;
 use crate::mitm::ca::Ca;
 use crate::pool::quota::{SESSION, WEEKLY};
 use crate::pool::{Account, Resolve, SessionKey, selection};
-use crate::provider::Provider;
 use crate::server::{Server, VERSION};
 
-use super::{API_VERSION, error, percent_decode, read};
+use super::{API_VERSION, error, percent_decode, provider_named, read};
 use crate::timestamp::rfc3339;
 
 /// The client projection. Every member below is named on purpose;
@@ -242,20 +241,9 @@ pub(super) fn resolve(server: &Arc<Server>, query: Option<&str>) -> Response<Res
             vec![],
         );
     };
-    let provider = match member("provider=") {
-        None => Provider::Anthropic,
-        Some(name) => match Provider::ALL.into_iter().find(|p| p.as_str() == name) {
-            Some(provider) => provider,
-            None => {
-                return error(
-                    StatusCode::BAD_REQUEST,
-                    "invalid_request",
-                    "provider is anthropic or codex",
-                    Some("provider".into()),
-                    vec![],
-                );
-            }
-        },
+    let provider = match provider_named(&json!(member("provider="))) {
+        Ok(provider) => provider.unwrap_or_default(),
+        Err(refusal) => return *refusal,
     };
     let now = OffsetDateTime::now_utc();
     let resolved = {
