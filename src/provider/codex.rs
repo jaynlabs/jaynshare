@@ -13,12 +13,14 @@ pub const API_ORIGIN: &str = "https://chatgpt.com";
 pub const SESSION_ID: HeaderName = HeaderName::from_static("session-id");
 pub const CHATGPT_ACCOUNT_ID: HeaderName = HeaderName::from_static("chatgpt-account-id");
 
+// Lane C: `/backend-api/codex/analytics-events` and below.
 pub fn is_telemetry(_path: &str) -> bool {
-    todo!("lane C: /backend-api/codex/analytics-events and below")
+    false
 }
 
+// Lane C: everything outside `/backend-api/codex/`.
 pub fn is_account_bound(_path: &str) -> bool {
-    todo!("lane C: everything outside /backend-api/codex/")
+    false
 }
 
 /// Codex accounts are ChatGPT logins; an API key has no Codex form, so it
@@ -39,16 +41,19 @@ pub fn inject_credential(headers: &mut HeaderMap, account: &Account) {
     }
 }
 
+// Lane B: `x-codex-{primary,secondary}-*` onto `session` and `weekly`.
 pub fn observe_headers(_headers: &HeaderMap) -> Vec<Observation> {
-    todo!("lane B: x-codex-{{primary,secondary}}-* onto session and weekly")
+    Vec::new()
 }
 
+// Lane B: `/backend-api/wham/usage`.
 pub fn observe_usage(_usage: &Value) -> Result<Vec<Observation>, String> {
-    todo!("lane B: /backend-api/wham/usage")
+    Err("Codex usage is not read yet".into())
 }
 
+// Lane B: the usage-limit 429 body.
 pub fn is_spend_cap_429(_body: Option<&[u8]>) -> bool {
-    todo!("lane B: the usage-limit 429 body")
+    false
 }
 
 #[cfg(test)]
