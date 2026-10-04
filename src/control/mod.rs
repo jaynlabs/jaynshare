@@ -514,7 +514,13 @@ async fn login_start(
     if insecure_channel(server, peer) {
         return insecure_channel_refusal(server, peer, Some(principal));
     }
-    let details = member_errors(&body, &[("display_name", "string", false)]);
+    let details = member_errors(
+        &body,
+        &[
+            ("display_name", "string", false),
+            ("provider", "string", false),
+        ],
+    );
     if !details.is_empty() {
         return error(
             StatusCode::BAD_REQUEST,
@@ -524,11 +530,16 @@ async fn login_start(
             details,
         );
     }
+    let provider = match login_provider(&body) {
+        Ok(provider) => provider,
+        Err(refusal) => return *refusal,
+    };
     match server
         .logins
         .start(
             Arc::clone(server),
             Starter::Operator,
+            provider,
             login_display_name(&body),
         )
         .await
@@ -561,6 +572,22 @@ fn login_display_name(body: &Value) -> Option<String> {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(String::from)
+}
+
+/// A login's `provider` member; absent is Anthropic.
+fn login_provider(body: &Value) -> Result<Provider, Box<Response<ResponseBody>>> {
+    if body["provider"].is_null() {
+        return Ok(Provider::Anthropic);
+    }
+    serde_json::from_value(body["provider"].clone()).map_err(|_| {
+        Box::new(error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "provider is anthropic or codex",
+            Some("provider".into()),
+            vec![],
+        ))
+    })
 }
 
 /// The `202` that answers a started login.

@@ -5,13 +5,38 @@
 pub mod anthropic;
 pub mod codex;
 
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use bytes::Bytes;
 use http::{HeaderMap, HeaderName};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::client::percent_encode;
 use crate::pool::quota::Observation;
 use crate::pool::{Account, Kind};
+
+/// What one call to the OAuth token endpoint asks for.
+pub enum Grant<'a> {
+    Code {
+        code: &'a str,
+        state: &'a str,
+        verifier: &'a str,
+        redirect_uri: &'a str,
+    },
+    Refresh {
+        refresh_token: &'a str,
+    },
+}
+
+/// One token-endpoint call as its provider's client sends it.
+pub struct TokenRequest {
+    pub path: &'static str,
+    pub content_type: &'static str,
+    pub accept: &'static str,
+    pub user_agent: Option<&'static str>,
+    pub body: String,
+}
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -127,6 +152,74 @@ impl Provider {
             Provider::Codex => codex::is_spend_cap_429(body),
         }
     }
+
+    /// The zero-spend usage endpoint on the API origin.
+    pub fn usage_path(self) -> &'static str {
+        match self {
+            Provider::Anthropic => anthropic::USAGE_PATH,
+            Provider::Codex => codex::USAGE_PATH,
+        }
+    }
+
+    pub fn token_origin(self) -> &'static str {
+        match self {
+            Provider::Anthropic => anthropic::TOKEN_ORIGIN,
+            Provider::Codex => codex::TOKEN_ORIGIN,
+        }
+    }
+
+    pub fn token_request(self, grant: Grant<'_>) -> TokenRequest {
+        match self {
+            Provider::Anthropic => anthropic::token_request(grant),
+            Provider::Codex => codex::token_request(grant),
+        }
+    }
+
+    /// The reason a rejected refresh's body names, when it names a known one.
+    pub fn refresh_failure_code(self, body: &[u8]) -> Option<&'static str> {
+        match self {
+            Provider::Anthropic => None,
+            Provider::Codex => codex::refresh_failure_code(body),
+        }
+    }
+
+    pub fn authorization_url(self, challenge: &str, redirect_uri: &str, state: &str) -> String {
+        match self {
+            Provider::Anthropic => anthropic::authorization_url(challenge, redirect_uri, state),
+            Provider::Codex => codex::authorization_url(challenge, redirect_uri, state),
+        }
+    }
+
+    /// The one loopback port the OAuth client allows; `None` allows any.
+    pub fn callback_port(self) -> Option<u16> {
+        match self {
+            Provider::Anthropic => None,
+            Provider::Codex => Some(codex::CALLBACK_PORT),
+        }
+    }
+
+    pub fn redirect_uri(self, port: u16) -> String {
+        match self {
+            Provider::Anthropic => anthropic::redirect_uri(port),
+            Provider::Codex => codex::redirect_uri(port),
+        }
+    }
+}
+
+/// `key=value&…` with both sides percent-encoded: a query or a form body.
+pub(crate) fn form(pairs: &[(&str, &str)]) -> String {
+    pairs
+        .iter()
+        .map(|(key, value)| format!("{}={}", percent_encode(key), percent_encode(value)))
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
+/// A JWT's claims, unverified: the token came from the token endpoint over TLS.
+pub(crate) fn jwt_claims(token: &str) -> Option<Value> {
+    let payload = token.split('.').nth(1)?;
+    let bytes = URL_SAFE_NO_PAD.decode(payload.trim_end_matches('=')).ok()?;
+    serde_json::from_slice(&bytes).ok()
 }
 
 #[cfg(test)]

@@ -15,7 +15,7 @@ use crate::provider::Provider;
 use crate::server::Server;
 
 use super::refresh::{self, Outcome as RefreshOutcome, Trigger as RefreshTrigger};
-use super::{Credential, Kind, Secret};
+use super::{Account, Credential, Kind};
 
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -345,18 +345,18 @@ async fn fetch_usage(
     server: &Server,
     handle: Uuid,
 ) -> Result<(Provider, serde_json::Value), UsageFailure> {
-    let (provider, token) = access_token(server, handle).map_err(UsageFailure::Failed)?;
-    let usage = server.upstream.fetch_usage(token.expose()).await?;
-    Ok((provider, usage))
+    let account = oauth_account(server, handle).map_err(UsageFailure::Failed)?;
+    let usage = server.upstream.fetch_usage(&account).await?;
+    Ok((account.provider, usage))
 }
 
-fn access_token(server: &Server, handle: Uuid) -> Result<(Provider, Secret), String> {
+fn oauth_account(server: &Server, handle: Uuid) -> Result<Account, String> {
     let pool = server.pool.lock().expect("pool lock");
     let account = pool
         .get(handle)
         .ok_or_else(|| "account left the pool before probing".to_string())?;
     match &account.credential {
-        Credential::OAuth(family) => Ok((account.provider, family.access_token.clone())),
+        Credential::OAuth(_) => Ok(account.clone()),
         Credential::ApiKey(_) => Err("usage probing does not apply to API-key accounts".into()),
     }
 }
