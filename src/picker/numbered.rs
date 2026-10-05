@@ -1,8 +1,10 @@
-//! The numbered picker — numbered rows, the first automatic row is 1, one
-//! line read from the controlling terminal per attempt. An unselectable or
-//! out-of-range entry is refused with a message and the prompt repeats; the
+//! The numbered picker — the rows that can be chosen numbered, the first
+//! automatic row is 1, one line read from the controlling terminal per
+//! attempt. An out-of-range entry is refused with a message and the prompt
+//! repeats; the
 //! cancel word or end of input cancels, and a closed input never selects.
 
+use super::render::Table;
 use super::{CANCELLED, Choice, Line, PickError};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
@@ -73,10 +75,10 @@ pub(super) fn pick(lines: &[Line]) -> Result<(usize, Choice), PickError> {
     let terminal = super::tty::open().map_err(|_| PickError::NoTerminal)?;
     let mut input = BufReader::new(terminal.input);
     let mut output = terminal.output;
-    let charset = super::render::charset();
-    let width = super::render::name_width();
-    let labels = super::render::labels(lines, width, charset);
-    let last = lines.len();
+    let choices: Vec<(usize, Choice)> = lines.iter().filter_map(Line::choice).collect();
+    let last = choices.len();
+    let digits = last.to_string().len();
+    let table = Table::for_terminal(lines, digits + 4);
     let prompt = format!("Enter a number (1-{last}), or q to cancel: ");
 
     let prompt_once = |output: &mut File| -> Result<(), PickError> {
@@ -91,8 +93,21 @@ pub(super) fn pick(lines: &[Line]) -> Result<(usize, Choice), PickError> {
         .map_err(|_| PickError::Io("the interrupt watcher ended".into()))?;
 
     writeln!(output, "Choose the account for this session:").map_err(io)?;
-    for (n, (line, label)) in lines.iter().zip(&labels).enumerate() {
-        writeln!(output, "  {}{}) {label}", line.indent(), n + 1).map_err(io)?;
+    let blank = " ".repeat(digits + 1);
+    writeln!(output, "  {blank} {}", table.header()).map_err(io)?;
+    let mut number = 0;
+    for line in lines {
+        let label = if line.choice().is_some() {
+            number += 1;
+            format!("{number:>digits$})")
+        } else {
+            blank.clone()
+        };
+        let text = format!("  {}{label} {}", line.indent(), table.line(line, false));
+        writeln!(output, "{}", text.trim_end()).map_err(io)?;
+    }
+    if let Some(legend) = table.legend() {
+        writeln!(output, "{legend}").map_err(io)?;
     }
     prompt_once(&mut output)?;
 
@@ -107,22 +122,13 @@ pub(super) fn pick(lines: &[Line]) -> Result<(usize, Choice), PickError> {
         if answer.eq_ignore_ascii_case("q") || answer.eq_ignore_ascii_case("quit") {
             return Err(PickError::Cancelled);
         }
-        if let Some(line) = answer
+        if let Some(choice) = answer
             .parse::<usize>()
             .ok()
             .filter(|&n| (1..=last).contains(&n))
-            .map(|n| &lines[n - 1])
+            .map(|n| choices[n - 1].clone())
         {
-            if let Some(choice) = line.choice() {
-                return Ok(choice);
-            }
-            // Only an account row can be unselectable.
-            if let Some(row) = line.row {
-                let name = super::render::sanitize(&row.display_name, width, charset);
-                writeln!(output, "{name} cannot be chosen now; choose another.").map_err(io)?;
-            }
-            prompt_once(&mut output)?;
-            continue;
+            return Ok(choice);
         }
         writeln!(output, "Enter a number from 1 to {last}, or q to cancel.").map_err(io)?;
         prompt_once(&mut output)?;

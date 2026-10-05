@@ -17,14 +17,16 @@ pub mod numbered;
 pub mod render;
 pub mod tty;
 
+use crate::client::Window;
+
 /// One catalogue entry as the picker shows it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Row {
     pub handle: String,
     pub display_name: String,
     pub selectable: bool,
-    pub five_hour: Option<f64>,
-    pub weekly: Option<f64>,
+    pub five_hour: Window,
+    pub weekly: Window,
 }
 
 /// Rows after their own automatic row; a heading names that row and

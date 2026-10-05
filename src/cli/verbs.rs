@@ -16,109 +16,24 @@ use super::args::{
 };
 use super::control::Control;
 use super::{Failure, Outcome, colour_wanted};
+use crate::picker::render::{BAR_WIDTH, Charset, Paint, linear_usage};
 
-/// The bar's width, in cells, as the first release drew it.
-const BAR_WIDTH: usize = 18;
-const LINEAR_LEGEND: &str = "  ┃ = elapsed share of the reset period";
-
-/// One cell's colour on the bar's green→yellow→red gradient.
-fn gradient(index: usize) -> (u8, u8, u8) {
-    let t = index as f64 / (BAR_WIDTH - 1) as f64;
-    let (from, to, p) = if t < 0.5 {
-        ((35, 209, 96), (245, 185, 40), t * 2.0)
-    } else {
-        ((245, 185, 40), (239, 68, 68), (t - 0.5) * 2.0)
-    };
-    let mix = |a: u8, b: u8| (a as f64 + (b as f64 - a as f64) * p).round() as u8;
-    (mix(from.0, to.0), mix(from.1, to.1), mix(from.2, to.2))
-}
-
-/// The colour decisions for one rendering: bold, dim and the bar
-/// gradient on a terminal, the same characters plain otherwise.
-struct Paint {
-    colour: bool,
-}
-
-impl Paint {
-    fn wrap(&self, code: &str, text: &str) -> String {
-        if self.colour {
-            format!("\x1b[{code}m{text}\x1b[0m")
-        } else {
-            text.to_owned()
-        }
-    }
-    fn bold(&self, text: &str) -> String {
-        self.wrap("1", text)
-    }
-    fn dim(&self, text: &str) -> String {
-        self.wrap("2", text)
-    }
-    /// A diagnostic line's label, dim and padded to the value column.
-    fn label(&self, text: &str) -> String {
-        self.dim(&format!("{text:<9}"))
-    }
-    fn gray(&self, text: &str) -> String {
-        self.wrap("90", text)
-    }
-    fn green(&self, text: &str) -> String {
-        self.wrap("32", text)
-    }
-    fn yellow(&self, text: &str) -> String {
-        self.wrap("33", text)
-    }
-    fn red(&self, text: &str) -> String {
-        self.wrap("31", text)
-    }
-    fn rgb(&self, (r, g, b): (u8, u8, u8), text: &str) -> String {
-        if self.colour {
-            format!("\x1b[38;2;{r};{g};{b}m{text}\x1b[0m")
-        } else {
-            text.to_owned()
-        }
-    }
-}
-
-/// The utilisation bar: `█` to the fill on the gradient, `░` beyond,
-/// `?`s when usage is unknown, with a cyan marker for linear usage pace.
-fn usage_bar(ratio: Option<f64>, linear: Option<f64>, paint: &Paint) -> String {
-    let fill = (ratio.unwrap_or(0.0).clamp(0.0, 1.0) * BAR_WIDTH as f64).round() as usize;
-    let marker = linear.map(|linear| (linear * (BAR_WIDTH - 1) as f64).round() as usize);
-    let mut bar = String::new();
-    for index in 0..BAR_WIDTH {
-        if marker == Some(index) {
-            bar.push_str(&paint.wrap("1;36", "┃"));
-        } else if ratio.is_none() {
-            bar.push_str(&paint.gray("?"));
-        } else if index < fill {
-            bar.push_str(&paint.rgb(gradient(index), "█"));
-        } else {
-            bar.push_str(&paint.gray("░"));
-        }
-    }
-    format!("[{bar}]")
-}
-
-fn linear_usage(name: &str, reset: &Value, now: OffsetDateTime) -> Option<f64> {
-    let period = match name {
-        "session" | "five_hour" => time::Duration::hours(5),
-        "weekly" => time::Duration::days(7),
-        name if name.starts_with("weekly:") => time::Duration::days(7),
-        _ => return None,
-    };
-    let reset = OffsetDateTime::parse(
-        reset.as_str()?,
+/// An RFC 3339 member as an instant.
+fn instant(value: &Value) -> Option<OffsetDateTime> {
+    OffsetDateTime::parse(
+        value.as_str()?,
         &time::format_description::well_known::Rfc3339,
     )
-    .ok()?;
-    let remaining = reset - now;
-    (remaining > time::Duration::ZERO && remaining <= period)
-        .then(|| 1.0 - remaining.as_seconds_f64() / period.as_seconds_f64())
+    .ok()
 }
 
 pub(super) fn rate_limits_table(accounts: &[Value], colour: bool) -> String {
-    use crate::picker::render::{Charset, sanitize};
+    use crate::picker::render::sanitize;
 
-    let paint = Paint { colour };
+    let paint = Paint {
+        colour,
+        charset: Charset::Unicode,
+    };
     let now = OffsetDateTime::now_utc();
     if accounts.is_empty() {
         return format!("{}  (none)", paint.bold("accounts"));
@@ -167,9 +82,7 @@ pub(super) fn rate_limits_table(accounts: &[Value], colour: bool) -> String {
             (&bucket["utilisation"], &bucket["reset"])
         };
         let ratio = value.as_f64().filter(|ratio| ratio.is_finite());
-        let linear = linear_usage(name, reset, now);
-        let percentage = ratio.map_or_else(|| "?".to_owned(), |r| format!("{:.0}%", r * 100.0));
-        format!("{} {percentage:>4}", usage_bar(ratio, linear, &paint))
+        paint.usage(ratio, linear_usage(name, instant(reset), now), BAR_WIDTH)
     };
     for (account, name) in accounts.iter().zip(names) {
         out.push_str(&format!(
@@ -180,7 +93,7 @@ pub(super) fn rate_limits_table(accounts: &[Value], colour: bool) -> String {
         ));
     }
     out.push('\n');
-    out.push_str(&paint.dim(LINEAR_LEGEND));
+    out.push_str(&paint.legend());
     out
 }
 
@@ -246,6 +159,7 @@ fn render_status(body: &Value, cli: &Cli, args: &StatusArgs) -> String {
     let s = &body["status"];
     let paint = Paint {
         colour: colour_wanted(cli),
+        charset: Charset::Unicode,
     };
     let now = OffsetDateTime::now_utc();
     let default_handles = default_handles(s);
@@ -436,7 +350,7 @@ fn accounts_into(
     for account in accounts {
         account_block(account, default_handles, paint, verbose, now, out);
     }
-    out.push_str(&paint.dim(LINEAR_LEGEND));
+    out.push_str(&paint.legend());
     out.push('\n');
 }
 
@@ -562,18 +476,18 @@ fn bucket_line(b: &Value, paint: &Paint, now: OffsetDateTime, out: &mut String) 
         _ => None,
     };
     let ratio = utilisation.or(counter);
-    let linear = linear_usage(name, &b["reset"], now);
+    let linear = linear_usage(name, instant(&b["reset"]), now);
     if b["state"].as_str() == Some("unknown") && ratio.is_none() {
         out.push_str(&format!(
             "  {label} {} {}\n",
-            usage_bar(None, linear, paint),
+            paint.bar(None, linear, BAR_WIDTH),
             paint.gray("unknown")
         ));
         return;
     }
     let mut line = format!(
         "  {label} {} {}",
-        usage_bar(ratio, linear, paint),
+        paint.bar(ratio, linear, BAR_WIDTH),
         ratio.map_or_else(|| "?".to_owned(), |r| format!("{:.0}%", r * 100.0))
     );
     if b["state"].as_str() == Some("exhausted") {
@@ -1985,53 +1899,5 @@ mod tests {
             rate_limits_table(&[operator], false),
             rate_limits_table(&[client], false)
         );
-    }
-
-    #[test]
-    fn linear_pace_follows_each_reset_period() {
-        let now = time::macros::datetime!(2026-10-05 12:00 UTC);
-        let reset = |at| json!(crate::timestamp::rfc3339(at));
-        for (name, period) in [
-            ("session", time::Duration::hours(5)),
-            ("five_hour", time::Duration::hours(5)),
-            ("weekly", time::Duration::days(7)),
-            ("weekly:sonnet", time::Duration::days(7)),
-        ] {
-            assert_eq!(linear_usage(name, &reset(now + period), now), Some(0.0));
-            assert_eq!(linear_usage(name, &reset(now + period / 2), now), Some(0.5));
-            assert_eq!(
-                linear_usage(name, &reset(now + period * 3 / 4), now),
-                Some(0.25)
-            );
-            let last_second =
-                linear_usage(name, &reset(now + time::Duration::seconds(1)), now).unwrap();
-            assert!((0.99..1.0).contains(&last_second));
-            for at in [now - period, now, now + period + time::Duration::seconds(1)] {
-                assert_eq!(linear_usage(name, &reset(at), now), None);
-            }
-            for missing in [Value::Null, json!("invalid timestamp")] {
-                assert_eq!(linear_usage(name, &missing, now), None);
-            }
-        }
-        assert_eq!(
-            linear_usage("tokens", &reset(now + time::Duration::hours(1)), now),
-            None
-        );
-
-        let paint = Paint { colour: false };
-        assert_eq!(
-            usage_bar(Some(0.25), Some(0.5), &paint),
-            "[█████░░░░┃░░░░░░░░]"
-        );
-        assert_eq!(usage_bar(Some(0.25), None, &paint), "[█████░░░░░░░░░░░░░]");
-        assert_eq!(usage_bar(None, None, &paint), "[??????????????????]");
-        for (pace, position) in [(0.0, 1), (0.5, 10), (1.0, 18)] {
-            let bar = usage_bar(Some(0.25), Some(pace), &paint);
-            assert_eq!(bar.chars().count(), BAR_WIDTH + 2);
-            assert_eq!(
-                bar.chars().position(|character| character == '┃'),
-                Some(position)
-            );
-        }
     }
 }

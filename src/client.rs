@@ -13,6 +13,8 @@ use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::HttpConnector;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 use toml::Table;
 
 use crate::config::platform;
@@ -504,9 +506,28 @@ pub struct CatalogueEntry {
     pub handle: String,
     pub display_name: String,
     pub selectable: bool,
-    pub five_hour: Option<f64>,
-    pub weekly: Option<f64>,
+    pub five_hour: Window,
+    pub weekly: Window,
     pub provider: Provider,
+}
+
+/// One rate-limit window: how much of it is used, and when it resets.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Window {
+    pub used: Option<f64>,
+    pub reset: Option<OffsetDateTime>,
+}
+
+impl Window {
+    /// The `name` window of a `rate_limits` member.
+    fn from_value(limits: &Value, name: &str) -> Self {
+        Self {
+            used: limits[name].as_f64(),
+            reset: limits[format!("{name}_reset_at")]
+                .as_str()
+                .and_then(|at| OffsetDateTime::parse(at, &Rfc3339).ok()),
+        }
+    }
 }
 
 impl CatalogueEntry {
@@ -521,8 +542,8 @@ impl CatalogueEntry {
             handle: value["handle"].as_str()?.to_string(),
             display_name: value["display_name"].as_str()?.to_string(),
             selectable: value["selectable"].as_bool()?,
-            five_hour: value["rate_limits"]["five_hour"].as_f64(),
-            weekly: value["rate_limits"]["weekly"].as_f64(),
+            five_hour: Window::from_value(&value["rate_limits"], "five_hour"),
+            weekly: Window::from_value(&value["rate_limits"], "weekly"),
             provider,
         })
     }

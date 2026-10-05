@@ -124,8 +124,8 @@ mod tests {
             handle: handle.into(),
             display_name: handle.into(),
             selectable: true,
-            five_hour: None,
-            weekly: None,
+            five_hour: Default::default(),
+            weekly: Default::default(),
             provider,
         }
     }
