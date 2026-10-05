@@ -79,7 +79,7 @@ pub(super) static DOCS: &[VerbDoc] = &[
         [4, 6, 7, 11, 14],
         [
             "eval \"$(jaynshare env)\"",
-            "eval \"$(jaynshare env --provider codex)\"",
+            "eval \"$(jaynshare env --provider codex)\"; codex --no-daemon",
             "jaynshare env --shell fish --show"
         ]
     ),

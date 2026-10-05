@@ -802,7 +802,7 @@ async fn direct_removes_every_pool_variable() {
 
 /// `codex` is the same launch with Codex's variables: its CA variable at
 /// `ca.pem`, its own upstream and API keys removed, and no deadline variable
-/// (Codex has none). A refusal names `jaynshare codex --direct`, which runs
+/// (Codex has none). A pooled launch puts `--no-daemon` first. A refusal names `jaynshare codex --direct`, which runs
 /// Codex outside the pool, and no `codex` is exit 13.
 #[tokio::test(flavor = "multi_thread")]
 async fn codex_launches_with_its_own_variables() {
@@ -826,7 +826,11 @@ async fn codex_launches_with_its_own_variables() {
         machine.jaynshare(&["codex", "--auto", "--", "exec", "hello"], &stale, None);
     assert_eq!(code, 0, "the fake exits 0: {stderr}");
     let seen = machine.claude_ran().expect("Codex was launched");
-    assert_eq!(seen.argv, ["exec", "hello"]);
+    assert_eq!(
+        seen.argv,
+        ["--no-daemon", "exec", "hello"],
+        "Codex's shared server never takes a pooled turn"
+    );
     assert_eq!(seen.env.get("CODEX_CA_CERTIFICATE"), Some(&ca));
     let proxy = seen.env.get("HTTPS_PROXY").expect("the proxy URL");
     assert!(
@@ -859,6 +863,11 @@ async fn codex_launches_with_its_own_variables() {
         "{stderr}"
     );
     let seen = machine.claude_ran().expect("Codex was launched");
+    assert!(
+        seen.argv.is_empty(),
+        "--direct is plain Codex: {:?}",
+        seen.argv
+    );
     for &(name, _) in stale.iter().take(6) {
         assert!(!seen.env.contains_key(name), "{name} reached Codex");
     }

@@ -28,6 +28,7 @@ pub const TOOL: Tool = Tool {
         "ANTHROPIC_API_KEY",
         "ANTHROPIC_CUSTOM_HEADERS",
     ],
+    pooled_args: &[],
     deadline: Some(Deadline {
         variable: "API_TIMEOUT_MS",
         default_ms: 600_000,

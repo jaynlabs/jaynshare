@@ -53,6 +53,8 @@ pub struct Tool {
     pub ca_variable: &'static str,
     /// Its own upstream and credential, removed from every launch.
     pub upstream_variables: &'static [&'static str],
+    /// Put before the caller's arguments in a pooled launch.
+    pub pooled_args: &'static [&'static str],
     pub deadline: Option<Deadline>,
 }
 

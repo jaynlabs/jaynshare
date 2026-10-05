@@ -70,11 +70,12 @@ impl Refusal {
     }
 }
 
-/// A launch ready to happen: the child's environment, and for a launch the
-/// tool's executable found on the search path.
+/// A launch ready to happen: the child's environment and arguments, and for
+/// a launch the tool's executable found on the search path.
 pub struct Prepared {
     pub plan: EnvPlan,
     pub executable: Option<PathBuf>,
+    pub args: Vec<OsString>,
     /// Lines for standard error before the launch: the unselectable-account
     /// warning, the "the pool is not in use" notice.
     pub notices: Vec<String>,
@@ -84,13 +85,12 @@ pub struct Prepared {
 /// on a refusal, or — where the platform cannot replace a process — with
 /// the tool's own exit code.
 pub fn run(request: Request) -> Result<i32, Refusal> {
-    let args = request.args.clone();
     let prepared = prepare(request, true)?;
     for notice in &prepared.notices {
         eprintln!("{notice}");
     }
     let executable = prepared.executable.expect("run looks the tool up");
-    exec::exec(&executable, &args, &prepared.plan)
+    exec::exec(&executable, &prepared.args, &prepared.plan)
 }
 
 /// The shared half of `claude`, `codex`, bare `jaynshare` and `env`: every
@@ -124,6 +124,7 @@ pub fn prepare(request: Request, launch: bool) -> Result<Prepared, Refusal> {
         return Ok(Prepared {
             plan,
             executable: executable(tool, launch)?,
+            args: request.args,
             notices,
         });
     }
@@ -218,9 +219,16 @@ pub fn prepare(request: Request, launch: bool) -> Result<Prepared, Refusal> {
     } else {
         plan.unset(crate::statusline::ACTIVE_ENV);
     }
+    let args = tool
+        .pooled_args
+        .iter()
+        .map(OsString::from)
+        .chain(request.args)
+        .collect();
     Ok(Prepared {
         plan,
         executable,
+        args,
         notices,
     })
 }

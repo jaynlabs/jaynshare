@@ -20,6 +20,9 @@ pub const TOOL: Tool = Tool {
     account: "ChatGPT account",
     ca_variable: "CODEX_CA_CERTIFICATE",
     upstream_variables: &["OPENAI_API_KEY", "CODEX_API_KEY", "OPENAI_BASE_URL"],
+    // Its shared background server keeps the environment of whichever
+    // `codex` started it, so a turn handed to it would bypass the pool.
+    pooled_args: &["--no-daemon"],
     deadline: None,
 };
 pub const SESSION_ID: HeaderName = HeaderName::from_static("session-id");
