@@ -2493,8 +2493,8 @@ async fn a_stalled_client_pauses_and_a_gone_client_cancels() {
 }
 
 /// The base-URL TLS listener serves the same exchange over
-/// HTTP/1.1 and HTTP/2: status, non-framing headers, body and audit facts are
-/// identical.
+/// HTTP/1.1 and HTTP/2: status, headers but framing and date, body and audit
+/// facts are identical.
 #[tokio::test(flavor = "multi_thread")]
 async fn tls_listener_agrees_over_http_1_and_http_2() {
     let _leak_sweep = crate::leaks::LeakGuard::default();
@@ -2526,8 +2526,8 @@ async fn tls_listener_agrees_over_http_1_and_http_2() {
     assert_eq!(http1.status, http2.status, "{}", http2.text());
     assert_eq!(http1.body(), http2.body());
     assert_eq!(
-        non_framing_headers(&http1.headers),
-        non_framing_headers(&http2.headers)
+        stable_headers(&http1.headers),
+        stable_headers(&http2.headers)
     );
 
     let mut records = instance.audit_settled(2);
@@ -2537,10 +2537,10 @@ async fn tls_listener_agrees_over_http_1_and_http_2() {
     );
 }
 
-fn non_framing_headers(headers: &HeaderMap) -> Vec<(String, String)> {
+fn stable_headers(headers: &HeaderMap) -> Vec<(String, String)> {
     let mut values: Vec<_> = headers
         .iter()
-        .filter(|(name, _)| !matches!(name.as_str(), "connection" | "transfer-encoding"))
+        .filter(|(name, _)| !matches!(name.as_str(), "connection" | "transfer-encoding" | "date"))
         .map(|(name, value)| {
             (
                 name.to_string(),
