@@ -2,7 +2,7 @@
 //! speaks to it under a ChatGPT login.
 
 use http::header::AUTHORIZATION;
-use http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
+use http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
 use serde_json::{Value, json};
 use time::OffsetDateTime;
 
@@ -44,8 +44,12 @@ pub fn is_telemetry(path: &str) -> bool {
 }
 
 /// Everything outside Codex's own paths, and any path a dot segment or an
-/// escape could move out of them upstream.
-pub fn is_account_bound(path: &str) -> bool {
+/// escape could move out of them upstream. Reading the usage is the one
+/// exception: Codex's limits display shows nothing else.
+pub fn is_account_bound(method: &Method, path: &str) -> bool {
+    if method == Method::GET && path == USAGE_PATH {
+        return false;
+    }
     !path.starts_with(CODEX_PREFIX) || path.contains("..") || path.contains('%')
 }
 
@@ -506,18 +510,22 @@ mod tests {
     }
 
     #[test]
-    fn only_codex_s_own_paths_are_pooled_and_its_analytics_are_telemetry() {
+    fn only_codex_s_own_paths_and_the_usage_read_are_pooled_and_its_analytics_are_telemetry() {
         for pooled in ["/backend-api/codex/responses", "/backend-api/codex/models"] {
-            assert!(!is_account_bound(pooled), "{pooled}");
+            assert!(!is_account_bound(&Method::POST, pooled), "{pooled}");
         }
+        assert!(!is_account_bound(&Method::GET, USAGE_PATH));
+        assert!(is_account_bound(&Method::POST, USAGE_PATH));
         for bound in [
             "/backend-api/wham/settings/user",
+            "/backend-api/wham/usage/credit-usage-events",
+            "/backend-api/wham/rate-limit-reset-credits",
             "/backend-api/ps/mcp",
             "/backend-api/codex",
             "/backend-api/codex/../wham/usage",
             "/backend-api/codex/%2e%2e/wham/usage",
         ] {
-            assert!(is_account_bound(bound), "{bound}");
+            assert!(is_account_bound(&Method::GET, bound), "{bound}");
         }
         assert!(is_telemetry("/backend-api/codex/analytics-events/events"));
         assert!(is_telemetry(TELEMETRY_PATH));

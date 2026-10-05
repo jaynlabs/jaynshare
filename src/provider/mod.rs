@@ -8,7 +8,7 @@ pub mod codex;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use bytes::Bytes;
-use http::{HeaderMap, HeaderName, StatusCode};
+use http::{HeaderMap, HeaderName, Method, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -143,10 +143,10 @@ impl Provider {
     }
 
     /// A path answering for one account, never served through the pool.
-    pub fn is_account_bound(self, path: &str) -> bool {
+    pub fn is_account_bound(self, method: &Method, path: &str) -> bool {
         match self {
             Provider::Anthropic => anthropic::is_account_bound(path),
-            Provider::Codex => codex::is_account_bound(path),
+            Provider::Codex => codex::is_account_bound(method, path),
         }
     }
 

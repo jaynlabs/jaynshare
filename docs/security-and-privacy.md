@@ -44,8 +44,8 @@ systemd unit. See
 | Network peer without a Jaynshare credential | Is refused by the proxy and the control surface. Network exposure should still be restricted with network policy and host firewall rules. |
 
 An enrolled client's status read is an explicit allow-list. It exposes each
-account's display name and its five-hour and weekly utilisation, how many
-accounts are configured and selectable, how many sessions are known and
+account's display name, its five-hour and weekly utilisation and its count of
+active sessions, how many accounts are configured and selectable, how many sessions are known and
 active, the server version and identity pin, the CA fingerprint and that of a
 staged next CA, the version and digests of the client the server offers,
 whether wire capture is on, and, for the client's own session, the account
@@ -157,8 +157,9 @@ the engineer runs `jaynshare trust-ca add`, which always asks first. The server
 terminates TLS only for `api.anthropic.com`, `chatgpt.com` and its own
 credential-free probe host; any other `CONNECT` target is relayed as an opaque
 tunnel, and a target that points back at the server itself is refused. On
-`chatgpt.com`, only Codex's own paths are forwarded with a pooled account; the
-server refuses the rest of the ChatGPT account, or answers it itself.
+`chatgpt.com`, only Codex's own paths and the read of the account's usage are
+forwarded with a pooled account; the server refuses the rest of the ChatGPT
+account, or answers it itself.
 
 That narrow scope limits the effect of trusting the CA. It does not stop a
 malicious server from changing traffic for the intercepted hosts. Releases and

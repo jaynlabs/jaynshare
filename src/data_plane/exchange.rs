@@ -312,7 +312,7 @@ pub async fn run(
     // An account-bound path is refused before any selection,
     // so no pooled credential answers for it and no family 401 errors an
     // account.
-    if provider.is_account_bound(&path) {
+    if provider.is_account_bound(&parts.method, &path) {
         return Ok(exchange.proxy_error(
             StatusCode::FORBIDDEN,
             format!(

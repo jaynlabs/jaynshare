@@ -17,6 +17,7 @@ use crate::proxy::{Intercepted, Offer, ca_file, intercept};
 
 const API_HOST: &str = "chatgpt.com";
 const ACCOUNTS_CHECK_PATH: &str = "/backend-api/wham/accounts/check";
+const USAGE_PATH: &str = "/backend-api/wham/usage";
 /// The workspace of the pooled login, and the engineer's own.
 const POOLED_ACCOUNT_ID: &str = "acct-fixture-pooled";
 const ENGINEER_ACCOUNT_ID: &str = "acct-fixture-engineer";
@@ -234,6 +235,54 @@ async fn what_codex_sends_beside_its_turns_never_reaches_the_pool() {
     assert!(bound.get("type").is_none(), "Codex's envelope: {bound}");
 
     assert_eq!(codex_calls(&instance), 0, "nothing reached chatgpt.com");
+}
+
+/// Codex fills its limits display from the usage read alone, so the read
+/// rides the pooled login; any other method on that path stays refused.
+#[tokio::test(flavor = "multi_thread")]
+async fn codex_s_usage_read_rides_the_pooled_login() {
+    let _leak_sweep = crate::leaks::LeakGuard::default();
+    let instance = start_with_codex("codex-usage-read", Setup::default()).await;
+    let mut tunnel = codex_tunnel(&instance, &ca_file(&instance))
+        .await
+        .expect("the handshake succeeds");
+
+    let read = tunnel
+        .send(codex_request(Method::GET, USAGE_PATH, Bytes::new()))
+        .await;
+    assert_eq!(read.status, 200, "{}", read.text());
+    let reads: Vec<_> = instance
+        .upstream
+        .seen()
+        .into_iter()
+        .filter(|seen| seen.path == USAGE_PATH)
+        .collect();
+    let [seen] = &reads[..] else {
+        panic!("one usage read upstream: {reads:?}");
+    };
+    assert_eq!(
+        seen.headers_named("authorization"),
+        [format!("Bearer {}", instance.needles.access_token)],
+        "the pooled bearer replaces the engineer's"
+    );
+    assert_eq!(
+        seen.headers_named("chatgpt-account-id"),
+        [POOLED_ACCOUNT_ID]
+    );
+
+    let write = tunnel
+        .send(codex_request(
+            Method::POST,
+            USAGE_PATH,
+            Bytes::from_static(b"{}"),
+        ))
+        .await;
+    assert_eq!(write.status, 403, "{}", write.text());
+    assert_eq!(
+        codex_calls(&instance),
+        1,
+        "only the read reached chatgpt.com"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
