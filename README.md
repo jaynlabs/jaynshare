@@ -26,18 +26,15 @@
   <a href="https://jayn.app/jaynshare">Website</a>
 </p>
 
-jaynshare is a self-hosted proxy for Claude Code and Codex (or third party
-hosted if you have trust to spare). After hosting a server, connecting several
-accounts to it and enrolling a client, replace `claude` by `jaynshare claude`
-(or `codex` by `jaynshare codex`) and you will be able to choose from which
-account to draw for your session.
-Oh, and `jaynshare` opens a picker to choose from every accounts connected to the server.
+jaynshare is a self-hosted proxy for Claude Code and Codex.
+Just replace `claude` by `jaynshare claude` (or `codex` by `jaynshare codex`)
+and you can draw from your friends' subscriptions when yours is rate limited.
+PS : It also works if you pool several accounts of your own.
 
 > [!WARNING]
-> Pooling Claude subscriptions conflicts with Anthropic's published terms and
-> can lead to suspension or termination of every account involved, without a
-> refund. Pooling ChatGPT subscriptions for Codex conflicts with OpenAI's terms
-> too. Whether a particular deployment also raises legal issues depends on
+> Pooling Claude subscriptions conflicts with Anthropic's terms and
+> can lead to suspension or termination of every account involved.
+> Same for OpenAI. Whether a particular deployment also raises legal issues depends on
 > its facts and jurisdiction; this project does not claim that it is legal or
 > authorized. Read the [subscription-sharing risk summary](is_this_safe.md), the
 > [security and privacy model](docs/security-and-privacy.md), and the
