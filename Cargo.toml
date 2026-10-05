@@ -1,6 +1,6 @@
 [package]
 name = "jaynshare"
-version = "2.2.0-rc.4"
+version = "2.2.0"
 edition = "2024"
 rust-version = "1.95"
 publish = false
