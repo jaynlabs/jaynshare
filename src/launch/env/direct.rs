@@ -1,26 +1,24 @@
 //! `--direct` removes every launch-set variable — the four
-//! proxy spellings, the no-proxy list, `ANTHROPIC_BASE_URL`,
-//! `ANTHROPIC_API_KEY`, `NODE_EXTRA_CA_CERTS`, `ANTHROPIC_CUSTOM_HEADERS` and
-//! `API_TIMEOUT_MS` — even when the shell exported them.
+//! proxy spellings, the no-proxy list, the tool's CA variable and its own
+//! upstream and credential variables, and its deadline variable — even when
+//! the shell exported them.
 
 use super::EnvPlan;
+use crate::provider::Tool;
 
-pub fn apply(plan: &mut EnvPlan) {
+pub fn apply(plan: &mut EnvPlan, tool: &Tool) {
     for name in super::PROXY_VARIABLES {
         plan.unset(name);
     }
     for name in super::NO_PROXY_VARIABLES {
         plan.unset(name);
     }
-    for name in [
-        "ANTHROPIC_BASE_URL",
-        "ANTHROPIC_API_KEY",
-        "NODE_EXTRA_CA_CERTS",
-        "ANTHROPIC_CUSTOM_HEADERS",
-        // The launcher cannot tell whose `API_TIMEOUT_MS` it is, so it
-        // goes too.
-        "API_TIMEOUT_MS",
-    ] {
+    plan.unset(tool.ca_variable);
+    for name in tool.upstream_variables {
         plan.unset(name);
+    }
+    // The launcher cannot tell whose deadline it is, so it goes too.
+    if let Some(deadline) = &tool.deadline {
+        plan.unset(deadline.variable);
     }
 }

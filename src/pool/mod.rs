@@ -22,6 +22,7 @@ use tokio::sync::Notify;
 use uuid::Uuid;
 
 use crate::config::SelectionSettings;
+use crate::provider::{Provider, anthropic};
 
 use holds::candidate_rank;
 
@@ -58,7 +59,7 @@ pub struct Pool {
     usage: HashMap<Uuid, Usage>,
     /// Sessions and their bindings; runtime only.
     sessions: Sessions,
-    /// The default's ownership and the route preferences; runtime
+    /// Each provider's default and the route preferences; runtime
     /// only, they survive a reload and not a restart.
     operator: operator::Operator,
     /// Verified organisation → its shared `spend-cap` bucket.
@@ -76,8 +77,19 @@ pub struct Pool {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Resolve {
     NotFound,
-    /// The matching display names, for the caller to qualify.
-    Ambiguous(Vec<String>),
+    /// The matching display names and their providers, for the caller to qualify.
+    Ambiguous(Vec<(String, Provider)>),
+}
+
+impl Resolve {
+    /// The matches as a message lists them, each naming its provider.
+    pub fn listed(matches: &[(String, Provider)]) -> String {
+        let named: Vec<String> = matches
+            .iter()
+            .map(|(name, provider)| format!("{name} ({})", provider.as_str()))
+            .collect();
+        named.join(", ")
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -138,8 +150,12 @@ impl Pool {
         &self.accounts
     }
 
-    pub fn default_account(&self) -> Option<Uuid> {
-        self.operator.default
+    fn accounts_of(&self, provider: Provider) -> impl Iterator<Item = &Account> {
+        self.accounts.iter().filter(move |a| a.provider == provider)
+    }
+
+    pub fn default_account(&self, provider: Provider) -> Option<Uuid> {
+        self.operator.defaults.get(&provider).map(|d| d.handle)
     }
 
     pub fn get(&self, handle: Uuid) -> Option<&Account> {
@@ -281,8 +297,8 @@ impl Pool {
         let in_flight = self.sessions.in_flight_per_account();
         let org_holds = self.organisation_holds(now);
         let snapshot = selection::Snapshot {
-            accounts: &self.accounts,
-            default: self.operator.default,
+            accounts: self.accounts_of(facts.provider).collect(),
+            default: self.default_account(facts.provider),
             route_preferences: &self.operator.route_preferences,
             active_sessions: &active,
             in_flight: &in_flight,
@@ -293,53 +309,50 @@ impl Pool {
         selection::select(facts, &snapshot, settings)
     }
 
+    /// Across every provider, as the operator's references are.
     pub fn resolve(&self, reference: &str) -> Result<&Account, Resolve> {
-        let matches: Vec<&Account> = self
-            .accounts
-            .iter()
-            .filter(|a| references(a, reference))
-            .collect();
-        match matches.as_slice() {
-            [] => Err(Resolve::NotFound),
-            [one] => Ok(one),
-            many => Err(Resolve::Ambiguous(
-                many.iter().map(|a| a.display_name.clone()).collect(),
-            )),
-        }
+        resolve_among(self.accounts.iter(), reference)
     }
 
-    /// At startup the ranking picks the default; nothing eligible → the first account.
-    pub fn choose_initial_default(
-        &mut self,
-        settings: &SelectionSettings,
-        now: OffsetDateTime,
-    ) -> Option<Uuid> {
+    /// Within one provider, as a pin and a client's catalogue are.
+    pub fn resolve_in(&self, provider: Provider, reference: &str) -> Result<&Account, Resolve> {
+        resolve_among(self.accounts_of(provider), reference)
+    }
+
+    /// At startup the ranking picks each provider's default; nothing eligible → its first account.
+    pub fn choose_initial_default(&mut self, settings: &SelectionSettings, now: OffsetDateTime) {
         let (no_preferences, no_load) = (HashMap::new(), HashMap::new());
         let (no_families, no_orgs) = (HashMap::new(), HashMap::new());
-        let snapshot = selection::Snapshot {
-            accounts: &self.accounts,
-            default: None,
-            route_preferences: &no_preferences,
-            active_sessions: &no_load,
-            in_flight: &no_load,
-            families: &no_families,
-            organisation_holds: &no_orgs,
-            now,
-        };
-        let ranked = selection::select(&selection::RequestFacts::default(), &snapshot, settings)
-            .map(|c| c.handle)
-            .ok();
-        let chosen = ranked.or_else(|| self.accounts.first().map(|a| a.handle));
-        self.move_default(chosen, now);
-        if let Some(account) = chosen.and_then(|h| self.get(h)) {
-            tracing::info!(
-                event = "default_chosen",
-                acct = %account.display_name,
-                cause = if ranked.is_some() { "ranking" } else { "first_configured" },
-                "the startup default"
-            );
+        for provider in Provider::ALL {
+            let snapshot = selection::Snapshot {
+                accounts: self.accounts_of(provider).collect(),
+                default: None,
+                route_preferences: &no_preferences,
+                active_sessions: &no_load,
+                in_flight: &no_load,
+                families: &no_families,
+                organisation_holds: &no_orgs,
+                now,
+            };
+            let facts = selection::RequestFacts {
+                provider,
+                ..Default::default()
+            };
+            let ranked = selection::select(&facts, &snapshot, settings)
+                .map(|c| c.handle)
+                .ok();
+            let chosen = ranked.or_else(|| self.accounts_of(provider).next().map(|a| a.handle));
+            self.move_default(provider, chosen, now);
+            if let Some(account) = chosen.and_then(|h| self.get(h)) {
+                tracing::info!(
+                    event = "default_chosen",
+                    acct = %account.display_name,
+                    provider = provider.as_str(),
+                    cause = if ranked.is_some() { "ranking" } else { "first_configured" },
+                    "the startup default"
+                );
+            }
         }
-        chosen
     }
 
     /// The choice for one attempt, with the default moved as the ranking
@@ -365,9 +378,10 @@ impl Pool {
                 // because this attempt's route or exclusion set passed the default over
                 // moves nothing.
                 if choice.cause == selection::Cause::Ranking
-                    && (self.operator.default.is_none() || choice.default_moved_from.is_some())
+                    && (self.default_account(facts.provider).is_none()
+                        || choice.default_moved_from.is_some())
                 {
-                    self.move_default(Some(choice.handle), now);
+                    self.move_default(facts.provider, Some(choice.handle), now);
                     // The ranking's move starts the ramp on the new
                     // default; a switch and a bind do not come through here.
                     self.start_ramp(choice.handle, &settings.ramp, now);
@@ -556,7 +570,7 @@ impl Pool {
         let Some(a) = self.get_mut(handle) else {
             return false;
         };
-        let observations = quota::observe_headers(a.kind(), headers);
+        let observations = a.provider.observe_headers(a.kind(), headers);
         if observations.is_empty() {
             return false;
         }
@@ -606,8 +620,8 @@ impl Pool {
         let Some(model) = model else { return };
         let fable = headers.iter().any(|(name, _)| {
             name.as_str()
-                .strip_prefix(crate::anthropic::RATELIMIT_UNIFIED_PREFIX)
-                .is_some_and(|rest| rest.starts_with(quota::FAMILY_FABLE_HEADER))
+                .strip_prefix(anthropic::RATELIMIT_UNIFIED_PREFIX)
+                .is_some_and(|rest| rest.starts_with(anthropic::FAMILY_FABLE_HEADER))
         });
         if fable {
             let models = self.families.entry(quota::FAMILY_FABLE.into()).or_default();
@@ -615,6 +629,22 @@ impl Pool {
                 models.push(model.to_string());
             }
         }
+    }
+}
+
+fn resolve_among<'a>(
+    accounts: impl Iterator<Item = &'a Account>,
+    reference: &str,
+) -> Result<&'a Account, Resolve> {
+    let matches: Vec<&Account> = accounts.filter(|a| references(a, reference)).collect();
+    match matches.as_slice() {
+        [] => Err(Resolve::NotFound),
+        [one] => Ok(one),
+        many => Err(Resolve::Ambiguous(
+            many.iter()
+                .map(|a| (a.display_name.clone(), a.provider))
+                .collect(),
+        )),
     }
 }
 
@@ -647,12 +677,14 @@ mod tests {
 
     fn oauth(email: &str, org: Option<&str>, account_uuid: Uuid) -> Account {
         Account::new(
+            crate::provider::Provider::Anthropic,
             String::new(),
             Profile {
                 email: Some(email.into()),
                 account_uuid: Some(account_uuid),
                 organization_uuid: None,
                 organization_name: org.map(String::from),
+                chatgpt_account_id: None,
             },
             Source::PortableJson,
             Credential::OAuth(account::OAuthCredential {
@@ -785,6 +817,75 @@ mod tests {
             .expect("the no-refresh-material branch matches a family with none");
     }
 
+    /// Alice's Claude and Codex logins: each provider ranks, defaults and
+    /// resolves among its own accounts only.
+    #[test]
+    fn a_mixed_pool_selects_and_resolves_per_provider() {
+        let now = datetime!(2026-09-17 00:00 UTC);
+        let claude_account = Account {
+            display_name: "a@x.io".into(),
+            ..oauth("a@x.io", None, Uuid::new_v4())
+        };
+        let codex_account = Account {
+            provider: Provider::Codex,
+            display_name: "C".into(),
+            ..oauth("a@x.io", None, Uuid::new_v4())
+        };
+        let (claude, codex) = (claude_account.handle, codex_account.handle);
+        let mut pool = Pool::from_accounts(vec![claude_account, codex_account], now);
+        let config = crate::config::parse(b"version = 1\n", std::path::Path::new("/")).unwrap();
+        let settings = config.selection;
+        pool.choose_initial_default(&settings, now);
+        assert_eq!(pool.default_account(Provider::Anthropic), Some(claude));
+        assert_eq!(pool.default_account(Provider::Codex), Some(codex));
+
+        assert_eq!(
+            pool.resolve_in(Provider::Codex, "a@x.io").unwrap().handle,
+            codex
+        );
+        assert_eq!(
+            pool.resolve_in(Provider::Anthropic, "c"),
+            Err(Resolve::NotFound)
+        );
+        let Err(Resolve::Ambiguous(names)) = pool.resolve("a@x.io") else {
+            panic!("the operator's reference spans providers");
+        };
+        assert_eq!(Resolve::listed(&names), "a@x.io (anthropic), C (codex)");
+
+        let select = |pool: &mut Pool, provider| {
+            let facts = selection::RequestFacts {
+                provider,
+                ..Default::default()
+            };
+            pool.select(&facts, None, &config.quota, &settings, now)
+        };
+        assert_eq!(select(&mut pool, Provider::Codex).unwrap().handle, codex);
+        assert_eq!(
+            select(&mut pool, Provider::Anthropic).unwrap().handle,
+            claude
+        );
+        // A disabled Codex login never falls over to the Claude one.
+        pool.set_enabled(codex, false).unwrap();
+        assert_eq!(
+            select(&mut pool, Provider::Codex).unwrap_err().reason,
+            selection::NoService::AllDisabledOrErrored
+        );
+        pool.remove(codex);
+        assert_eq!(
+            select(&mut pool, Provider::Codex).unwrap_err().reason,
+            selection::NoService::NoAccountConfigured
+        );
+        assert_eq!(pool.default_account(Provider::Anthropic), Some(claude));
+
+        // A Codex login never replaces a Claude credential in place.
+        let lookalike = Account {
+            provider: Provider::Codex,
+            profile: pool.get(claude).unwrap().profile.clone(),
+            ..oauth("a@x.io", None, Uuid::new_v4())
+        };
+        assert_ne!(pool.add(lookalike, Some("C2".into())), Ok(claude));
+    }
+
     #[test]
     fn references_resolve_every_form_and_report_ambiguity() {
         let mut pool = Pool::default();
@@ -803,8 +904,8 @@ mod tests {
         assert_eq!(
             pool.resolve("a@x.io"),
             Err(Resolve::Ambiguous(vec![
-                "a@x.io (One)".into(),
-                "a@x.io (Two)".into()
+                ("a@x.io (One)".into(), Provider::Anthropic),
+                ("a@x.io (Two)".into(), Provider::Anthropic)
             ]))
         );
         // The first holder's derived name collides under folding.

@@ -1,10 +1,11 @@
-//! `claude`: clap's flags become a
+//! `claude`, `codex` and bare `jaynshare`: clap's flags become a
 //! `launch::Request`; a refusal before the replacement exits with its
-//! refusal code, and after it the exit code is Claude Code's.
+//! refusal code, and after it the exit code is the tool's.
 
-use super::args::{ClaudeArgs, LaunchArgs, Picker};
+use super::args::{LaunchArgs, Picker, ToolArgs};
 use crate::launch::{self, IntentFlag};
 use crate::picker;
+use crate::provider::Provider;
 
 pub(super) fn intent(args: &LaunchArgs) -> IntentFlag {
     if let Some(reference) = &args.account {
@@ -25,12 +26,27 @@ pub(super) fn picker_kind(picker: Option<Picker>) -> Option<picker::Kind> {
     })
 }
 
-pub(super) fn claude(args: &ClaudeArgs) -> i32 {
-    let request = launch::Request {
+pub(super) fn launch(provider: Provider, args: &ToolArgs) -> i32 {
+    run(launch::Request {
+        provider: Some(provider),
         intent: intent(&args.launch),
         picker: picker_kind(args.picker),
-        claude_args: args.claude.clone(),
-    };
+        args: args.args.clone(),
+    })
+}
+
+/// Bare `jaynshare`: the picker over every provider's accounts, then the
+/// picked account's tool.
+pub(super) fn pick() -> i32 {
+    run(launch::Request {
+        provider: None,
+        intent: IntentFlag::Pick,
+        picker: None,
+        args: Vec::new(),
+    })
+}
+
+fn run(request: launch::Request) -> i32 {
     match launch::run(request) {
         Ok(code) => code,
         Err(refusal) => {

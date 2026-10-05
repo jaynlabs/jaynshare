@@ -7,6 +7,8 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
+use crate::provider::Provider;
+
 #[derive(Parser)]
 #[command(
     name = "jaynshare",
@@ -122,7 +124,8 @@ pub(super) enum Verb {
         verb: ServiceVerb,
     },
     // ---- engineer
-    Claude(ClaudeArgs),
+    Claude(ToolArgs),
+    Codex(ToolArgs),
     Env(EnvArgs),
     Alias {
         #[arg(long, value_enum, value_name = "shell")]
@@ -188,9 +191,9 @@ pub(super) struct StatusArgs {
     /// Print the configuration section alone.
     #[arg(long = "config-section")]
     pub(super) config_section: bool,
-    /// Add the diagnostics the default table leaves out: server, egress,
+    /// Add diagnostics to the rate-limit table: server, egress,
     /// capture, mitm, sessions, probe, clients, storage, config, and
-    /// per-account usage, holds and ramps.
+    /// routes, defaults, and per-account usage, holds and ramps.
     #[arg(long, conflicts_with = "check")]
     pub(super) verbose: bool,
     /// Force the operator role.
@@ -420,6 +423,9 @@ pub(super) struct LoginArgs {
     /// Display name for the new account; the profile derives one without it.
     #[arg(long)]
     pub(super) name: Option<String>,
+    /// Whose login: a Claude account (the default) or a ChatGPT one for Codex.
+    #[arg(long, value_enum, value_name = "provider", default_value_t)]
+    pub(super) provider: Provider,
     /// Print the URL and the operation id and exit at once.
     #[arg(long)]
     pub(super) no_wait: bool,
@@ -703,7 +709,7 @@ pub(super) enum ServiceVerb {
     Status,
 }
 
-/// `claude`'s and `env`'s launch intent: at most one of the three.
+/// `claude`'s, `codex`'s and `env`'s launch intent: at most one of the three.
 #[derive(Args)]
 pub(super) struct LaunchArgs {
     /// Pin the session to this account.
@@ -717,28 +723,32 @@ pub(super) struct LaunchArgs {
     pub(super) direct: bool,
 }
 
+/// `claude` and `codex`.
 #[derive(Args)]
-pub(super) struct ClaudeArgs {
+pub(super) struct ToolArgs {
     #[command(flatten)]
     pub(super) launch: LaunchArgs,
     /// The picker; wins over JAYNSHARE_PICKER.
     #[arg(long, value_enum, value_name = "picker")]
     pub(super) picker: Option<Picker>,
-    /// Passed to Claude Code unchanged and in order: everything
+    /// Passed to the tool unchanged and in order: everything
     /// after the launcher's own options, and everything after `--`,
     /// including a later literal `--` and words that look like options.
     #[arg(
         trailing_var_arg = true,
-        value_name = "claude arguments",
+        value_name = "tool arguments",
         allow_hyphen_values = true
     )]
-    pub(super) claude: Vec<std::ffi::OsString>,
+    pub(super) args: Vec<std::ffi::OsString>,
 }
 
 #[derive(Args)]
 pub(super) struct EnvArgs {
     #[command(flatten)]
     pub(super) launch: LaunchArgs,
+    /// Whose tool the environment is for.
+    #[arg(long, value_enum, value_name = "provider", default_value_t)]
+    pub(super) provider: Provider,
     /// The shell to quote for; detected from the parent when omitted.
     #[arg(long, value_enum, value_name = "shell")]
     pub(super) shell: Option<Shell>,

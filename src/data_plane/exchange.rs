@@ -14,7 +14,6 @@ use hyper::body::Incoming;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use crate::anthropic::{TELEMETRY_PATH, X_CLAUDE_CODE_SESSION_ID, error_type, is_account_bound};
 use crate::audit::{ErrorClass, Mode, Principal, Record, ServingAccount};
 use crate::capture::ExchangeCapture;
 use crate::config::{Config, TelemetryPolicy};
@@ -23,11 +22,13 @@ use crate::pool::ramp::Admit;
 use crate::pool::refresh::{self, Outcome, Trigger};
 use crate::pool::selection::{self, Cause, NoService, RequestFacts};
 use crate::pool::{Resolve, SessionKey};
+use crate::provider::Provider;
+use crate::provider::anthropic::error_type;
 use crate::server::Server;
 
 use super::attempt;
 use super::egress;
-use super::envelope::{self, json_response, proxy_response};
+use super::envelope::{self, json_response};
 use super::intent::{self, Intent};
 use super::relay::{self, BodyEnd, RelayBody, ResponseBody, strip_response_headers};
 use tokio::sync::OwnedSemaphorePermit;
@@ -36,7 +37,7 @@ use super::upstream::SendError;
 use super::usage::UsageExtractor;
 
 /// Never forwarded above this; Anthropic refuses larger bodies anyway.
-const BODY_LIMIT: usize = 32 * 1024 * 1024;
+pub(super) const BODY_LIMIT: usize = 32 * 1024 * 1024;
 /// The one inline wait before a synthetic 429.
 const INLINE_WAIT_MAX: u64 = 15;
 /// Hold poll interval bound.
@@ -63,6 +64,8 @@ impl std::error::Error for CloseConnection {}
 /// The audit record under construction; written exactly once, on every path.
 struct Exchange {
     server: Arc<Server>,
+    /// Whose envelope the proxy's own answers take.
+    provider: Provider,
     started: Instant,
     record: Record,
     /// The session this exchange counts against, once begun.
@@ -130,7 +133,7 @@ impl Exchange {
         error_class: ErrorClass,
     ) -> Response<ResponseBody> {
         self.respond(
-            proxy_response(status, error_type::PROXY, &message),
+            envelope::error(self.provider, status, error_type::PROXY, &message),
             Some(error_class),
         )
     }
@@ -149,6 +152,9 @@ impl Drop for Exchange {
 pub struct Entry {
     pub principal: Principal,
     pub mode: Mode,
+    /// Whose API the request speaks: the base-URL listener's is Anthropic's,
+    /// a tunnel's is its intercepted host's.
+    pub provider: Provider,
     /// `Ok(None)` reads the request's own headers, `Ok(Some)` is the
     /// tunnel's fixed intent, `Err` is a malformed user field — every request
     /// inside that tunnel is a 400.
@@ -161,6 +167,7 @@ impl Entry {
         Entry {
             principal,
             mode: Mode::BaseUrl,
+            provider: Provider::Anthropic,
             intent: Ok(None),
         }
     }
@@ -176,15 +183,15 @@ pub fn unauthenticated(
     peer: SocketAddr,
     request: &Request<Incoming>,
     mode: Mode,
+    provider: Option<Provider>,
 ) -> Response<ResponseBody> {
     server.record_exchange(&Record {
         timestamp: OffsetDateTime::now_utc(),
         duration_ms: 0,
         principal: None,
         source_address: peer.to_string(),
-        session_id: request
-            .headers()
-            .get(X_CLAUDE_CODE_SESSION_ID)
+        session_id: provider
+            .and_then(|p| request.headers().get(p.session_header()))
             .and_then(|v| v.to_str().ok())
             .map(String::from),
         method: request.method().to_string(),
@@ -201,7 +208,7 @@ pub fn unauthenticated(
         mode,
         blocked_pattern: None,
     });
-    envelope::unauthenticated()
+    envelope::unauthenticated(provider.unwrap_or_default())
 }
 
 pub async fn run(
@@ -213,6 +220,7 @@ pub async fn run(
     let Entry {
         principal,
         mode,
+        provider,
         intent: fixed_intent,
     } = entry;
     // The configuration in force when the exchange begins is the one
@@ -228,12 +236,13 @@ pub async fn run(
         .to_string();
     let session_id = parts
         .headers
-        .get(X_CLAUDE_CODE_SESSION_ID)
+        .get(provider.session_header())
         .and_then(|v| v.to_str().ok())
         .map(String::from);
     let principal_key = principal.key();
     let mut exchange = Exchange {
         server: Arc::clone(&server),
+        provider,
         started: Instant::now(),
         record: Record {
             timestamp: OffsetDateTime::now_utc(),
@@ -278,7 +287,8 @@ pub async fn run(
     };
     let Some(body) = body else {
         return Ok(exchange.respond(
-            proxy_response(
+            envelope::error(
+                provider,
                 StatusCode::PAYLOAD_TOO_LARGE,
                 error_type::REQUEST_TOO_LARGE,
                 "request body exceeds 32 MiB and was not forwarded",
@@ -286,22 +296,23 @@ pub async fn run(
             Some(ErrorClass::Request),
         ));
     };
-    let body_facts = attempt::body_facts(&body);
+    let body_facts = attempt::body_facts(&parts.headers, &body);
     exchange.record.model = body_facts.model.clone();
 
-    // Telemetry under `block` is answered here, never forwarded. The
-    // path and anything under it: `A` records the prefix, not a fixed subpath.
-    let telemetry = path == TELEMETRY_PATH
-        || path
-            .strip_prefix(TELEMETRY_PATH)
-            .is_some_and(|rest| rest.starts_with('/'));
-    if telemetry && settings.data_plane.telemetry_policy == TelemetryPolicy::Block {
+    // Telemetry under `block` and the provider's local answers are
+    // answered here, never forwarded.
+    if provider.is_telemetry(&path)
+        && settings.data_plane.telemetry_policy == TelemetryPolicy::Block
+    {
         return Ok(exchange.respond(json_response(StatusCode::OK, &serde_json::json!({})), None));
+    }
+    if let Some(answer) = provider.local_answer(&path, &parts.headers) {
+        return Ok(exchange.respond(json_response(StatusCode::OK, &answer), None));
     }
     // An account-bound path is refused before any selection,
     // so no pooled credential answers for it and no family 401 errors an
     // account.
-    if is_account_bound(&path) {
+    if provider.is_account_bound(&parts.method, &path) {
         return Ok(exchange.proxy_error(
             StatusCode::FORBIDDEN,
             format!(
@@ -311,6 +322,7 @@ pub async fn run(
         ));
     }
     let base_facts = RequestFacts {
+        provider,
         model: body_facts.model.as_deref(),
         advisor_model: body_facts.advisor_model.as_deref(),
         ..RequestFacts::default()
@@ -324,7 +336,8 @@ pub async fn run(
             .or(body_facts.advisor_model.as_deref())
             .unwrap_or("");
         return Ok(exchange.respond(
-            proxy_response(
+            envelope::error(
+                provider,
                 StatusCode::BAD_REQUEST,
                 error_type::INVALID_REQUEST,
                 &format!("model {model} is blocked by the operator pattern {pattern}"),
@@ -345,7 +358,8 @@ pub async fn run(
         Ok(intent) => intent,
         Err(message) => {
             return Ok(exchange.respond(
-                proxy_response(
+                envelope::error(
+                    provider,
                     StatusCode::BAD_REQUEST,
                     error_type::INVALID_REQUEST,
                     &message,
@@ -357,9 +371,11 @@ pub async fn run(
     let (pin, preference) = match &intent {
         None => (None, None),
         Some(intent) => {
+            // Another provider's account is no match: a 404.
             let resolved = {
                 let pool = server.pool.lock().expect("pool lock");
-                pool.resolve(intent.reference()).map(|a| a.handle)
+                pool.resolve_in(provider, intent.reference())
+                    .map(|a| a.handle)
             };
             let what = if intent.is_pin() { "pin" } else { "preference" };
             match resolved {
@@ -370,7 +386,8 @@ pub async fn run(
                 Ok(handle) => (None, Some(handle)),
                 Err(Resolve::NotFound) => {
                     return Ok(exchange.respond(
-                        proxy_response(
+                        envelope::error(
+                            provider,
                             StatusCode::NOT_FOUND,
                             error_type::NOT_FOUND,
                             &format!("no account matches the {what} {:?}", intent.reference()),
@@ -380,13 +397,14 @@ pub async fn run(
                 }
                 Err(Resolve::Ambiguous(names)) => {
                     return Ok(exchange.respond(
-                        proxy_response(
+                        envelope::error(
+                            provider,
                             StatusCode::BAD_REQUEST,
                             error_type::INVALID_REQUEST,
                             &format!(
                                 "the {what} {:?} matches more than one account: {}; qualify it with the organisation name or UUID",
                                 intent.reference(),
-                                names.join(", ")
+                                Resolve::listed(&names)
                             ),
                         ),
                         Some(ErrorClass::Request),
@@ -441,8 +459,8 @@ pub async fn run(
 
     let mut headers = parts.headers;
     attempt::strip_request_headers(&mut headers);
-    headers.insert(HOST, server.upstream.host_header());
-    let uri = server.upstream.uri_for(&path_and_query);
+    headers.insert(HOST, server.upstream.host_header(provider));
+    let uri = server.upstream.uri_for(provider, &path_and_query);
 
     // A failure that is neither a network failure nor a status is the one
     // path that may try another account, and only for an exchange that is
@@ -545,11 +563,7 @@ pub async fn run(
                 continue;
             };
             let mut h = headers.clone();
-            let account_uuid = match &account.credential {
-                crate::pool::Credential::OAuth(_) => account.profile.account_uuid,
-                crate::pool::Credential::ApiKey(_) => None,
-            };
-            let rewritten = attempt::rewrite_body(body.clone(), &path, account_uuid);
+            let rewritten = provider.rewrite_body(body.clone(), &path, account);
             if !rewritten.is_empty() || headers.contains_key(CONTENT_LENGTH) {
                 attempt::set_content_length(&mut h, rewritten.len());
             }
@@ -559,6 +573,7 @@ pub async fn run(
 
         let attempt = attempt_candidate(AttemptInput {
             server: &server,
+            provider,
             capture: capture.as_mut(),
             handle,
             display_name: &display_name,
@@ -615,7 +630,10 @@ pub async fn run(
                     tracing::warn!(event = "account_refused_403", account = %display_name, "403 upstream; ending the exchange");
                     return Ok(exchange.proxy_error(
                         StatusCode::BAD_GATEWAY,
-                        format!("Anthropic answered 403 for {display_name}; check the server's egress address"),
+                        format!(
+                            "{} answered 403 for {display_name}; check the server's egress address",
+                            provider.upstream_name()
+                        ),
                         ErrorClass::Upstream,
                     ));
                 }
@@ -681,7 +699,8 @@ pub async fn run(
                 return Ok(exchange.proxy_error(
                     StatusCode::BAD_GATEWAY,
                     format!(
-                        "Anthropic refused the credential of {display_name}; the operator must re-add the account"
+                        "{} refused the credential of {display_name}; the operator must re-add the account",
+                        provider.upstream_name()
                     ),
                     ErrorClass::Authentication,
                 ));
@@ -763,6 +782,7 @@ fn build_request(method: &Method, uri: &Uri, headers: &HeaderMap, body: Bytes) -
 /// Everything one candidate's attempt loop needs from the exchange.
 struct AttemptInput<'a> {
     server: &'a Arc<Server>,
+    provider: Provider,
     capture: Option<&'a mut ExchangeCapture>,
     handle: Uuid,
     display_name: &'a str,
@@ -861,6 +881,7 @@ impl Retries {
 async fn attempt_candidate(input: AttemptInput<'_>) -> Attempt {
     let AttemptInput {
         server,
+        provider,
         mut capture,
         handle,
         display_name,
@@ -889,7 +910,7 @@ async fn attempt_candidate(input: AttemptInput<'_>) -> Attempt {
                 break Attempt::Other("the account left the pool mid-attempt".into());
             };
             let mut h = headers.clone();
-            attempt::inject_credential(&mut h, &account.credential);
+            provider.inject_credential(&mut h, account);
             (h, account.kind())
         };
         // The slot is held from here until the response headers
@@ -1238,16 +1259,13 @@ fn refuse_refresh_wait(
         exchange.record.serving_account = None;
     }
     exchange.record.no_service_reason = Some("refresh_wait".to_string());
-    let mut response = proxy_response(
-        StatusCode::TOO_MANY_REQUESTS,
-        error_type::RATE_LIMIT,
+    let response = envelope::rate_limited(
+        exchange.provider,
         &format!(
             "the token refresh for {display_name} is waiting out a transient failure; retry after the wait"
         ),
+        retry_after,
     );
-    response
-        .headers_mut()
-        .insert(RETRY_AFTER, retry_after.into());
     exchange.respond(response, Some(ErrorClass::RateLimit))
 }
 
@@ -1324,14 +1342,7 @@ fn refuse_nobody(exchange: &mut Exchange, nobody: selection::Nobody) -> Response
         }
     };
     tracing::info!(event = "no_account", reason = %reason_name(&nobody.reason), retry_after, "nobody eligible");
-    let mut response = proxy_response(
-        StatusCode::TOO_MANY_REQUESTS,
-        error_type::RATE_LIMIT,
-        &message,
-    );
-    response
-        .headers_mut()
-        .insert(RETRY_AFTER, retry_after.into());
+    let response = envelope::rate_limited(exchange.provider, &message, retry_after);
     exchange.respond(response, Some(ErrorClass::RateLimit))
 }
 

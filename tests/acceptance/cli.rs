@@ -65,7 +65,7 @@ fn help_grammar_and_schema_name_one_verb_set() {
         .cloned()
         .collect();
     schema_paths.extend(
-        ["claude", "env", "statusline", "title-hook"]
+        ["claude", "codex", "env", "statusline", "title-hook"]
             .into_iter()
             .map(str::to_owned),
     );
@@ -880,7 +880,7 @@ async fn every_json_document_validates_against_its_schema() {
     }
     let _ = empty;
     // A verb with no --json has no schema.
-    for verb in ["claude", "env", "statusline", "title-hook"] {
+    for verb in ["claude", "codex", "env", "statusline", "title-hook"] {
         let (code, _, _) = instance.cli(&["schema", verb], None);
         assert_eq!(code, 2, "schema {verb}");
         assert!(all["result"].get(verb).is_none());
@@ -2044,7 +2044,7 @@ async fn operator_secret_loopback_only_and_confirmed() {
     assert_eq!(envelope["ok"], true, "{envelope}");
 }
 
-/// `status` renders every section in order; the capture line is
+/// `status` shows only rate limits; `--verbose` adds every section in order. The capture line is
 /// present off and on; `--clients` prints that section alone and still
 /// returns the whole body with `--json`.
 #[tokio::test(flavor = "multi_thread")]
@@ -2068,31 +2068,35 @@ async fn status_renders_every_section_including_clients() {
     .await;
     assert_eq!(issued.status, StatusCode::CREATED, "{issued:?}");
 
-    // The default view: routes, then the account table, then the
-    // default line; the diagnostics are --verbose.
+    // The default view is the rate-limit table alone.
     let (code, stdout, stderr) = instance.cli(&["status"], None);
     assert_eq!(code, 0, "{stderr}");
-    let mut order = 0;
-    for marker in ["routes", "FSUB (oauth", "default"] {
-        let at = stdout
-            .lines()
-            .position(|line| line.contains(marker))
-            .expect(marker);
-        assert!(at >= order, "{marker} out of order: {stdout}");
-        order = at;
+    assert!(stdout.starts_with("accounts\n"), "{stdout}");
+    assert!(
+        stdout.contains("FSUB") && stdout.contains("5h used") && stdout.contains("Weekly used"),
+        "the rate-limit table: {stdout}"
+    );
+    for diagnostic in [
+        "◆", "routes", "default", "ready", "server", "capture", "sessions", "mac-1", "*opus*",
+    ] {
+        assert!(
+            !stdout.contains(diagnostic),
+            "{diagnostic} requires --verbose: {stdout}"
+        );
     }
-    assert!(
-        stdout.contains("*opus*"),
-        "the blocked patterns line: {stdout}"
-    );
-    assert!(
-        !stdout.contains("mac-1"),
-        "the clients are --verbose: {stdout}"
-    );
+    let table = stdout;
 
     // --verbose: every section in a fixed order.
     let (code, stdout, _) = instance.cli(&["status", "--verbose"], None);
     assert_eq!(code, 0);
+    assert!(
+        stdout.starts_with(table.trim_end()),
+        "verbose adds to the table: {stdout}"
+    );
+    assert!(
+        stdout.contains("*opus*"),
+        "the blocked patterns line: {stdout}"
+    );
     let headings = [
         "server", "egress", "capture", "mitm", "sessions", "probe", "routes", "default", "clients",
         "storage", "config",

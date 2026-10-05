@@ -407,7 +407,16 @@ impl Control {
     /// A reference becomes a handle before the verb uses it; nothing
     /// matching lists the display names the operator could have meant.
     pub(super) async fn resolve(&self, reference: &str) -> Result<Value, Failure> {
-        let encoded: String = reference
+        self.resolve_within(reference, None).await
+    }
+
+    /// [`Control::resolve`] among one provider's accounts, `None` among all.
+    pub(super) async fn resolve_within(
+        &self,
+        reference: &str,
+        provider: Option<&str>,
+    ) -> Result<Value, Failure> {
+        let mut encoded: String = reference
             .bytes()
             .map(|b| {
                 if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) {
@@ -417,6 +426,9 @@ impl Control {
                 }
             })
             .collect();
+        if let Some(provider) = provider {
+            encoded += &format!("&provider={provider}");
+        }
         match self
             .expect(
                 Method::GET,

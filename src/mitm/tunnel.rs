@@ -12,16 +12,16 @@ use http::{HeaderMap, HeaderValue, Request, Response, StatusCode};
 use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
 
-use crate::anthropic::error_type;
 use crate::audit::{Principal, PrincipalKind};
 use crate::data_plane::connect::{Connector, Wire, enable_keepalive};
 use crate::data_plane::envelope;
 use crate::data_plane::intent::{self, Intent};
 use crate::data_plane::principal;
 use crate::data_plane::relay::ResponseBody;
-use crate::mitm::ca::{Ca, INTERCEPT_NAMES};
+use crate::mitm::ca::{Authorities, Ca, INTERCEPT_NAMES};
 use crate::mitm::counters::Kind;
 use crate::mitm::tls;
+use crate::provider::anthropic::error_type;
 use crate::server::Server;
 
 /// No connection to the target within 30 s → 504. Not configurable.
@@ -181,7 +181,7 @@ fn proxy_refusal(peer: SocketAddr) -> Box<Response<ResponseBody>> {
         peer,
         "",
         StatusCode::PROXY_AUTHENTICATION_REQUIRED,
-        "the proxy credential is missing or invalid: this is a client secret, not an Anthropic key",
+        "the proxy credential is missing or invalid: this is a client secret, not an API key",
     );
     response.headers_mut().insert(
         "proxy-authenticate",
@@ -398,7 +398,7 @@ pub(crate) async fn handle(
     server: Arc<Server>,
     connector: Option<Arc<Connector>>,
     host_addresses: Arc<[IpAddr]>,
-    ca: Option<Arc<Ca>>,
+    authorities: Authorities,
     peer: SocketAddr,
     request: Request<Incoming>,
 ) -> Response<ResponseBody> {
@@ -406,7 +406,7 @@ pub(crate) async fn handle(
         Arc::clone(&server),
         connector,
         host_addresses,
-        ca,
+        authorities,
         peer,
         request,
     )
@@ -421,7 +421,7 @@ async fn connect(
     server: Arc<Server>,
     connector: Option<Arc<Connector>>,
     host_addresses: Arc<[IpAddr]>,
-    ca: Option<Arc<Ca>>,
+    authorities: Authorities,
     peer: SocketAddr,
     mut request: Request<Incoming>,
 ) -> Response<ResponseBody> {
@@ -452,6 +452,7 @@ async fn connect(
         && host.parse::<IpAddr>().is_err()
         && INTERCEPT_NAMES.iter().any(|set| *set == name)
     {
+        let ca = authorities.for_host(&name);
         let tunnel = Tunnel {
             credential,
             target: target.clone(),
@@ -549,7 +550,7 @@ pub(crate) fn strip_request_hop_by_hop(headers: &mut HeaderMap) {
 /// header is removed on every decoded request, intercepted or absolute-form,
 /// and cannot add to or replace the tunnel's fixed intent.
 pub(crate) fn strip_proxy_metadata(headers: &mut HeaderMap) {
-    headers.remove(crate::anthropic::X_JAYNSHARE_ACCOUNT);
+    headers.remove(intent::X_JAYNSHARE_ACCOUNT);
 }
 
 #[cfg(test)]

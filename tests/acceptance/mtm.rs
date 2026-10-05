@@ -343,7 +343,11 @@ async fn fresh_state_directory_yields_the_three_trust_files() {
     let sans = dns_names(&leaf);
     assert_eq!(
         sans,
-        ["api.anthropic.com", "probe.jaynshare.invalid"],
+        [
+            "api.anthropic.com",
+            "chatgpt.com",
+            "probe.jaynshare.invalid"
+        ],
         "the leaf's SANs are exactly the intercept set"
     );
 

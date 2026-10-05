@@ -60,8 +60,12 @@ pub struct ReferenceConflict {
     pub why: Why,
 }
 
-/// The same account UUID under the same organisation discriminator.
+/// The same email in the same ChatGPT workspace (Codex), or the same account
+/// UUID under the same organisation discriminator (Anthropic).
 fn same_identity(a: &Profile, b: &Profile) -> bool {
+    if let (Some(x), Some(y)) = (&a.chatgpt_account_id, &b.chatgpt_account_id) {
+        return x == y && a.email.is_some() && a.email == b.email;
+    }
     let (Some(x), Some(y)) = (a.account_uuid, b.account_uuid) else {
         return false;
     };
@@ -121,12 +125,12 @@ impl Pool {
             }
             None => self.derive_name(&mut account)?,
         };
-        let handle = account.handle;
+        let (handle, provider) = (account.handle, account.provider);
         self.accounts.push(account);
-        if self.operator.default.is_none() {
+        if self.default_account(provider).is_none() {
             // The pool's own move, so `since` records when this
             // account became the default and `operator_chosen` stays false.
-            self.move_default(Some(handle), OffsetDateTime::now_utc());
+            self.move_default(provider, Some(handle), OffsetDateTime::now_utc());
         }
         Ok(handle)
     }
@@ -145,9 +149,11 @@ impl Pool {
     }
 
     fn same_identity_of(&self, candidate: &Account) -> Option<&Account> {
-        self.accounts
-            .iter()
-            .find(|a| a.kind() == Kind::OAuth && same_identity(&a.profile, &candidate.profile))
+        self.accounts.iter().find(|a| {
+            a.provider == candidate.provider
+                && a.kind() == Kind::OAuth
+                && same_identity(&a.profile, &candidate.profile)
+        })
     }
 
     pub(super) fn name_taken(&self, name: &str, except: Option<Uuid>) -> bool {
@@ -157,7 +163,8 @@ impl Pool {
             .any(|a| Some(a.handle) != except && fold(&a.display_name) == folded)
     }
 
-    /// The profile email; when accounts share it, every derived-named
+    /// The profile email, suffixed with the provider when another provider's
+    /// account already carries it; when one provider's accounts share it, every derived-named
     /// holder moves to `email (organisation name)` — the earlier ones renamed
     /// in place at the colliding add — falling back to the full organisation
     /// UUID when a name is absent or the organisation names would still
@@ -171,17 +178,20 @@ impl Pool {
             .clone()
             .unwrap_or_else(|| account.handle.to_string());
         let folded = fold(&email);
-        // The accounts sharing the profile email, the newcomer included,
-        // decide together whether an organisation name is unique among them.
-        let mut holders: Vec<(Option<String>, Option<Uuid>)> = self
-            .accounts
-            .iter()
-            .filter(|a| {
-                a.profile
+        let provider = account.provider;
+        let holds = |a: &Account| {
+            a.provider == provider
+                && a.profile
                     .email
                     .as_deref()
                     .is_some_and(|e| fold(e) == folded)
-            })
+        };
+        // This provider's accounts sharing the profile email, the newcomer
+        // included, decide together whether an organisation name is unique among them.
+        let mut holders: Vec<(Option<String>, Option<Uuid>)> = self
+            .accounts
+            .iter()
+            .filter(|a| holds(a))
             .map(|a| {
                 (
                     a.profile.organization_name.clone(),
@@ -193,8 +203,18 @@ impl Pool {
             account.profile.organization_name.clone(),
             account.profile.organization_uuid,
         ));
-        if holders.len() == 1 && !self.name_taken(&email, None) {
-            return Ok(email);
+        if holders.len() == 1 {
+            let mut name = email.clone();
+            if self
+                .accounts
+                .iter()
+                .any(|a| a.provider != provider && fold(&a.display_name) == folded)
+            {
+                name = format!("{email} ({})", provider.as_str());
+            }
+            if !self.name_taken(&name, None) {
+                return Ok(name);
+            }
         }
         let labels: Vec<String> = holders
             .iter()
@@ -222,7 +242,7 @@ impl Pool {
             if self
                 .accounts
                 .iter()
-                .filter(|a| a.profile.email.as_deref().is_none_or(|e| fold(e) != folded))
+                .filter(|a| !holds(a))
                 .any(|a| fold(&a.display_name) == fold(name))
             {
                 return Err(OperationError::NameConflict(name.clone()));
@@ -232,14 +252,8 @@ impl Pool {
         // `rename`; a later refresh never touches it again. A holder is
         // renamed only when its name is the bare email or the derived form
         // of its own organisation — never an operator-supplied name.
-        let mut i = 0;
-        for existing in self.accounts.iter_mut().filter(|a| {
-            a.profile
-                .email
-                .as_deref()
-                .is_some_and(|e| fold(e) == folded)
-        }) {
-            let (org, uuid) = &holders[i];
+        let holding = self.accounts.iter_mut().filter(|a| holds(a));
+        for ((existing, (org, uuid)), label) in holding.zip(&holders).zip(&labels) {
             let derived = match (org, uuid) {
                 (Some(n), _) => format!("{email} ({n})"),
                 (None, Some(u)) => format!("{email} ({u})"),
@@ -247,12 +261,10 @@ impl Pool {
             };
             if fold(&existing.display_name) == folded || existing.display_name == derived {
                 existing.display_name = format!(
-                    "{} ({})",
-                    existing.profile.email.as_deref().unwrap_or(&email),
-                    labels[i]
+                    "{} ({label})",
+                    existing.profile.email.as_deref().unwrap_or(&email)
                 );
             }
-            i += 1;
         }
         Ok(labelled[labelled.len() - 1].clone())
     }
@@ -320,9 +332,10 @@ impl Pool {
         self.admission.remove(&handle);
         self.sessions.unbind_account(handle);
         self.operator.route_preferences.retain(|_, h| *h != handle);
-        if self.operator.default == Some(handle) {
-            let next = self.accounts.first().map(|a| a.handle);
-            self.move_default(next, OffsetDateTime::now_utc());
+        let provider = removed.provider;
+        if self.default_account(provider) == Some(handle) {
+            let next = self.accounts_of(provider).next().map(|a| a.handle);
+            self.move_default(provider, next, OffsetDateTime::now_utc());
         }
         Some(removed)
     }
@@ -348,20 +361,63 @@ mod tests {
 
     fn oauth(email: &str, org: Option<&str>, account_uuid: Uuid) -> Account {
         Account::new(
+            crate::provider::Provider::Anthropic,
             String::new(),
             Profile {
                 email: Some(email.into()),
                 account_uuid: Some(account_uuid),
                 organization_uuid: None,
                 organization_name: org.map(String::from),
+                chatgpt_account_id: None,
             },
             Source::PortableJson,
             Credential::OAuth(family("t", None)),
         )
     }
 
+    fn codex(email: &str, workspace: &str) -> Account {
+        Account::new(
+            crate::provider::Provider::Codex,
+            String::new(),
+            Profile {
+                email: Some(email.into()),
+                chatgpt_account_id: Some(workspace.into()),
+                ..Profile::default()
+            },
+            Source::PortableJson,
+            Credential::OAuth(family("t", None)),
+        )
+    }
+
+    #[test]
+    fn a_codex_login_is_the_same_email_in_the_same_workspace() {
+        let mut pool = Pool::default();
+        let handle = pool.add(codex("a@x.io", "ws-1"), None).unwrap();
+        assert_eq!(pool.relogin(codex("a@x.io", "ws-1"), None), Ok(handle));
+        assert_eq!(
+            pool.relogin(codex("b@x.io", "ws-1"), None),
+            Err(OperationError::NewAccount)
+        );
+        assert_eq!(
+            pool.relogin(codex("a@x.io", "ws-2"), None),
+            Err(OperationError::NewAccount)
+        );
+    }
+
+    #[test]
+    fn a_login_sharing_another_provider_s_email_takes_the_provider_suffix() {
+        let mut pool = Pool::default();
+        let claude = pool
+            .add(oauth("a@x.io", Some("One"), Uuid::new_v4()), None)
+            .unwrap();
+        let codex = pool.add(codex("a@x.io", "ws-1"), None).unwrap();
+        assert_eq!(pool.get(claude).unwrap().display_name, "a@x.io");
+        assert_eq!(pool.get(codex).unwrap().display_name, "a@x.io (codex)");
+    }
+
     fn api_key(name: &str) -> Account {
         Account::new(
+            crate::provider::Provider::Anthropic,
             name.into(),
             Profile::default(),
             Source::ApiKeyEntry,
@@ -384,7 +440,10 @@ mod tests {
             .unwrap();
         assert_eq!(pool.get(first).unwrap().display_name, "a@x.io (One)");
         assert_eq!(pool.get(second).unwrap().display_name, "A@x.io (Two)");
-        assert_eq!(pool.default_account(), Some(first));
+        assert_eq!(
+            pool.default_account(crate::provider::Provider::Anthropic),
+            Some(first)
+        );
     }
 
     /// On add: the earlier holder is renamed in place at the colliding add;
@@ -591,6 +650,7 @@ mod tests {
             account_uuid: Some(Uuid::new_v4()),
             organization_uuid: None,
             organization_name: Some("One".into()),
+            chatgpt_account_id: None,
         };
         assert_eq!(
             pool.replace_credential(
@@ -632,6 +692,7 @@ mod tests {
             account_uuid: Some(id),
             organization_uuid: None,
             organization_name: Some("One".into()),
+            chatgpt_account_id: None,
         };
         pool.replace_credential(
             sub,

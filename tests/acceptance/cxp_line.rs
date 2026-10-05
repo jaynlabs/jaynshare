@@ -141,8 +141,8 @@ async fn a_bad_payload_is_no_session_and_sends_none() {
 
 /// `statusline` reads the
 /// payload, makes the one read keyed by the payload's session id and
-/// prints the one line: the serving account and every account's five-hour and
-/// weekly utilisation, with no unrelated pool or session details.
+/// prints the one line: the serving account and every Claude Code account's
+/// five-hour and weekly utilisation, with no unrelated pool or session details.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_line_names_the_serving_account_and_rate_limits() {
     let _leak_sweep = crate::leaks::LeakGuard::default();

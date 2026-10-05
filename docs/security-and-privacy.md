@@ -6,7 +6,7 @@ confidential material through Jaynshare.
 ## The central trust decision
 
 Jaynshare is a **trusted intermediary**. It is not end-to-end encrypted between
-Claude Code and Anthropic:
+Claude Code and Anthropic, or between Codex and OpenAI:
 
 ```text
 Claude Code  == TLS under the pool's CA ==>  Jaynshare  == verified TLS ==>  Anthropic
@@ -17,9 +17,9 @@ Claude Code  == TLS under the pool's CA ==>  Jaynshare  == verified TLS ==>  Ant
 `jaynshare claude` launches Claude Code with the pool's forward proxy and the
 pool's CA. Claude Code's TLS session to `api.anthropic.com` ends at the
 Jaynshare server, which then opens its own verified TLS connection to
-Anthropic. The server must read request bodies to pick an account, inject that
-account's credential, and buffer the request so it can retry it on another
-account.
+Anthropic. `jaynshare codex` does the same for Codex and `chatgpt.com`. The
+server must read request bodies to pick an account, inject that account's
+credential, and buffer the request so it can retry it on another account.
 
 Consequently, the server operator — and anyone who compromises the host or the
 deployed binary — can read prompts, code context, tool results, attachments,
@@ -38,14 +38,14 @@ systemd unit. See
 | Actor | Access and influence |
 | --- | --- |
 | Server operator | Can access provider credentials and all traffic the server handles, change the deployed binary or configuration, turn on wire capture, invite and revoke clients, and change routing. Must be fully trusted. |
-| Enrolled client A | Sends and receives its own traffic. Can see the pool metadata listed below, can pick an eligible account for its own session, and can log in the Claude accounts it owns. Cannot use its credential to read client B's prompts, responses or sessions, to log in client B's accounts, or to call the operator surface. |
+| Enrolled client A | Sends and receives its own traffic. Can see the pool metadata listed below, can pick an eligible account for its own session, and can log in the Claude and ChatGPT accounts it owns. Cannot use its credential to read client B's prompts, responses or sessions, to log in client B's accounts, or to call the operator surface. |
 | Other account owners | Do not receive request bodies through Jaynshare, but their provider account may carry another participant's request. That usage falls under that account's provider terms and settings. |
-| Anthropic | Receives the content routed to it under the selected account. Its own terms, retention and privacy controls apply. |
+| Anthropic, OpenAI | Each receives the content routed to it under the selected account. Its own terms, retention and privacy controls apply. |
 | Network peer without a Jaynshare credential | Is refused by the proxy and the control surface. Network exposure should still be restricted with network policy and host firewall rules. |
 
 An enrolled client's status read is an explicit allow-list. It exposes each
-account's display name and its five-hour and weekly utilisation, how many
-accounts are configured and selectable, how many sessions are known and
+account's display name, its five-hour and weekly utilisation and its count of
+active sessions, how many accounts are configured and selectable, how many sessions are known and
 active, the server version and identity pin, the CA fingerprint and that of a
 staged next CA, the version and digests of the client the server offers,
 whether wire capture is on, and, for the client's own session, the account
@@ -54,7 +54,7 @@ that last served it. It does
 configuration, other clients, other clients' sessions, or any request or
 response body.
 
-Sessions are keyed by the authenticated client together with Claude Code's
+Sessions are keyed by the authenticated client together with the tool's
 session id, so the same session id on two enrolled machines does not share
 routing state. A response is returned only on the connection that made the
 request; no endpoint lets one client retrieve another client's response.
@@ -139,9 +139,9 @@ when the server offers no kit.
   sensitive. Capture cannot run unnoticed: every enrolled client's status shows
   that it is on, and the audit log keeps running.
 - **Telemetry:** `data_plane.telemetry_policy = "block"` stops Claude Code's
-  event-logging requests at the server; the default, `forward`, relays them.
-  This is not a content filter and says nothing about what Anthropic receives
-  in ordinary model requests.
+  event-logging and Codex's analytics requests at the server; the default,
+  `forward`, relays them. This is not a content filter and says nothing about
+  what the provider receives in ordinary model requests.
 
 Jaynshare provides no per-client retention controls, no encryption of request
 bodies from the operator, and no formal security certification. No independent
@@ -150,16 +150,19 @@ security audit is claimed.
 ## MITM scope
 
 The pool's CA reaches clients over the pinned channel, the next one too while
-a rotation is staged. It is handed only to the Claude Code process that
-`jaynshare claude` launches, through `NODE_EXTRA_CA_CERTS`. It enters the operating
-system's trust store only if the engineer runs `jaynshare trust-ca add`, which
-always asks first. The server terminates TLS only for `api.anthropic.com` and
-its own credential-free probe host; any other `CONNECT` target is relayed as
-an opaque tunnel, and a target that points back at the server itself is
-refused.
+a rotation is staged. It is handed only to the process that `jaynshare claude`
+or `jaynshare codex` launches, through `NODE_EXTRA_CA_CERTS` or
+`CODEX_CA_CERTIFICATE`. It enters the operating system's trust store only if
+the engineer runs `jaynshare trust-ca add`, which always asks first. The server
+terminates TLS only for `api.anthropic.com`, `chatgpt.com` and its own
+credential-free probe host; any other `CONNECT` target is relayed as an opaque
+tunnel, and a target that points back at the server itself is refused. On
+`chatgpt.com`, only Codex's own paths and the read of the account's usage are
+forwarded with a pooled account; the server refuses the rest of the ChatGPT
+account, or answers it itself.
 
 That narrow scope limits the effect of trusting the CA. It does not stop a
-malicious server from changing traffic for the intercepted host. Releases and
+malicious server from changing traffic for the intercepted hosts. Releases and
 kits are signed, and clients accept only kits signed by their pinned key;
 verify what you install on the server (`jaynshare release verify`), and install
 only from a source you trust.

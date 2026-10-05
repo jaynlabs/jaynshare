@@ -1,4 +1,4 @@
-//! `env`: the launch environment of `claude` — the same
+//! `env`: the launch environment of `claude` or `codex` — the same
 //! `launch::prepare` plan — printed for the shell to evaluate, every value
 //! quoted for that shell. Refused on a terminal without `--show`; `--json`
 //! is refused before this runs (`schema::NO_JSON`).
@@ -6,7 +6,7 @@
 use std::io::IsTerminal;
 
 use super::args::{EnvArgs, Shell};
-use super::claude::intent;
+use super::tool::intent;
 use super::{Failure, Outcome};
 use crate::launch;
 
@@ -20,9 +20,10 @@ pub(super) fn env(args: &EnvArgs) -> Outcome {
         ));
     }
     let request = launch::Request {
+        provider: Some(args.provider),
         intent: intent(&args.launch),
         picker: None,
-        claude_args: Vec::new(),
+        args: Vec::new(),
     };
     let prepared = launch::prepare(request, false)
         .map_err(|refusal| Failure::local(refusal.code, refusal.slug, refusal.message))?;

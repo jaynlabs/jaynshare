@@ -8,9 +8,10 @@
 use serde_json::{Value, json};
 
 use super::help::DOCS;
+use crate::provider::Provider;
 
 /// Verbs with no `--json` document at all.
-pub(super) const NO_JSON: &[&str] = &["claude", "env", "statusline", "title-hook"];
+pub(super) const NO_JSON: &[&str] = &["claude", "codex", "env", "statusline", "title-hook"];
 
 /// Verbs whose `--json` is one raw object per line and no envelope.
 const PER_LINE: &[&str] = &["log tail", "audit tail"];
@@ -43,6 +44,16 @@ fn object(members: &[(&str, Value)]) -> Value {
         .map(|(name, schema)| ((*name).to_string(), schema.clone()))
         .collect();
     json!({ "type": "object", "required": required, "additionalProperties": false, "properties": properties })
+}
+
+fn rate_limits() -> Value {
+    let mut schema = object(&[
+        ("five_hour", nullable_number()),
+        ("weekly", nullable_number()),
+    ]);
+    schema["properties"]["five_hour_reset_at"] = nullable_string();
+    schema["properties"]["weekly_reset_at"] = nullable_string();
+    schema
 }
 
 /// What every deploy verb answers.
@@ -127,25 +138,23 @@ fn defs() -> Value {
         ("account_uuid", nullable_string()),
         ("organization_uuid", nullable_string()),
         ("organization_name", nullable_string()),
+        ("chatgpt_account_id", nullable_string()),
     ]);
     // A client's view of an account it owns.
+    let provider = json!({ "enum": Provider::ALL.map(Provider::as_str) });
     let owned_account = object(&[
         ("handle", string()),
         ("display_name", string()),
+        ("provider", provider.clone()),
         ("selectable", json!({ "type": "boolean" })),
-        (
-            "rate_limits",
-            object(&[
-                ("five_hour", nullable_number()),
-                ("weekly", nullable_number()),
-            ]),
-        ),
+        ("rate_limits", rate_limits()),
         ("profile", profile.clone()),
         ("health", health.clone()),
     ]);
     let account = object(&[
         ("handle", string()),
         ("display_name", string()),
+        ("provider", provider),
         ("kind", json!({ "enum": ["oauth", "api_key"] })),
         (
             "source_class",
@@ -237,6 +246,12 @@ fn defs() -> Value {
         ("changed_keys", array(string())),
         ("rejected_restart_keys", array(string())),
     ]);
+    // One provider's default.
+    let default = nullable(object(&[
+        ("handle", string()),
+        ("operator_chosen", json!({ "type": "boolean" })),
+        ("since", nullable_string()),
+    ]));
     let snapshot = object(&[
         (
             "server",
@@ -308,13 +323,10 @@ fn defs() -> Value {
             ]),
         ),
         ("accounts", array(reference("account"))),
+        ("default_account", default.clone()),
         (
-            "default_account",
-            nullable(object(&[
-                ("handle", string()),
-                ("operator_chosen", json!({ "type": "boolean" })),
-                ("since", nullable_string()),
-            ])),
+            "default_accounts",
+            object(&Provider::ALL.map(|p| (p.as_str(), default.clone()))),
         ),
         ("routes", array(reference("route"))),
         ("blocked_models", array(string())),
@@ -563,6 +575,12 @@ fn result_of(path: &str) -> Option<Value> {
                 ("accounts_configured", json!({ "type": "integer" })),
                 ("accounts_selectable", json!({ "type": "integer" })),
             ]),
+            "accounts": array(object(&[
+                ("display_name", string()),
+                ("provider", json!({ "enum": Provider::ALL.map(Provider::as_str) })),
+                ("rate_limits", rate_limits()),
+                ("sessions_active", json!({ "type": "integer" })),
+            ])),
             "sessions": object(&[
                 ("known", json!({ "type": "integer" })),
                 ("active", json!({ "type": "integer" })),

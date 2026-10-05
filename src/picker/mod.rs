@@ -1,6 +1,7 @@
-//! The account picker: a first **automatic** row,
-//! then the catalogue in the server's order, each row a display name, its
-//! five-hour and weekly utilisation, and whether it can be chosen now. Two
+//! The account picker: per section, an **automatic** row (named after the
+//! section's heading, if any), then the section's catalogue rows in the
+//! server's order, each a display name, its five-hour and weekly
+//! utilisation, and whether it can be chosen now. Two
 //! implementations: a keyboard picker when the controlling
 //! terminal can be put in raw mode, a numbered prompt otherwise.
 //! Both draw on the terminal, never on standard output.
@@ -16,14 +17,24 @@ pub mod numbered;
 pub mod render;
 pub mod tty;
 
+use crate::client::Window;
+
 /// One catalogue entry as the picker shows it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Row {
     pub handle: String,
     pub display_name: String,
     pub selectable: bool,
-    pub five_hour: Option<f64>,
-    pub weekly: Option<f64>,
+    pub five_hour: Window,
+    pub weekly: Window,
+}
+
+/// Rows after their own automatic row; a heading names that row and
+/// indents the rows under it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Section {
+    pub heading: Option<&'static str>,
+    pub rows: Vec<Row>,
 }
 
 /// What the engineer chose: the automatic row, or one account by handle
@@ -32,6 +43,54 @@ pub struct Row {
 pub enum Choice {
     Automatic,
     Account(String),
+}
+
+/// One drawn line: section `section`'s automatic row, or one of its
+/// accounts.
+struct Line<'a> {
+    section: usize,
+    heading: Option<&'a str>,
+    /// `None` on the automatic row.
+    row: Option<&'a Row>,
+}
+
+impl Line<'_> {
+    /// The section and choice this line confirms: none for an unselectable
+    /// row.
+    fn choice(&self) -> Option<(usize, Choice)> {
+        match self.row {
+            None => Some((self.section, Choice::Automatic)),
+            Some(row) => row
+                .selectable
+                .then(|| (self.section, Choice::Account(row.handle.clone()))),
+        }
+    }
+
+    /// Before the marker or number: an account sits under a headed
+    /// section's automatic row.
+    fn indent(&self) -> &'static str {
+        if self.heading.is_some() && self.row.is_some() {
+            "  "
+        } else {
+            ""
+        }
+    }
+}
+
+fn lines(sections: &[Section]) -> Vec<Line<'_>> {
+    sections
+        .iter()
+        .enumerate()
+        .flat_map(|(index, section)| {
+            std::iter::once(None)
+                .chain(section.rows.iter().map(Some))
+                .map(move |row| Line {
+                    section: index,
+                    heading: section.heading,
+                    row,
+                })
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,10 +118,11 @@ pub fn choose(forced: Option<Kind>) -> Result<Option<Kind>, String> {
     mode::choose(forced)
 }
 
-/// Show `rows` and return the engineer's choice.
-pub fn pick(rows: &[Row], kind: Kind) -> Result<Choice, PickError> {
+/// Show `sections` and return the engineer's choice with its section's index.
+pub fn pick(sections: &[Section], kind: Kind) -> Result<(usize, Choice), PickError> {
+    let lines = lines(sections);
     match kind {
-        Kind::Keyboard => keyboard::pick(rows),
-        Kind::Numbered => numbered::pick(rows),
+        Kind::Keyboard => keyboard::pick(&lines),
+        Kind::Numbered => numbered::pick(&lines),
     }
 }

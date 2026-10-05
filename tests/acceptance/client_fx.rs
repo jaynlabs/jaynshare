@@ -52,6 +52,15 @@ pub(crate) fn fake_claude_binary() -> PathBuf {
         .clone()
 }
 
+/// `tool`'s file name on this platform.
+fn executable(tool: &str) -> String {
+    if cfg!(windows) {
+        format!("{tool}.exe")
+    } else {
+        tool.to_string()
+    }
+}
+
 /// What one run of the fake saw.
 #[derive(Debug, Clone)]
 pub(crate) struct FakeClaudeRun {
@@ -113,8 +122,8 @@ pub(crate) fn roaming(home: &Path) -> PathBuf {
 /// write its files under `<instance root>/engineer/home` exactly as
 /// `join` leaves them: `client.toml`, `client-secret` (`0600`) and
 /// `ca.pem` with its fingerprint — the instance must run with
-/// `Setup { mitm: true.. }` (`Instance::start_client`). The fake `claude` is
-/// placed on `PATH`.
+/// `Setup { mitm: true.. }` (`Instance::start_client`). The fake is placed on
+/// `PATH` as `claude` and as `codex`.
 pub(crate) async fn install_client(instance: &Instance) -> ClientHome {
     let client = enroll(instance, "engineer-1", "Engineer One").await;
     let root = instance.root.join("engineer");
@@ -147,12 +156,10 @@ pub(crate) async fn install_client(instance: &Instance) -> ClientHome {
     let secret_file = dir.join("client-secret");
     write_private(&secret_file, &client.secret);
     crate::leaks::register_planted(&secret_file);
-    let claude = bin.join(if cfg!(windows) {
-        "claude.exe"
-    } else {
-        "claude"
-    });
-    fs::copy(fake_claude_binary(), &claude).expect("place the fake claude");
+    // One fake answers as either tool.
+    for tool in ["claude", "codex"] {
+        fs::copy(fake_claude_binary(), bin.join(executable(tool))).expect("place a fake tool");
+    }
     // The fake's own observation files hold the child environment — the
     // secret included, by design (allows the child's environment).
     for name in ["argv.json", "env.json"] {
@@ -264,12 +271,7 @@ impl ClientHome {
             .stderr(Stdio::piped());
         let mut child = command.spawn().expect("run jaynshare");
         if let Some(text) = stdin {
-            child
-                .stdin
-                .take()
-                .expect("stdin")
-                .write_all(text.as_bytes())
-                .expect("write stdin");
+            feed(&mut child, text);
         }
         let output = child.wait_with_output().expect("jaynshare output");
         (
@@ -308,13 +310,9 @@ impl ClientHome {
         })
     }
 
-    /// no `claude` on the search path any more.
-    pub(crate) fn remove_claude(&self) {
-        let _ = fs::remove_file(self.bin.join(if cfg!(windows) {
-            "claude.exe"
-        } else {
-            "claude"
-        }));
+    /// no `tool` on the search path any more.
+    pub(crate) fn remove(&self, tool: &str) {
+        let _ = fs::remove_file(self.bin.join(executable(tool)));
     }
 
     /// One `jaynshare` invocation on a pseudo-terminal: each

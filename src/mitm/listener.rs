@@ -166,12 +166,20 @@ async fn dispatch(
             "MITM mode is disabled on this server: the proxy listener serves nothing",
         )
     } else if request.method() == Method::CONNECT {
-        // The CA in force at the moment the request arrives, so a
+        // The CAs in force at the moment the request arrives, so a
         // rotation is live on the next handshake. The per-request clone is
         // what lets a tunnel already established keep the leaf it
         // negotiated until it closes.
-        let ca = server.mitm_ca();
-        tunnel::handle(server, connector, host_addresses, ca, peer, request).await
+        let authorities = server.mitm_authorities().clone();
+        tunnel::handle(
+            server,
+            connector,
+            host_addresses,
+            authorities,
+            peer,
+            request,
+        )
+        .await
     } else if request.uri().scheme_str().is_some() {
         match &forwarder {
             Some(forwarder) => {
@@ -197,7 +205,7 @@ async fn dispatch(
 fn method_not_allowed(message: &str) -> Response<ResponseBody> {
     let mut response = crate::data_plane::envelope::proxy_response(
         StatusCode::METHOD_NOT_ALLOWED,
-        crate::anthropic::error_type::PROXY,
+        crate::provider::anthropic::error_type::PROXY,
         message,
     );
     use http::header::CONNECTION;

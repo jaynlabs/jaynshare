@@ -182,7 +182,7 @@ async fn run_exit_rows_before_the_replacement() {
     machine.set("proxy_url", &format!("{:?}", machine.proxy));
 
     // 13: no `claude` on the search path.
-    machine.remove_claude();
+    machine.remove("claude");
     let (code, _, stderr) = machine.jaynshare(&["claude", "--auto"], &[], None);
     assert_eq!(code, 13, "{stderr}");
     assert!(stderr.starts_with("cli_claude_missing:"), "{stderr}");
@@ -273,7 +273,7 @@ async fn no_claude_on_the_path_refuses() {
     let _leak_sweep = crate::leaks::LeakGuard::default();
     let instance = Instance::start_client("no-claude-path-refuses").await;
     let machine = install_client(&instance).await;
-    machine.remove_claude();
+    machine.remove("claude");
     for args in [
         vec!["claude", "--auto"],
         vec!["claude", "--account", "anything"],
@@ -800,6 +800,164 @@ async fn direct_removes_every_pool_variable() {
     assert_eq!(seen.env.get("KEEP_ME"), Some(&"1".to_string()));
 }
 
+/// `codex` is the same launch with Codex's variables: its CA variable at
+/// `ca.pem`, its own upstream and API keys removed, and no deadline variable
+/// (Codex has none). A pooled launch puts `--no-daemon` first. A refusal names `jaynshare codex --direct`, which runs
+/// Codex outside the pool, and no `codex` is exit 13.
+#[tokio::test(flavor = "multi_thread")]
+async fn codex_launches_with_its_own_variables() {
+    let _leak_sweep = crate::leaks::LeakGuard::default();
+    let instance = Instance::start_client("codex-own-variables").await;
+    let machine = install_client(&instance).await;
+    // With `claude` gone, the fake that runs can only be `codex`.
+    machine.remove("claude");
+    let ca = machine.client_dir.join("ca.pem").display().to_string();
+    let stale = [
+        ("HTTPS_PROXY", "http://stale.invalid:1"),
+        ("OPENAI_API_KEY", "sk-stale"),
+        ("CODEX_API_KEY", "sk-stale"),
+        ("OPENAI_BASE_URL", "http://stale.invalid:1"),
+        ("CODEX_CA_CERTIFICATE", "/stale/ca.pem"),
+        ("JAYNSHARE_STATUSLINE", "stale"),
+        ("API_TIMEOUT_MS", "5000"),
+    ];
+
+    let (code, _, stderr) =
+        machine.jaynshare(&["codex", "--auto", "--", "exec", "hello"], &stale, None);
+    assert_eq!(code, 0, "the fake exits 0: {stderr}");
+    let seen = machine.claude_ran().expect("Codex was launched");
+    assert_eq!(
+        seen.argv,
+        ["--no-daemon", "exec", "hello"],
+        "Codex's shared server never takes a pooled turn"
+    );
+    assert_eq!(seen.env.get("CODEX_CA_CERTIFICATE"), Some(&ca));
+    let proxy = seen.env.get("HTTPS_PROXY").expect("the proxy URL");
+    assert!(
+        proxy.ends_with(machine.proxy.trim_start_matches("http://")),
+        "{proxy}"
+    );
+    assert_eq!(seen.pin(), None, "--auto carries no pin");
+    for name in [
+        "OPENAI_API_KEY",
+        "CODEX_API_KEY",
+        "OPENAI_BASE_URL",
+        "NODE_EXTRA_CA_CERTS",
+    ] {
+        assert!(!seen.env.contains_key(name), "{name} reached Codex");
+    }
+    assert_eq!(
+        seen.env.get("JAYNSHARE_STATUSLINE").map(String::as_str),
+        Some("1")
+    );
+    assert_eq!(
+        seen.env.get("API_TIMEOUT_MS").map(String::as_str),
+        Some("5000"),
+        "Claude Code's deadline is not Codex's"
+    );
+
+    let (code, _, stderr) = machine.jaynshare(&["codex", "--direct"], &stale, None);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        stderr.contains("Codex runs under your own login"),
+        "{stderr}"
+    );
+    let seen = machine.claude_ran().expect("Codex was launched");
+    assert!(
+        seen.argv.is_empty(),
+        "--direct is plain Codex: {:?}",
+        seen.argv
+    );
+    for &(name, _) in stale.iter().take(6) {
+        assert!(!seen.env.contains_key(name), "{name} reached Codex");
+    }
+
+    machine.set("proxy_url", "\"http://127.0.0.1:1\"");
+    let (code, _, stderr) = machine.jaynshare(&["codex", "--auto"], &[], None);
+    assert_eq!(code, 4, "{stderr}");
+    assert!(stderr.contains("`jaynshare codex --direct`"), "{stderr}");
+    machine.set("proxy_url", &format!("{:?}", machine.proxy));
+
+    machine.remove("codex");
+    let (code, _, stderr) = machine.jaynshare(&["codex", "--auto"], &[], None);
+    assert_eq!(code, 13, "{stderr}");
+    assert!(stderr.starts_with("cli_codex_missing:"), "{stderr}");
+}
+
+/// `codex --account` resolves among the Codex accounts (`provider=codex`);
+/// `claude --account` names no provider, which every server reads as
+/// Anthropic.
+#[tokio::test(flavor = "multi_thread")]
+async fn codex_account_resolves_among_codex_accounts() {
+    let _leak_sweep = crate::leaks::LeakGuard::default();
+    let fake = FakeControl::start(|request: &str| {
+        let mut body = if request.starts_with("GET /control/v1/client/accounts/resolve") {
+            json!({ "account": { "handle": "h-alice", "display_name": "alice", "selectable": true } })
+        } else {
+            snapshot_body(None)
+        };
+        body["control_api_version"] = json!(1);
+        http_reply(200, "application/json", &body.to_string())
+    });
+    let instance = Instance::start_client("codex-account-resolves").await;
+    let machine = install_client(&instance).await;
+    machine.set("base_url", &format!("{:?}", fake.origin()));
+    for (tool, scoped) in [("codex", true), ("claude", false)] {
+        let (code, _, stderr) = machine.jaynshare(&[tool, "--account", "alice"], &[], None);
+        assert_eq!(code, 0, "{tool}: {stderr}");
+        let seen = machine.claude_ran().expect("the tool was launched");
+        assert_eq!(seen.pin(), Some(token(true, "h-alice")), "{tool}");
+        let resolve = fake
+            .seen()
+            .into_iter()
+            .rfind(|r| r.starts_with("GET /control/v1/client/accounts/resolve"))
+            .expect("a resolve");
+        let line = resolve.lines().next().unwrap_or_default();
+        assert_eq!(line.contains("&provider=codex "), scoped, "{tool}: {line}");
+    }
+}
+
+/// Against a server holding both providers' accounts, each tool resolves
+/// among its own: a reference matching one account per provider is not
+/// ambiguous, and a Claude account is not found from `jaynshare codex`.
+#[tokio::test(flavor = "multi_thread")]
+async fn each_tool_resolves_among_its_own_provider_s_accounts() {
+    let _leak_sweep = crate::leaks::LeakGuard::default();
+    let mut instance = Instance::start_client("each-tool-own-provider").await;
+    add_two(&instance);
+    instance.restart_with_state(|state| {
+        let record = state["accounts"]
+            .as_array_mut()
+            .expect("accounts")
+            .iter_mut()
+            .find(|r| r["display_name"] == "FSUB2")
+            .expect("the FSUB2 record");
+        record["provider"] = json!("codex");
+        record["chatgpt_account_id"] = json!("ws-fsub2");
+    });
+    let machine = install_client(&instance).await;
+    for (tool, reference, pinned) in [
+        ("claude", FIXTURE_ORG_UUID, "FSUB"),
+        ("codex", FIXTURE_ORG_UUID, "FSUB2"),
+    ] {
+        let (code, _, stderr) = machine.jaynshare(&[tool, "--account", reference], &[], None);
+        assert_eq!(code, 0, "{tool}: {stderr}");
+        let seen = machine.claude_ran().expect("the tool was launched");
+        assert_eq!(
+            seen.pin(),
+            Some(token(true, &instance.handle(pinned))),
+            "{tool}"
+        );
+    }
+    let (code, _, stderr) = machine.jaynshare(&["codex", "--account", "FSUB"], &[], None);
+    assert_eq!(code, 6, "{stderr}");
+    assert!(
+        machine.claude_ran().is_none(),
+        "refused before Codex started"
+    );
+    instance.stop();
+}
+
 /// The account intent is a pin: the
 /// `JAYNSHARE_ACCOUNT` variable is the same input as `--account`, the child
 /// gets the pin as its proxy URL's user field and never the variable, and an
@@ -1046,7 +1204,7 @@ async fn the_secret_is_in_no_argument_vector_or_message() {
     assert!(!leaks(&stdout) && !leaks(&stderr));
     machine.set("proxy_url", &format!("{:?}", machine.proxy));
 
-    machine.remove_claude();
+    machine.remove("claude");
     let (exit, stdout, stderr) = machine.jaynshare(&["claude", "--auto"], &[], None);
     assert_eq!(exit, 13, "no Claude Code: {stderr}");
     assert!(!leaks(&stdout) && !leaks(&stderr));
@@ -1496,7 +1654,7 @@ async fn windows_paths_profile_prerequisites_and_no_fallback() {
     assert_eq!(code, 0, "{stderr}");
 
     // A missing prerequisite refuses, naming what to install.
-    machine.remove_claude();
+    machine.remove("claude");
     let (code, _, stderr) = machine.jaynshare(&["claude", "--auto"], &[], None);
     assert_eq!(code, 13, "{stderr}");
     assert!(stderr.contains("install Claude Code"), "{stderr}");

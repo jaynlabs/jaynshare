@@ -24,9 +24,9 @@ use time::{Duration, OffsetDateTime};
 use tokio::net::TcpListener;
 use uuid::Uuid;
 
-use crate::anthropic::{AUTHORIZE_URL, OAUTH_CLIENT_ID, OAUTH_SCOPES, OAUTH_SUCCESS_URL};
 use crate::control::percent_decode;
 use crate::pool::{Account, Credential, OperationError, Source};
+use crate::provider::{Grant, Provider};
 use crate::server::{MutateError, Server};
 use crate::timestamp::rfc3339;
 
@@ -134,6 +134,7 @@ struct LoginSecret {
     redirect_uri: String,
     display_name: Option<String>,
     owner: Option<String>,
+    provider: Provider,
 }
 
 impl LoginSecret {
@@ -149,32 +150,9 @@ impl LoginSecret {
             redirect_uri,
             display_name,
             owner: None,
+            provider: Provider::Anthropic,
         }
     }
-}
-
-/// The authorisation URL with every required parameter.
-fn authorization_url(challenge: &str, redirect_uri: &str, state: &str) -> String {
-    format!(
-        "{AUTHORIZE_URL}?code=true&client_id={}&response_type=code&redirect_uri={}&scope={}&code_challenge={challenge}&code_challenge_method=S256&state={state}",
-        url_encode(OAUTH_CLIENT_ID),
-        url_encode(redirect_uri),
-        url_encode(OAUTH_SCOPES),
-    )
-}
-
-/// RFC 3986 unreserved characters stay; everything else is percent-encoded.
-fn url_encode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for byte in s.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(byte as char)
-            }
-            _ => out.push_str(&format!("%{byte:02X}")),
-        }
-    }
-    out
 }
 
 /// The `state` parameter of an authorisation URL.
@@ -277,28 +255,35 @@ impl Logins {
         &self,
         server: std::sync::Arc<Server>,
         starter: Starter,
+        provider: Provider,
         display_name: Option<String>,
     ) -> Result<Started, String> {
         self.sweep();
         let (listener, port, owner) = match starter {
             Starter::Operator => {
-                let (listener, port) = callback_listener().await?;
-                (Some(listener), port, None)
+                let wanted = provider.callback_port();
+                match callback_listener(wanted.unwrap_or(0)).await {
+                    Ok((listener, port)) => (Some(listener), port, None),
+                    // Another process holds the fixed port: the operator pastes.
+                    Err(_) if let Some(port) = wanted => (None, port, None),
+                    Err(why) => return Err(why),
+                }
             }
             Starter::Client { id, port } => (None, port, Some(id)),
         };
-        let redirect_uri = format!("http://localhost:{port}/callback");
         let secret = LoginSecret {
             owner: owner.clone(),
-            ..LoginSecret::generate(display_name, redirect_uri)
+            provider,
+            ..LoginSecret::generate(display_name, provider.redirect_uri(port))
         };
-        let url = authorization_url(
+        let url = provider.authorization_url(
             &challenge_of(&secret.verifier),
             &secret.redirect_uri,
             &secret.state,
         );
-        // A client opens the browser on its own machine.
-        let manual_code_required = listener.is_some() && !open_browser(&url);
+        // A client opens the browser on its own machine; with no listener
+        // the operator pastes the callback URL.
+        let manual_code_required = owner.is_none() && (listener.is_none() || !open_browser(&url));
         let expires_at = OffsetDateTime::now_utc() + TTL;
         let (events, rx) = tokio::sync::mpsc::unbounded_channel();
         let id = Uuid::new_v4();
@@ -460,7 +445,7 @@ async fn drive(
                 None => break End::Failed { reason: "the login operation lost its channels".into() },
             },
             accepted = accept(listener.as_ref()) => match accepted {
-                Ok((stream, _)) => match answer_callback(stream, &secret.state).await {
+                Ok((stream, _)) => match answer_callback(stream, &secret.state, secret.provider).await {
                     Ok(Some(query)) => {
                         break match parse_paste(&query, &secret.state) {
                             Paste::Code(code) => complete(&server, id, &secret, code).await,
@@ -509,8 +494,8 @@ enum End {
     Succeeded { account: Uuid },
 }
 
-async fn callback_listener() -> Result<(TcpListener, u16), String> {
-    let listener = TcpListener::bind(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
+async fn callback_listener(port: u16) -> Result<(TcpListener, u16), String> {
+    let listener = TcpListener::bind(std::net::SocketAddr::from(([127, 0, 0, 1], port)))
         .await
         .map_err(|e| format!("cannot open the loopback callback listener: {e}"))?;
     let port = listener
@@ -539,36 +524,21 @@ async fn complete(
     code: String,
 ) -> End {
     server.logins.set_state(id, OpState::Exchanging);
-    let tokens = match server
-        .upstream
-        .exchange_code(&code, &secret.state, &secret.verifier, &secret.redirect_uri)
-        .await
-    {
-        Ok(tokens) => tokens,
-        Err(reason) => return End::Failed { reason },
+    let grant = Grant::Code {
+        code: &code,
+        state: &secret.state,
+        verifier: &secret.verifier,
+        redirect_uri: &secret.redirect_uri,
     };
-    // The profile comes first; without an account UUID nothing is saved.
-    let profile = match server
-        .upstream
-        .fetch_profile(tokens.access_token.expose())
-        .await
-    {
-        Ok(profile) if profile.account_uuid.is_some() => profile,
-        Ok(_) => {
-            return End::Failed {
-                reason: "the profile carries no account UUID; the account was not saved".into(),
-            };
-        }
-        Err(reason) => {
-            return End::Failed {
-                reason: format!("profile lookup failed: {reason}"),
-            };
-        }
+    let (tokens, profile) = match server.upstream.exchange_code(secret.provider, grant).await {
+        Ok(exchanged) => exchanged,
+        Err(reason) => return End::Failed { reason },
     };
     let name = secret.display_name.clone();
     let account = Account {
         owner: secret.owner.clone(),
         ..Account::new(
+            secret.provider,
             // `pool.add` derives the name from the profile when none is given.
             name.clone().unwrap_or_default(),
             profile,
@@ -622,6 +592,7 @@ async fn complete(
 pub(crate) async fn await_callback(
     listener: &TcpListener,
     expected_state: &str,
+    provider: Provider,
 ) -> Result<String, String> {
     loop {
         let (stream, _) = listener
@@ -629,7 +600,7 @@ pub(crate) async fn await_callback(
             .await
             .map_err(|e| format!("the callback listener failed: {e}"))?;
         // A broken browser connection or a stray request keeps the wait going.
-        if let Ok(Some(query)) = answer_callback(stream, expected_state).await
+        if let Ok(Some(query)) = answer_callback(stream, expected_state, provider).await
             && parse_paste(&query, expected_state) != Paste::Other
         {
             return Ok(query);
@@ -643,6 +614,7 @@ pub(crate) async fn await_callback(
 async fn answer_callback(
     stream: tokio::net::TcpStream,
     expected_state: &str,
+    provider: Provider,
 ) -> Result<Option<String>, String> {
     let (query_tx, query_rx) = tokio::sync::oneshot::channel::<String>();
     let expected = expected_state.to_string();
@@ -655,20 +627,23 @@ async fn answer_callback(
             let _ = tx.send(query.clone());
         }
         async move {
-            let paste = parse_paste(&query, &expected);
-            let status = match paste {
-                Paste::Code(_) => StatusCode::FOUND,
-                _ => StatusCode::BAD_REQUEST,
-            };
-            let mut builder = Response::builder().status(status);
-            if status == StatusCode::FOUND {
-                builder = builder.header(LOCATION, OAUTH_SUCCESS_URL);
-            }
-            Ok::<_, std::convert::Infallible>(
-                builder
+            let response = match (parse_paste(&query, &expected), provider.success_page()) {
+                (Paste::Code(_), Some(page)) => Response::builder()
+                    .status(StatusCode::FOUND)
+                    .header(LOCATION, page)
                     .body(Full::new(Bytes::new()))
                     .expect("a static response builds"),
-            )
+                (Paste::Code(_), None) => Response::builder()
+                    .body(Full::new(Bytes::from_static(
+                        b"Signed in. You can close this tab.",
+                    )))
+                    .expect("a static response builds"),
+                _ => Response::builder()
+                    .status(StatusCode::BAD_REQUEST)
+                    .body(Full::new(Bytes::new()))
+                    .expect("a static response builds"),
+            };
+            Ok::<_, std::convert::Infallible>(response)
         }
     });
     // A browser would otherwise hold the connection, and with it the query, for minutes.
@@ -683,6 +658,7 @@ async fn answer_callback(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::codex;
 
     #[test]
     fn the_pkce_challenge_matches_the_rfc_7636_reference_vector() {
@@ -707,20 +683,26 @@ mod tests {
         assert_ne!(challenge_of(&a.verifier), challenge_of(&b.verifier));
     }
 
+    fn query_of(url: &str) -> HashMap<String, String> {
+        url.split_once('?')
+            .expect("query")
+            .1
+            .split('&')
+            .map(|p| p.split_once('=').expect("every parameter has a value"))
+            .map(|(k, v)| (k.to_string(), percent_decode(v)))
+            .collect()
+    }
+
     #[test]
     fn the_authorisation_url_carries_every_required_parameter() {
-        let url = authorization_url(
+        use crate::provider::anthropic::{OAUTH_CLIENT_ID, OAUTH_SCOPES};
+        let url = Provider::Anthropic.authorization_url(
             "the-challenge",
             "http://localhost:5173/callback",
             "the-state",
         );
         assert!(url.starts_with("https://claude.ai/oauth/authorize?"));
-        let query = url.split_once('?').expect("query").1;
-        let params: HashMap<String, String> = query
-            .split('&')
-            .map(|p| p.split_once('=').expect("every parameter has a value"))
-            .map(|(k, v)| (k.to_string(), percent_decode(v)))
-            .collect();
+        let params = query_of(&url);
         assert_eq!(params["code"], "true");
         assert_eq!(params["client_id"], OAUTH_CLIENT_ID);
         assert_eq!(params["response_type"], "code");
@@ -732,8 +714,31 @@ mod tests {
     }
 
     #[test]
+    fn the_codex_authorisation_url_is_the_codex_cli_s() {
+        let redirect = Provider::Codex.redirect_uri(codex::CALLBACK_PORT);
+        let url = Provider::Codex.authorization_url("the-challenge", &redirect, "the-state");
+        assert!(url.starts_with("https://auth.openai.com/oauth/authorize?"));
+        let params = query_of(&url);
+        assert_eq!(params["response_type"], "code");
+        assert_eq!(params["client_id"], codex::OAUTH_CLIENT_ID);
+        assert_eq!(
+            params["redirect_uri"],
+            "http://127.0.0.1:1455/auth/callback"
+        );
+        assert_eq!(params["scope"], codex::OAUTH_SCOPES);
+        assert_eq!(params["code_challenge"], "the-challenge");
+        assert_eq!(params["code_challenge_method"], "S256");
+        assert_eq!(params["state"], "the-state");
+        assert_eq!(params["id_token_add_organizations"], "true");
+        assert_eq!(params["codex_cli_simplified_flow"], "true");
+        assert_eq!(params["originator"], "codex_cli_rs");
+        assert_eq!(state_of(&url).as_deref(), Some("the-state"));
+    }
+
+    #[test]
     fn the_state_comes_back_out_of_the_authorisation_url() {
-        let url = authorization_url("c", "http://localhost:1/callback", "a-b_c");
+        let url =
+            Provider::Anthropic.authorization_url("c", "http://localhost:1/callback", "a-b_c");
         assert_eq!(state_of(&url).as_deref(), Some("a-b_c"));
         assert_eq!(state_of("https://claude.ai/oauth/authorize"), None);
     }
@@ -764,5 +769,30 @@ mod tests {
             Paste::Code("no-equals-sign".into())
         );
         assert_eq!(parse_paste("", "s"), Paste::Other);
+    }
+
+    #[tokio::test]
+    async fn a_callback_lands_on_the_provider_s_success_page_or_is_answered_here() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for (provider, path, status_line) in [
+            (Provider::Codex, codex::CALLBACK_PATH, "HTTP/1.1 200"),
+            (Provider::Anthropic, "/callback", "HTTP/1.1 302"),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+            let addr = listener.local_addr().expect("address");
+            let waiting =
+                tokio::spawn(async move { await_callback(&listener, "s", provider).await });
+            let mut browser = tokio::net::TcpStream::connect(addr).await.expect("connect");
+            let request = format!("GET {path}?code=c&state=s HTTP/1.1\r\nhost: x\r\n\r\n");
+            browser.write_all(request.as_bytes()).await.expect("write");
+            let mut response = String::new();
+            browser.read_to_string(&mut response).await.expect("read");
+
+            assert!(response.starts_with(status_line), "{response}");
+            assert_eq!(
+                waiting.await.expect("task").expect("query"),
+                "code=c&state=s"
+            );
+        }
     }
 }

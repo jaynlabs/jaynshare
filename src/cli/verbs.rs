@@ -16,83 +16,85 @@ use super::args::{
 };
 use super::control::Control;
 use super::{Failure, Outcome, colour_wanted};
+use crate::picker::render::{BAR_WIDTH, Charset, Paint, linear_usage};
 
-/// The bar's width, in cells, as the first release drew it.
-const BAR_WIDTH: usize = 18;
+/// An RFC 3339 member as an instant.
+fn instant(value: &Value) -> Option<OffsetDateTime> {
+    OffsetDateTime::parse(
+        value.as_str()?,
+        &time::format_description::well_known::Rfc3339,
+    )
+    .ok()
+}
 
-/// One cell's colour on the bar's green→yellow→red gradient.
-fn gradient(index: usize) -> (u8, u8, u8) {
-    let t = index as f64 / (BAR_WIDTH - 1) as f64;
-    let (from, to, p) = if t < 0.5 {
-        ((35, 209, 96), (245, 185, 40), t * 2.0)
-    } else {
-        ((245, 185, 40), (239, 68, 68), (t - 0.5) * 2.0)
+pub(super) fn rate_limits_table(accounts: &[Value], colour: bool) -> String {
+    use crate::picker::render::sanitize;
+
+    let paint = Paint {
+        colour,
+        charset: Charset::Unicode,
     };
-    let mix = |a: u8, b: u8| (a as f64 + (b as f64 - a as f64) * p).round() as u8;
-    (mix(from.0, to.0), mix(from.1, to.1), mix(from.2, to.2))
-}
-
-/// The colour decisions for one rendering: bold, dim and the bar
-/// gradient on a terminal, the same characters plain otherwise.
-struct Paint {
-    colour: bool,
-}
-
-impl Paint {
-    fn wrap(&self, code: &str, text: &str) -> String {
-        if self.colour {
-            format!("\x1b[{code}m{text}\x1b[0m")
+    let now = OffsetDateTime::now_utc();
+    if accounts.is_empty() {
+        return format!("{}  (none)", paint.bold("accounts"));
+    }
+    let names: Vec<_> = accounts
+        .iter()
+        .map(|account| {
+            sanitize(
+                account["display_name"].as_str().unwrap_or(""),
+                usize::MAX,
+                Charset::Unicode,
+            )
+        })
+        .collect();
+    let name_width = names
+        .iter()
+        .map(|name| name.chars().count())
+        .max()
+        .unwrap()
+        .max(7);
+    let window_width = BAR_WIDTH + 7;
+    let mut out = format!(
+        "{}\n  {}\n  {}",
+        paint.bold("accounts"),
+        paint.bold(&format!(
+            "{:<name_width$} │ {:<9} │ {:<window_width$} │ Weekly used",
+            "Account", "Provider", "5h used"
+        )),
+        paint.dim(&"─".repeat(name_width + 9 + 2 * window_width + 9)),
+    );
+    let cell = |account: &Value, name: &str| {
+        let (value, reset) = if let Some(limits) = account.get("rate_limits") {
+            (&limits[name], &limits[format!("{name}_reset_at")])
         } else {
-            text.to_owned()
-        }
-    }
-    fn bold(&self, text: &str) -> String {
-        self.wrap("1", text)
-    }
-    fn dim(&self, text: &str) -> String {
-        self.wrap("2", text)
-    }
-    /// A diagnostic line's label, dim and padded to the value column.
-    fn label(&self, text: &str) -> String {
-        self.dim(&format!("{text:<9}"))
-    }
-    fn gray(&self, text: &str) -> String {
-        self.wrap("90", text)
-    }
-    fn green(&self, text: &str) -> String {
-        self.wrap("32", text)
-    }
-    fn yellow(&self, text: &str) -> String {
-        self.wrap("33", text)
-    }
-    fn red(&self, text: &str) -> String {
-        self.wrap("31", text)
-    }
-    fn rgb(&self, (r, g, b): (u8, u8, u8), text: &str) -> String {
-        if self.colour {
-            format!("\x1b[38;2;{r};{g};{b}m{text}\x1b[0m")
-        } else {
-            text.to_owned()
-        }
-    }
-}
-
-/// The utilisation bar: `█` to the fill on the gradient, `░` beyond,
-/// `?`s when the bucket's state is unknown.
-fn usage_bar(ratio: Option<f64>, paint: &Paint) -> String {
-    let Some(ratio) = ratio else {
-        return format!("[{}]", paint.gray(&"?".repeat(BAR_WIDTH)));
+            let bucket_name = if name == "five_hour" {
+                "session"
+            } else {
+                "weekly"
+            };
+            let bucket = account["buckets"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|bucket| bucket["name"] == bucket_name)
+                .unwrap_or(&Value::Null);
+            (&bucket["utilisation"], &bucket["reset"])
+        };
+        let ratio = value.as_f64().filter(|ratio| ratio.is_finite());
+        paint.usage(ratio, linear_usage(name, instant(reset), now), BAR_WIDTH)
     };
-    let fill = (ratio.clamp(0.0, 1.0) * BAR_WIDTH as f64).round() as usize;
-    let mut bar = String::new();
-    for index in 0..BAR_WIDTH {
-        if index < fill {
-            bar.push_str(&paint.rgb(gradient(index), "█"));
-        } else {
-            bar.push_str(&paint.gray("░"));
-        }
+    for (account, name) in accounts.iter().zip(names) {
+        out.push_str(&format!(
+            "\n  {name:<name_width$} │ {:<9} │ {} │ {}",
+            provider_cell(account),
+            cell(account, "five_hour"),
+            cell(account, "weekly"),
+        ));
     }
-    format!("[{bar}]")
+    out.push('\n');
+    out.push_str(&paint.legend());
+    out
 }
 
 /// A token count as `980`, `12k` or `1.2M`.
@@ -139,10 +141,8 @@ fn future_countdown(b: &Value, now: OffsetDateTime) -> Option<(&'static str, Str
     None
 }
 
-/// One snapshot, rendered as the pool table: the heading, the routes,
-/// one block per account with a utilisation bar per bucket, and the
-/// default account. `--verbose` adds the diagnostics; a section flag
-/// prints that section alone. `--check` never reaches the rendering:
+/// The rate-limit table; `--verbose` adds the snapshot's diagnostics.
+/// A section flag prints that section alone. `--check` never reaches the rendering:
 /// `main` answers with the exit code alone.
 pub(super) async fn status(control: &Control, cli: &Cli, args: &StatusArgs) -> Outcome {
     let body = control
@@ -159,14 +159,15 @@ fn render_status(body: &Value, cli: &Cli, args: &StatusArgs) -> String {
     let s = &body["status"];
     let paint = Paint {
         colour: colour_wanted(cli),
+        charset: Charset::Unicode,
     };
     let now = OffsetDateTime::now_utc();
-    let default_handle = s["default_account"]["handle"].as_str();
+    let default_handles = default_handles(s);
     let verbose = args.verbose;
 
     if args.accounts {
         let mut out = String::new();
-        accounts_into(s, default_handle, &paint, verbose, now, &mut out);
+        accounts_into(s, &default_handles, &paint, verbose, now, &mut out);
         return out.trim_end().to_owned();
     }
     if args.routes {
@@ -185,26 +186,27 @@ fn render_status(body: &Value, cli: &Cli, args: &StatusArgs) -> String {
         return out.trim_end().to_owned();
     }
 
+    let accounts = s["accounts"].as_array().map(Vec::as_slice).unwrap_or(&[]);
+    let table = rate_limits_table(accounts, paint.colour);
+    if !verbose {
+        return table;
+    }
     let mut out = format!(
-        "{} status\n",
+        "{table}\n{} status\n",
         paint.yellow(&paint.bold(&format!(
             "◆ jaynshare {}",
             s["server"]["version"].as_str().unwrap_or("")
         )))
     );
-    if verbose {
-        server_into(s, &paint, &mut out);
-        sessions_into(s, &paint, &mut out);
-        probe_into(s, &paint, &mut out);
-    }
+    server_into(s, &paint, &mut out);
+    sessions_into(s, &paint, &mut out);
+    probe_into(s, &paint, &mut out);
     routes_into(s, &paint, verbose, &mut out);
-    accounts_into(s, default_handle, &paint, verbose, now, &mut out);
+    accounts_into(s, &default_handles, &paint, verbose, now, &mut out);
     default_into(s, &paint, verbose, &mut out);
-    if verbose {
-        clients_into(s, &paint, &mut out);
-        storage_into(s, &paint, &mut out);
-        config_into(s, &paint, &mut out);
-    }
+    clients_into(s, &paint, &mut out);
+    storage_into(s, &paint, &mut out);
+    config_into(s, &paint, &mut out);
     out.trim_end().to_owned()
 }
 
@@ -334,7 +336,7 @@ fn routes_into(s: &Value, paint: &Paint, verbose: bool, out: &mut String) {
 
 fn accounts_into(
     s: &Value,
-    default_handle: Option<&str>,
+    default_handles: &[&str],
     paint: &Paint,
     verbose: bool,
     now: OffsetDateTime,
@@ -346,13 +348,15 @@ fn accounts_into(
         return;
     }
     for account in accounts {
-        account_block(account, default_handle, paint, verbose, now, out);
+        account_block(account, default_handles, paint, verbose, now, out);
     }
+    out.push_str(&paint.legend());
+    out.push('\n');
 }
 
 fn account_block(
     a: &Value,
-    default_handle: Option<&str>,
+    default_handles: &[&str],
     paint: &Paint,
     verbose: bool,
     now: OffsetDateTime,
@@ -360,7 +364,9 @@ fn account_block(
 ) {
     let name = a["display_name"].as_str().unwrap_or("");
     let kind = a["kind"].as_str().unwrap_or("");
-    let is_default = default_handle.is_some_and(|h| a["handle"].as_str() == Some(h));
+    let is_default = a["handle"]
+        .as_str()
+        .is_some_and(|h| default_handles.contains(&h));
     let marker = if is_default {
         paint.green(">")
     } else {
@@ -371,7 +377,7 @@ fn account_block(
     } else {
         name.to_owned()
     };
-    let mut header = format!("{marker} {shown} ({kind}");
+    let mut header = format!("{marker} {shown} ({} {kind}", provider_cell(a));
     if verbose {
         header += &format!(", prio {}", a["priority"]);
     }
@@ -470,17 +476,18 @@ fn bucket_line(b: &Value, paint: &Paint, now: OffsetDateTime, out: &mut String) 
         _ => None,
     };
     let ratio = utilisation.or(counter);
+    let linear = linear_usage(name, instant(&b["reset"]), now);
     if b["state"].as_str() == Some("unknown") && ratio.is_none() {
         out.push_str(&format!(
             "  {label} {} {}\n",
-            usage_bar(None, paint),
+            paint.bar(None, linear, BAR_WIDTH),
             paint.gray("unknown")
         ));
         return;
     }
     let mut line = format!(
         "  {label} {} {}",
-        usage_bar(ratio, paint),
+        paint.bar(ratio, linear, BAR_WIDTH),
         ratio.map_or_else(|| "?".to_owned(), |r| format!("{:.0}%", r * 100.0))
     );
     if b["state"].as_str() == Some("exhausted") {
@@ -493,27 +500,44 @@ fn bucket_line(b: &Value, paint: &Paint, now: OffsetDateTime, out: &mut String) 
     out.push('\n');
 }
 
+/// Each provider's default; a 2.1.x server names Anthropic's alone.
+fn defaults(s: &Value) -> Vec<&Value> {
+    let defaults: Vec<&Value> = match s["default_accounts"].as_object() {
+        Some(by_provider) => by_provider.values().collect(),
+        None => vec![&s["default_account"]],
+    };
+    defaults.into_iter().filter(|d| !d.is_null()).collect()
+}
+
+fn default_handles(s: &Value) -> Vec<&str> {
+    defaults(s)
+        .into_iter()
+        .filter_map(|d| d["handle"].as_str())
+        .collect()
+}
+
 fn default_into(s: &Value, paint: &Paint, verbose: bool, out: &mut String) {
     let label = paint.bold("default");
-    match &s["default_account"] {
-        Value::Null => out.push_str(&format!("{label}  none\n")),
-        d => {
-            let name = s["accounts"]
-                .as_array()
-                .and_then(|a| a.iter().find(|x| x["handle"] == d["handle"]))
-                .and_then(|x| x["display_name"].as_str())
-                .unwrap_or("?");
-            let mut line = format!(
-                "{label}  {name} ({}) operator-chosen {}",
-                d["handle"].as_str().unwrap_or(""),
-                d["operator_chosen"]
-            );
-            if verbose {
-                line += &format!(" since {}", d["since"].as_str().unwrap_or("null"));
-            }
-            out.push_str(&line);
-            out.push('\n');
+    let defaults = defaults(s);
+    if defaults.is_empty() {
+        out.push_str(&format!("{label}  none\n"));
+    }
+    for d in defaults {
+        let name = s["accounts"]
+            .as_array()
+            .and_then(|a| a.iter().find(|x| x["handle"] == d["handle"]))
+            .and_then(|x| x["display_name"].as_str())
+            .unwrap_or("?");
+        let mut line = format!(
+            "{label}  {name} ({}) operator-chosen {}",
+            d["handle"].as_str().unwrap_or(""),
+            d["operator_chosen"]
+        );
+        if verbose {
+            line += &format!(" since {}", d["since"].as_str().unwrap_or("null"));
         }
+        out.push_str(&line);
+        out.push('\n');
     }
 }
 
@@ -661,6 +685,12 @@ pub(super) fn health_cell(a: &Value) -> String {
     }
 }
 
+/// The account's provider; a 2.1.x server names none, its accounts are
+/// Anthropic's.
+pub(super) fn provider_cell(a: &Value) -> &str {
+    a["provider"].as_str().unwrap_or("anthropic")
+}
+
 /// The account row: every fact the operator reads at a glance,
 /// each bucket as `name=state@reset` (unknown says so, never `0%`).
 pub(super) fn account_row(a: &Value) -> String {
@@ -697,8 +727,9 @@ pub(super) fn account_row(a: &Value) -> String {
     };
     let probe = a["probe"]["outcome"].as_str().unwrap_or("not-run");
     format!(
-        "{}  {}/{}  enabled {}  {health}  priority {}  {eligibility}  [{buckets}]  {hold}  {ramp}  sessions {}  usage in {} out {} req {}  probe {probe}  handle {}",
+        "{}  {} {}/{}  enabled {}  {health}  priority {}  {eligibility}  [{buckets}]  {hold}  {ramp}  sessions {}  usage in {} out {} req {}  probe {probe}  handle {}",
         a["display_name"].as_str().unwrap_or(""),
+        provider_cell(a),
         a["kind"].as_str().unwrap_or(""),
         a["source_class"].as_str().unwrap_or(""),
         a["enabled"],
@@ -1027,18 +1058,19 @@ pub(super) async fn switch(control: &Control, cli: &Cli, args: &SwitchArgs) -> O
     Ok((result, format!("{target}; ineligible: {reason} {detail}")))
 }
 
-/// One row per account, the default marked with `*`.
+/// One row per account, each provider's default marked with `*`.
 async fn switch_listing(control: &Control) -> Outcome {
     let body = control
         .expect(Method::GET, "/control/v1/status", None)
         .await?;
-    let default = body["status"]["default_account"]["handle"].clone();
+    let defaults = default_handles(&body["status"]);
     let rows: Vec<String> = body["status"]["accounts"]
         .as_array()
         .map(|a| {
             a.iter()
                 .map(|x| {
-                    let mark = if x["handle"] == default { "* " } else { "  " };
+                    let is_default = x["handle"].as_str().is_some_and(|h| defaults.contains(&h));
+                    let mark = if is_default { "* " } else { "  " };
                     format!("{mark}{}", account_row(x))
                 })
                 .collect()
@@ -1063,13 +1095,24 @@ async fn handle_of(control: &Control, reference: &str) -> Result<String, Failure
         .to_string())
 }
 
-/// Login: the URL goes to standard output first, states to
-/// standard error, the pasted code (when one is wanted) to `…/code`.
-pub(super) async fn account_login(control: &Control, cli: &Cli, args: &LoginArgs) -> Outcome {
+/// The operator's and the client's login body. Anthropic is the server's
+/// default, so a 2.1.x server is never sent `provider`.
+pub(super) fn login_body(args: &LoginArgs) -> Value {
     let mut body = json!({});
     if let Some(name) = args.name.as_deref() {
         body["display_name"] = json!(name);
     }
+    // Anthropic is the default, so a 2.1.x server is never sent the member.
+    if !args.provider.is_default() {
+        body["provider"] = json!(args.provider);
+    }
+    body
+}
+
+/// Login: the URL goes to standard output first, states to
+/// standard error, the pasted code (when one is wanted) to `…/code`.
+pub(super) async fn account_login(control: &Control, cli: &Cli, args: &LoginArgs) -> Outcome {
+    let body = login_body(args);
     let started = control
         .expect(Method::POST, "/control/v1/accounts/login", Some(&body))
         .await?;
@@ -1827,4 +1870,34 @@ pub(super) async fn ca_export(control: &Control, out: Option<&Path>) -> Outcome 
         }
     };
     Ok((result, line))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clients_and_operators_render_the_same_rate_limits() {
+        let reset = crate::timestamp::rfc3339(OffsetDateTime::now_utc() + time::Duration::hours(1));
+        let client = json!({
+            "display_name": "Desk",
+            "provider": "codex",
+            "rate_limits": {
+                "five_hour": 0.12, "weekly": 0.34,
+                "five_hour_reset_at": reset, "weekly_reset_at": reset,
+            },
+        });
+        let operator = json!({
+            "display_name": "Desk",
+            "provider": "codex",
+            "buckets": [
+                { "name": "weekly", "utilisation": 0.34, "reset": reset },
+                { "name": "session", "utilisation": 0.12, "reset": reset },
+            ],
+        });
+        assert_eq!(
+            rate_limits_table(&[operator], false),
+            rate_limits_table(&[client], false)
+        );
+    }
 }

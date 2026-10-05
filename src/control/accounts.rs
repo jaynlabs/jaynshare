@@ -21,13 +21,14 @@ use crate::pool::{
     Account, Credential, OAuthCredential, OperationError, Pool, Profile, ReferenceConflict,
     Resolve, Secret, Source,
 };
+use crate::provider::Provider;
 use crate::server::{MutateError, Server};
 use crate::state;
 use crate::timestamp::rfc3339;
 
 use super::{
     base, error, insecure_channel, insecure_channel_refusal, member_errors, mutation_body,
-    mutation_line, percent_decode, persist_failed, read, time_or_null,
+    mutation_line, percent_decode, persist_failed, provider_named, read, time_or_null,
 };
 
 /// The four credential sources, shared by add and replace.
@@ -459,7 +460,13 @@ pub(super) async fn add_account(
         .clone()
         .or_else(|| profile.email.clone())
         .unwrap_or_else(|| format!("account {}", profile.account_uuid.unwrap_or_default()));
-    let account = Account::new(name, profile, imported.source, imported.credential);
+    let account = Account::new(
+        Provider::Anthropic,
+        name,
+        profile,
+        imported.source,
+        imported.credential,
+    );
     let added = server.mutate_pool(|pool| {
         guarded(&server.config().config, pool, |pool| {
             let known: Vec<Uuid> = pool.accounts().iter().map(|a| a.handle).collect();
@@ -700,7 +707,11 @@ pub(super) fn remove_account(
     if let Some(refusal) = super::csrf_refusal(server, peer, Some(principal), headers) {
         return refusal;
     }
-    let was_default = server.pool.lock().expect("pool lock").default_account() == Some(handle);
+    let was_default = {
+        let pool = server.pool.lock().expect("pool lock");
+        pool.get(handle)
+            .is_some_and(|a| pool.default_account(a.provider) == Some(handle))
+    };
     let removed = server.mutate_pool(|pool| {
         guarded(&server.config().config, pool, |pool| {
             pool.remove(handle)
@@ -726,9 +737,10 @@ pub(super) fn remove_account(
     }
 }
 
+/// Among every account, or within one provider's with `&provider=`.
 pub(super) fn resolve(server: &Arc<Server>, query: Option<&str>) -> Response<ResponseBody> {
-    let reference = query
-        .and_then(|q| q.split('&').find_map(|kv| kv.strip_prefix("reference=")))
+    let member = |name: &str| query.and_then(|q| q.split('&').find_map(|kv| kv.strip_prefix(name)));
+    let reference = member("reference=")
         .map(percent_decode)
         .filter(|r| !r.is_empty() && r.len() <= 1024 && !r.chars().any(char::is_control));
     let Some(reference) = reference else {
@@ -740,12 +752,18 @@ pub(super) fn resolve(server: &Arc<Server>, query: Option<&str>) -> Response<Res
             vec![],
         );
     };
-    let found = server
-        .pool
-        .lock()
-        .expect("pool lock")
-        .resolve(&reference)
-        .map(|a| a.handle);
+    let provider = match provider_named(&json!(member("provider="))) {
+        Ok(provider) => provider,
+        Err(refusal) => return *refusal,
+    };
+    let found = {
+        let pool = server.pool.lock().expect("pool lock");
+        match provider {
+            Some(provider) => pool.resolve_in(provider, &reference),
+            None => pool.resolve(&reference),
+        }
+        .map(|a| a.handle)
+    };
     match found {
         Ok(handle) => read(json!({ "account": account_object(server, handle) })),
         Err(Resolve::NotFound) => error(StatusCode::NOT_FOUND, "account_not_found", "no account matches the reference", Some(reference), vec![]),
@@ -756,10 +774,10 @@ pub(super) fn resolve(server: &Arc<Server>, query: Option<&str>) -> Response<Res
             // is what disambiguates, so the message names it.
             &format!(
                 "the reference matches several accounts: {}; an organisation name or full organisation UUID is the qualifier",
-                names.join(", ")
+                Resolve::listed(&names)
             ),
             Some(reference),
-            names.into_iter().map(|n| json!({ "target": n, "code": "matches", "message": "this account matches the reference" })).collect(),
+            names.into_iter().map(|(n, provider)| json!({ "target": n, "code": "matches", "message": format!("this {} account matches the reference", provider.as_str()) })).collect(),
         ),
     }
 }
@@ -965,6 +983,7 @@ pub(super) fn project_account(
     json!({
         "handle": account.handle,
         "display_name": account.display_name,
+        "provider": account.provider,
         "kind": account.kind().as_str(),
         "source_class": account.source,
         "enabled": account.enabled,
@@ -972,7 +991,7 @@ pub(super) fn project_account(
         "health": { "state": health_state, "reason": reason, "since": time_or_null(since) },
         "profile": account.profile,
         "credential": credential,
-        "priority": selection::priority_of(account.handle, std::slice::from_ref(account), settings),
+        "priority": selection::priority_of(account, settings),
         "eligibility": {
             "eligible": eligible,
             "reason": ineligible,
@@ -1012,6 +1031,7 @@ mod tests {
         let attempted = now - Duration::seconds(1);
         let started = now - Duration::seconds(2);
         let mut account = Account::new(
+            crate::provider::Provider::Anthropic,
             "FSUB".into(),
             Profile::default(),
             Source::PortableJson,
@@ -1073,6 +1093,7 @@ mod tests {
             .expect("default settings")
             .selection;
         let mut account = Account::new(
+            crate::provider::Provider::Anthropic,
             "FSUB".into(),
             Profile::default(),
             Source::PortableJson,

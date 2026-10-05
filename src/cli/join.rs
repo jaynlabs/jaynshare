@@ -7,7 +7,7 @@
 
 use std::io::{IsTerminal, Write};
 use std::path::Path;
-use std::process::ExitStatus;
+use std::process::{ExitStatus, Stdio};
 use std::time::Duration;
 
 use http::Method;
@@ -19,6 +19,7 @@ use crate::bundle::{self, PinnedKey};
 use crate::client::{self, ClientInstallation, ClientRequest};
 use crate::config::platform;
 use crate::invite::Invite;
+use crate::provider::Provider;
 use crate::server::VERSION;
 
 fn local(code: i32, slug: &str, message: impl Into<String>) -> Failure {
@@ -98,14 +99,21 @@ pub(super) async fn join(cli: &Cli, text: &str) -> Outcome {
     }
     link(cli, &binary);
     check(cli, &installation, &secret).await?;
+    let providers = served(&binary).await;
     if adds_account {
-        account_step(cli, &binary).await;
+        account_step(cli, &binary, &providers).await;
     }
     let mut result = client::client_result(&installation);
     result["version"] = json!(version);
+    let launches: Vec<String> = providers
+        .iter()
+        .map(|provider| format!("`jaynshare {}`", provider.tool().executable))
+        .collect();
     let human = format!(
-        "joined the pool as {} ({}); start Claude Code through it with `jaynshare claude`",
-        installation.client_id, installation.display_name
+        "joined the pool as {} ({}); launch through it with {}",
+        installation.client_id,
+        installation.display_name,
+        launches.join(" or ")
     );
     Ok((result, human))
 }
@@ -349,30 +357,60 @@ async fn check(cli: &Cli, installation: &ClientInstallation, secret: &str) -> Re
     }
 }
 
-const ACCOUNT_LATER: &str =
-    "add your Claude account to the pool later with `jaynshare account login`";
+/// The providers the installed client logs in: the default needs no
+/// option, and a client from an older server refuses `--provider`.
+async fn served(binary: &Path) -> Vec<Provider> {
+    let mut served = Vec::new();
+    for provider in Provider::ALL {
+        let accepted = provider.is_default()
+            || tokio::process::Command::new(binary)
+                .args(login_args(provider))
+                .arg("--help")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .await
+                .is_ok_and(|status| status.success());
+        if accepted {
+            served.push(provider);
+        }
+    }
+    served
+}
+
+/// `account login`, naming the provider unless it is the default.
+fn login_args(provider: Provider) -> Vec<&'static str> {
+    let mut args = vec!["account", "login"];
+    if !provider.is_default() {
+        args.extend(["--provider", provider.as_str()]);
+    }
+    args
+}
 
 /// The invite's account step, run by the installed client so it speaks its
-/// server's API. Without a terminal to ask on, or under `--json`, it is
-/// left for later.
-async fn account_step(cli: &Cli, binary: &Path) {
-    if cli.json || !std::io::stdin().is_terminal() {
-        progress(cli, ACCOUNT_LATER);
-        return;
-    }
-    if !cli.yes && !agrees("Add your Claude account to the pool? [Y/n] ") {
-        progress(cli, ACCOUNT_LATER);
-        return;
-    }
-    match run_in_terminal(binary, &["account", "login"]).await {
-        Ok(status) if status.success() => {}
-        Ok(_) => eprintln!(
-            "warning: no Claude account was added; run `jaynshare account login` to try again"
-        ),
-        Err(why) => eprintln!(
-            "warning: {}: {why}; run `jaynshare account login` to add your Claude account",
-            binary.display()
-        ),
+/// server's API: one question per provider. Without a terminal to ask on,
+/// or under `--json`, each is left for later.
+async fn account_step(cli: &Cli, binary: &Path, providers: &[Provider]) {
+    let asks = !cli.json && std::io::stdin().is_terminal();
+    for &provider in providers {
+        let account = provider.tool().account;
+        let args = login_args(provider);
+        let command = format!("jaynshare {}", args.join(" "));
+        if !(asks && (cli.yes || agrees(&format!("Add your {account} to the pool? [Y/n] ")))) {
+            progress(
+                cli,
+                &format!("add your {account} to the pool later with `{command}`"),
+            );
+            continue;
+        }
+        match run_in_terminal(binary, &args).await {
+            Ok(status) if status.success() => {}
+            Ok(_) => eprintln!("warning: no {account} was added; run `{command}` to try again"),
+            Err(why) => eprintln!(
+                "warning: {}: {why}; run `{command}` to add your {account}",
+                binary.display()
+            ),
+        }
     }
 }
 

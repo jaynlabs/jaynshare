@@ -22,12 +22,14 @@ use crate::pool::quota::{SESSION, WEEKLY};
 use crate::pool::{Account, Resolve, SessionKey, selection};
 use crate::server::{Server, VERSION};
 
-use super::{API_VERSION, error, percent_decode, read};
+use super::{API_VERSION, error, percent_decode, provider_named, read};
 use crate::timestamp::rfc3339;
 
 /// The client projection. Every member below is named on purpose;
-/// per-account quota, identity, health, routes, configuration and other
-/// clients have no path into it. With `?session_id=` the read
+/// only shared rate-limit usage and resets and the active session count are
+/// exposed per account; identity,
+/// health, routes, configuration and other clients have no path into it.
+/// With `?session_id=` the read
 /// adds `session`: this principal's most recent serving account and when it
 /// was last routed, or `null` when it has no such session (the lookup
 /// is keyed by the client id too, so another client's session id yields
@@ -59,12 +61,15 @@ pub(super) fn status(
             })
             .count();
         let rate_limits = include_rate_limits.then(|| {
+            let active = pool.sessions(now).active_per_account(now);
             accounts
                 .iter()
                 .map(|account| {
                     json!({
                         "display_name": account.display_name,
+                        "provider": account.provider,
                         "rate_limits": rate_limits(account),
+                        "sessions_active": active.get(&account.handle).copied().unwrap_or(0),
                     })
                 })
                 .collect::<Vec<_>>()
@@ -161,16 +166,14 @@ pub(super) fn status(
 }
 
 pub(super) fn rate_limits(account: &Account) -> Value {
-    let utilisation = |name| {
-        account
-            .quota
-            .iter()
-            .find(|bucket| bucket.name == name)
-            .and_then(|bucket| bucket.effective_utilization())
-    };
+    let bucket = |name| account.quota.iter().find(|bucket| bucket.name == name);
+    let utilisation = |name| bucket(name).and_then(|bucket| bucket.effective_utilization());
+    let reset = |name| bucket(name).and_then(|bucket| bucket.reset_at).map(rfc3339);
     json!({
         "five_hour": utilisation(SESSION),
         "weekly": utilisation(WEEKLY),
+        "five_hour_reset_at": reset(SESSION),
+        "weekly_reset_at": reset(WEEKLY),
     })
 }
 
@@ -206,6 +209,7 @@ pub(super) fn accounts(server: &Arc<Server>) -> Response<ResponseBody> {
             json!({
                 "handle": account.handle,
                 "display_name": account.display_name,
+                "provider": account.provider,
                 "selectable": selection::selectable(
                     account,
                     settings,
@@ -220,12 +224,14 @@ pub(super) fn accounts(server: &Arc<Server>) -> Response<ResponseBody> {
     read(json!({ "accounts": accounts }))
 }
 
-/// The catalogue's read-only resolve — the same three members for the
-/// account the reference names, `400` `ambiguous_account_reference`
-/// with the matching display names, `404` `account_not_found`.
+/// The catalogue's read-only resolve within one provider (`&provider=`,
+/// absent meaning `anthropic`, as a 2.1.x client sends it) — the catalogue
+/// members for the account the reference names, `400`
+/// `ambiguous_account_reference` with the matching display names, `404`
+/// `account_not_found`.
 pub(super) fn resolve(server: &Arc<Server>, query: Option<&str>) -> Response<ResponseBody> {
-    let reference = query
-        .and_then(|q| q.split('&').find_map(|kv| kv.strip_prefix("reference=")))
+    let member = |name: &str| query.and_then(|q| q.split('&').find_map(|kv| kv.strip_prefix(name)));
+    let reference = member("reference=")
         .map(percent_decode)
         .filter(|r| !r.is_empty() && r.len() <= 1024 && !r.chars().any(char::is_control));
     let Some(reference) = reference else {
@@ -237,13 +243,17 @@ pub(super) fn resolve(server: &Arc<Server>, query: Option<&str>) -> Response<Res
             vec![],
         );
     };
+    let provider = match provider_named(&json!(member("provider="))) {
+        Ok(provider) => provider.unwrap_or_default(),
+        Err(refusal) => return *refusal,
+    };
     let now = OffsetDateTime::now_utc();
     let resolved = {
         let mut pool = server.pool.lock().expect("pool lock");
         if pool.expire_quota(now) {
             server.mark_quota_dirty();
         }
-        pool.resolve(&reference).cloned()
+        pool.resolve_in(provider, &reference).cloned()
     };
     match resolved {
         Ok(account) => {
@@ -262,6 +272,7 @@ pub(super) fn resolve(server: &Arc<Server>, query: Option<&str>) -> Response<Res
                 "account": {
                     "handle": account.handle,
                     "display_name": account.display_name,
+                    "provider": account.provider,
                     "selectable": selectable,
                 }
             }))
@@ -278,7 +289,7 @@ pub(super) fn resolve(server: &Arc<Server>, query: Option<&str>) -> Response<Res
             "ambiguous_account_reference",
             &format!(
                 "the reference matches several accounts: {}; an organisation name or full organisation UUID is the qualifier",
-                names.join(", ")
+                Resolve::listed(&names)
             ),
             Some(reference),
             vec![],

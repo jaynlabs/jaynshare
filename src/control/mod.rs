@@ -31,6 +31,7 @@ use crate::data_plane::relay::ResponseBody;
 use crate::login::{Refused, Started, Starter};
 use crate::pool::Account;
 use crate::pool::selection::{self as sel, RequestFacts};
+use crate::provider::Provider;
 use crate::server::{Server, VERSION};
 use crate::state;
 use crate::timestamp::rfc3339;
@@ -292,7 +293,7 @@ fn not_found() -> Response<ResponseBody> {
 /// The refusal an unauthenticated caller sees: a byte-identical
 /// answer an anonymous caller gets on any control path but the claim.
 pub(crate) fn unauthenticated_refusal(peer: SocketAddr) -> Response<ResponseBody> {
-    let response = crate::data_plane::envelope::unauthenticated();
+    let response = crate::data_plane::envelope::unauthenticated(Provider::default());
     refusal_line_plain("authentication_error", peer);
     response
 }
@@ -513,7 +514,13 @@ async fn login_start(
     if insecure_channel(server, peer) {
         return insecure_channel_refusal(server, peer, Some(principal));
     }
-    let details = member_errors(&body, &[("display_name", "string", false)]);
+    let details = member_errors(
+        &body,
+        &[
+            ("display_name", "string", false),
+            ("provider", "string", false),
+        ],
+    );
     if !details.is_empty() {
         return error(
             StatusCode::BAD_REQUEST,
@@ -523,11 +530,16 @@ async fn login_start(
             details,
         );
     }
+    let provider = match login_provider(&body) {
+        Ok(provider) => provider,
+        Err(refusal) => return *refusal,
+    };
     match server
         .logins
         .start(
             Arc::clone(server),
             Starter::Operator,
+            provider,
             login_display_name(&body),
         )
         .await
@@ -560,6 +572,29 @@ fn login_display_name(body: &Value) -> Option<String> {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(String::from)
+}
+
+/// A login's `provider` member; absent is Anthropic.
+fn login_provider(body: &Value) -> Result<Provider, Box<Response<ResponseBody>>> {
+    provider_named(&body["provider"]).map(Option::unwrap_or_default)
+}
+
+/// A `provider` member or query value; absent is `None`.
+fn provider_named(value: &Value) -> Result<Option<Provider>, Box<Response<ResponseBody>>> {
+    if value.is_null() {
+        return Ok(None);
+    }
+    serde_json::from_value(value.clone())
+        .map(Some)
+        .map_err(|_| {
+            Box::new(error(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                "provider is anthropic or codex",
+                Some("provider".into()),
+                vec![],
+            ))
+        })
 }
 
 /// The `202` that answers a started login.
@@ -854,11 +889,18 @@ fn snapshot(server: &Server) -> Value {
         .iter()
         .map(|a| accounts::project_pool_account(&pool, a, &runtime))
         .collect();
-    // The default and who set it.
-    let operator = pool.operator();
-    let default_account = operator.default.map(|h| {
-        json!({ "handle": h, "operator_chosen": operator.chosen, "since": time_or_null(operator.since) })
-    });
+    // Each provider's default and who set it; `default_account` is
+    // Anthropic's, as 2.1.x reads it.
+    let default_of = |provider| {
+        pool.operator().defaults.get(&provider).map(|d| {
+            json!({ "handle": d.handle, "operator_chosen": d.chosen, "since": rfc3339(d.since) })
+        })
+    };
+    let default_account = default_of(Provider::Anthropic);
+    let default_accounts: serde_json::Map<String, Value> = Provider::ALL
+        .into_iter()
+        .map(|p| (p.as_str().to_string(), json!(default_of(p))))
+        .collect();
     let routes: Vec<Value> = config
         .selection
         .routes
@@ -910,7 +952,7 @@ fn snapshot(server: &Server) -> Value {
             "signing_key": crate::deploy::release::active_key().ok().map(|key| key.encoded()),
             "control_api_versions": [API_VERSION],
             "telemetry_policy": config.data_plane.telemetry_policy,
-            "upstream_origin_override": server.upstream.override_active().then(|| server.upstream.origin().to_string()),
+            "upstream_origin_override": server.upstream.override_origin().map(ToString::to_string),
             "egress": {
                 "mode": config.data_plane.egress.mode,
                 "pinned_addresses": egress.pinned_addresses,
@@ -932,6 +974,7 @@ fn snapshot(server: &Server) -> Value {
         },
         "accounts": accounts,
         "default_account": default_account,
+        "default_accounts": default_accounts,
         "routes": routes,
         "blocked_models": config.selection.blocked_models,
         "sessions": { "known": session_counts.known, "active": session_counts.active, "distribution_enabled": config.selection.distribute_sessions },

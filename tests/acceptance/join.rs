@@ -23,6 +23,9 @@ use crate::release_fx::ReleaseKey;
 
 const OTHER_PIN: &str = "sha256/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
 const QUESTION: &str = "Add your Claude account to the pool? [Y/n] ";
+const CODEX_QUESTION: &str = "Add your ChatGPT account to the pool? [Y/n] ";
+const CODEX_LATER: &str =
+    "add your ChatGPT account to the pool later with `jaynshare account login --provider codex`";
 const ACCOUNT_LATER: &str =
     "add your Claude account to the pool later with `jaynshare account login`";
 
@@ -668,7 +671,7 @@ async fn a_join_adds_the_engineer_s_account_through_the_browser_callback() {
             "join-account-callback-terminal",
             &["join", &invite],
             &env,
-            &[(QUESTION, "\n")],
+            &[(QUESTION, "\n"), (CODEX_QUESTION, "n\n")],
         )
     });
     let url = opened_url(&step.browser).await;
@@ -719,6 +722,7 @@ async fn a_join_without_a_browser_takes_the_pasted_code() {
         &[
             (QUESTION, "\n"),
             ("paste the authorisation code", "oat-fixture-pasted\n"),
+            (CODEX_QUESTION, "n\n"),
         ],
     );
     assert_eq!(exit, 0, "{transcript}");
@@ -727,7 +731,7 @@ async fn a_join_without_a_browser_takes_the_pasted_code() {
     assert_eq!(step.account()["owner"], "alpha");
 }
 
-/// Answered no, nothing is added and the step is named for later.
+/// Both answered no, nothing is added and each step is named for later.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_join_answered_no_adds_no_account() {
     let _leak_sweep = crate::leaks::LeakGuard::default();
@@ -741,10 +745,11 @@ async fn a_join_answered_no_adds_no_account() {
         "join-account-declined-terminal",
         &["join", &invite],
         &step.env(),
-        &[(QUESTION, "n\n")],
+        &[(QUESTION, "n\n"), (CODEX_QUESTION, "n\n")],
     );
     assert_eq!(exit, 0, "{transcript}");
     assert!(transcript.contains(ACCOUNT_LATER), "{transcript}");
+    assert!(transcript.contains(CODEX_LATER), "{transcript}");
     assert!(step.browser.calls("open").is_empty());
     let accounts = step.operator.instance.status()["accounts"].clone();
     assert_eq!(accounts, json!([]), "{accounts}");
@@ -812,4 +817,6 @@ async fn a_failed_account_step_leaves_the_join_standing() {
     ] {
         assert!(transcript.contains(line), "{line}: {transcript}");
     }
+    // A client that refuses `--provider` is not asked about Codex.
+    assert!(!transcript.contains(CODEX_QUESTION), "{transcript}");
 }

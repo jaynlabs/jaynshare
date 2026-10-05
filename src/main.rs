@@ -1,6 +1,5 @@
 //! `jaynshare`: one executable for the server and every role's verbs.
 
-mod anthropic;
 mod audit;
 #[cfg(test)]
 #[path = "../build.rs"]
@@ -24,6 +23,7 @@ mod mitm;
 mod picker;
 mod pool;
 mod probe_client;
+mod provider;
 mod registry;
 mod secret;
 mod server;

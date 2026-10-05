@@ -1,8 +1,8 @@
 //! MITM mode — the four proxy variable spellings carrying
-//! `http://<token>:<secret>@<proxy origin>`, `NODE_EXTRA_CA_CERTS`
-//! at the installation's `ca.pem` as a native path, and `ANTHROPIC_BASE_URL`
-//! and `ANTHROPIC_API_KEY` removed. The secret travels as the proxy URL's
-//! password; no bearer-token variable.
+//! `http://<token>:<secret>@<proxy origin>`, the tool's CA variable
+//! at the installation's `ca.pem` as a native path, and the tool's own
+//! upstream and credential variables removed. The secret travels as the
+//! proxy URL's password; no bearer-token variable.
 
 use super::{EnvPlan, Inputs, PROXY_VARIABLES};
 
@@ -22,7 +22,7 @@ pub fn apply(plan: &mut EnvPlan, inputs: &Inputs<'_>) {
         plan.set(name, url.clone());
     }
     plan.set(
-        "NODE_EXTRA_CA_CERTS",
+        inputs.tool.ca_variable,
         inputs
             .installation
             .directory
@@ -30,7 +30,7 @@ pub fn apply(plan: &mut EnvPlan, inputs: &Inputs<'_>) {
             .display()
             .to_string(),
     );
-    plan.unset("ANTHROPIC_BASE_URL");
-    plan.unset("ANTHROPIC_API_KEY");
-    plan.unset("ANTHROPIC_CUSTOM_HEADERS");
+    for name in inputs.tool.upstream_variables {
+        plan.unset(name);
+    }
 }

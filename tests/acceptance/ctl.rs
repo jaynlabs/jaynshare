@@ -585,9 +585,10 @@ async fn the_snapshot_is_never_torn() {
 }
 
 /// The member set of the account object.
-const ACCOUNT_MEMBERS: [&str; 17] = [
+const ACCOUNT_MEMBERS: [&str; 18] = [
     "handle",
     "display_name",
+    "provider",
     "kind",
     "source_class",
     "enabled",
@@ -2295,16 +2296,20 @@ const CLIENT_ALLOW: &[&str] = &[
     "known",
     "last_routed_at",
     "pool",
+    "provider",
     "rate_limits",
     "selectable",
     "server",
     "session",
     "serving_account_display_name",
     "sessions",
+    "sessions_active",
     "tls_pin",
     "version",
     "five_hour",
+    "five_hour_reset_at",
     "weekly",
+    "weekly_reset_at",
     "wire_capture_enabled",
 ];
 
@@ -2679,7 +2684,13 @@ async fn catalogue_returns_rate_limits_and_changes_nothing() {
         keys.sort_unstable();
         assert_eq!(
             keys,
-            ["display_name", "handle", "rate_limits", "selectable"],
+            [
+                "display_name",
+                "handle",
+                "provider",
+                "rate_limits",
+                "selectable"
+            ],
             "{entry}"
         );
         assert!(entry["selectable"].is_boolean(), "{entry}");
@@ -2704,7 +2715,11 @@ async fn catalogue_returns_rate_limits_and_changes_nothing() {
         .map(|k| k.as_str())
         .collect();
     keys.sort_unstable();
-    assert_eq!(keys, ["display_name", "handle", "selectable"], "{resolved}");
+    assert_eq!(
+        keys,
+        ["display_name", "handle", "provider", "selectable"],
+        "{resolved}"
+    );
     assert_eq!(
         resolved["account"]["handle"],
         operator_accounts[0]["handle"]
@@ -2750,6 +2765,99 @@ async fn catalogue_returns_rate_limits_and_changes_nothing() {
     assert_eq!(after["routes"], before["routes"]);
     assert_eq!(after["sessions"]["known"], before["sessions"]["known"]);
     assert_eq!(instance.events("control_mutation").len(), mutations_before);
+}
+
+/// A Codex login beside a Claude one: each account names its provider, each
+/// provider has its own default, the client resolve answers within one
+/// provider (absent: `anthropic`), the operator's spans both and names them,
+/// and a Claude request pinning the Codex login is a 404.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_codex_login_is_scoped_to_its_provider() {
+    let _leak_sweep = crate::leaks::LeakGuard::default();
+    let mut instance = Instance::start("codex-login-scoped").await;
+    add_two(&instance);
+    instance.restart_with_state(|state| {
+        let record = state["accounts"]
+            .as_array_mut()
+            .expect("accounts array")
+            .iter_mut()
+            .find(|r| r["display_name"] == "FSUB2")
+            .expect("FSUB2 record");
+        record["provider"] = json!("codex");
+    });
+    let alpha = enroll(&instance, "alpha", "Alpha Desk").await;
+    let (addr, bearer) = (instance.addr, alpha.bearer());
+    let (fsub, fsub2) = (instance.handle("FSUB"), instance.handle("FSUB2"));
+
+    let status = instance.status();
+    assert_eq!(instance.account("FSUB")["provider"], "anthropic");
+    assert_eq!(instance.account("FSUB2")["provider"], "codex");
+    assert_eq!(status["default_account"]["handle"], fsub);
+    assert_eq!(status["default_accounts"]["anthropic"]["handle"], fsub);
+    assert_eq!(status["default_accounts"]["codex"]["handle"], fsub2);
+
+    let catalogue = control(
+        addr,
+        Method::GET,
+        "/control/v1/client/accounts",
+        &[("authorization", &bearer)],
+        None,
+    )
+    .await
+    .json();
+    let providers: Vec<&Value> = catalogue["accounts"]
+        .as_array()
+        .expect("accounts array")
+        .iter()
+        .map(|a| &a["provider"])
+        .collect();
+    assert_eq!(providers, [&json!("anthropic"), &json!("codex")]);
+
+    // The fixture organisation names both accounts; a client sees one provider.
+    let (status, body) = client_resolve(addr, &bearer, FIXTURE_ORG_UUID).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["account"]["handle"], fsub);
+    let codex_reference = format!("{FIXTURE_ORG_UUID}&provider=codex");
+    let (status, body) = client_resolve(addr, &bearer, &codex_reference).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        (&body["account"]["handle"], &body["account"]["provider"]),
+        (&json!(fsub2), &json!("codex"))
+    );
+    let (status, body) = client_resolve(addr, &bearer, "FSUB2").await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    let (status, body) = client_resolve(addr, &bearer, "FSUB&provider=openai").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_error(&body, "invalid_request");
+
+    let (status, body) = resolve_ctl(addr, FIXTURE_ORG_UUID).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let message = assert_error(&body, "ambiguous_account_reference")["message"]
+        .as_str()
+        .expect("message")
+        .to_string();
+    assert!(
+        message.contains("FSUB (anthropic)") && message.contains("FSUB2 (codex)"),
+        "{message}"
+    );
+
+    // A priority literal covering one account per provider is the Codex
+    // account's entry too: `set` updates it, `clear` drops it.
+    instance.reload_with_setup(&Setup {
+        selection: priorities(&[(FIXTURE_ORG_UUID, 1)]),
+        ..Setup::default()
+    });
+    let envelope = instance.cli_json(&["priority", "set", "FSUB2", "3"], None);
+    assert_eq!(envelope["exit_code"], 0, "{envelope}");
+    assert_eq!(instance.account("FSUB2")["priority"], 3);
+    let envelope = instance.cli_json(&["priority", "clear", "FSUB2"], None);
+    assert_eq!(envelope["exit_code"], 0, "{envelope}");
+    assert_eq!(instance.account("FSUB2")["priority"], 0);
+
+    let calls = instance.upstream.calls();
+    let answer = send(addr, pinned(messages(haiku_prompt()), "FSUB2")).await;
+    assert_eq!(answer.status, StatusCode::NOT_FOUND, "{}", answer.text());
+    assert_eq!(instance.upstream.calls(), calls, "nothing reached upstream");
 }
 
 /// the `code` and the refusal `code` are read from the same lines.

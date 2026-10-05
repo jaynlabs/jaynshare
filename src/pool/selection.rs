@@ -10,6 +10,7 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::config::{Route, SelectionSettings};
+use crate::provider::Provider;
 
 use super::account::{Account, Kind};
 use super::quota::{Bucket, SESSION, State, WEEKLY};
@@ -17,6 +18,8 @@ use super::quota::{Bucket, SESSION, State, WEEKLY};
 /// The request facts, as their consumers read them.
 #[derive(Debug, Default, Clone)]
 pub struct RequestFacts<'a> {
+    /// Selection sees only this provider's accounts.
+    pub provider: Provider,
     pub model: Option<&'a str>,
     pub advisor_model: Option<&'a str>,
     pub exclusion: &'a [Uuid],
@@ -131,7 +134,8 @@ pub struct Nobody {
 }
 
 pub struct Snapshot<'a> {
-    pub accounts: &'a [Account],
+    /// One provider's accounts, with its default.
+    pub accounts: Vec<&'a Account>,
     pub default: Option<Uuid>,
     /// Route name → the account the operator prefers for it.
     pub route_preferences: &'a HashMap<String, Uuid>,
@@ -340,10 +344,7 @@ fn governing_buckets<'a>(
     })
 }
 
-pub fn priority_of(handle: Uuid, accounts: &[Account], settings: &SelectionSettings) -> i64 {
-    let Some(account) = accounts.iter().find(|a| a.handle == handle) else {
-        return 0;
-    };
+pub fn priority_of(account: &Account, settings: &SelectionSettings) -> i64 {
     settings
         .priorities
         .iter()
@@ -392,11 +393,15 @@ struct Pass<'a> {
 
 impl<'a> Pass<'a> {
     fn account(&self, handle: Uuid) -> Option<&'a Account> {
-        self.snapshot.accounts.iter().find(|a| a.handle == handle)
+        self.snapshot
+            .accounts
+            .iter()
+            .copied()
+            .find(|a| a.handle == handle)
     }
 
     fn priority(&self, account: &Account) -> i64 {
-        priority_of(account.handle, self.snapshot.accounts, self.settings)
+        priority_of(account, self.settings)
     }
 
     /// The account is one the model's route lists (or the route lists none).
@@ -544,6 +549,7 @@ impl<'a> Pass<'a> {
             .snapshot
             .accounts
             .iter()
+            .copied()
             .filter(|a| self.route_allows(a))
             .collect();
         let routed = self
@@ -735,6 +741,7 @@ mod tests {
 
     fn account(name: &str) -> Account {
         Account::new(
+            crate::provider::Provider::Anthropic,
             name.into(),
             Profile::default(),
             Source::ApiKeyEntry,
@@ -744,6 +751,7 @@ mod tests {
 
     fn oauth(name: &str, weekly_utilization: f64) -> Account {
         let mut a = Account::new(
+            crate::provider::Provider::Anthropic,
             name.into(),
             Profile::default(),
             Source::PortableJson,
@@ -794,7 +802,7 @@ mod tests {
             static ORGS: std::sync::LazyLock<HashMap<Uuid, OffsetDateTime>> =
                 std::sync::LazyLock::new(HashMap::new);
             Snapshot {
-                accounts: &self.accounts,
+                accounts: self.accounts.iter().collect(),
                 default: self.default,
                 route_preferences: &self.route_preferences,
                 active_sessions: &self.active,

@@ -5,8 +5,8 @@ use std::net::{IpAddr, SocketAddr};
 use http::HeaderMap;
 use http::header::AUTHORIZATION;
 
-use crate::anthropic::X_API_KEY;
 use crate::audit::{Principal, PrincipalKind};
+use crate::provider::anthropic::X_API_KEY;
 use crate::registry::Registry;
 use crate::secret::Role;
 

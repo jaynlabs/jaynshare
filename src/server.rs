@@ -384,6 +384,7 @@ mod tests {
 
     fn api_key_account(i: usize) -> Account {
         Account::new(
+            crate::provider::Provider::Anthropic,
             String::new(),
             Profile::default(),
             Source::ApiKeyEntry,

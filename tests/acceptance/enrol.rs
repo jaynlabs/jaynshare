@@ -450,7 +450,11 @@ async fn status_takes_its_role_from_the_machine() {
         "{envelope}"
     );
     assert!(
-        envelope["result"]["accounts"].is_null(),
+        envelope["result"]["accounts"].is_array(),
+        "the client projection carries the shared rate-limit catalogue: {envelope}"
+    );
+    assert!(
+        envelope["result"]["status"].is_null(),
         "the client projection carries no operator facts: {envelope}"
     );
 
@@ -712,14 +716,19 @@ async fn host_access_is_operator_access() {
         "host control reads the operator projection: {envelope}"
     );
 
-    // The engineer's side: the client projection carries no operator facts.
+    // The engineer's side: the client projection carries the shared
+    // rate-limit catalogue and no operator facts.
     let env = isolated_env(&home);
     let (exit, stdout, stderr) = cli_raw(&["status", "--json"], &env, None);
     assert_eq!(exit, 0, "the client form: {stdout}{stderr}");
     let envelope: Value = serde_json::from_str(stdout.trim()).expect("envelope");
     assert_eq!(envelope["role"], "client", "{envelope}");
     assert!(
-        envelope["result"]["accounts"].is_null(),
+        envelope["result"]["accounts"].is_array(),
+        "the client projection carries the shared rate-limit catalogue: {envelope}"
+    );
+    assert!(
+        envelope["result"]["status"].is_null(),
         "the client projection carries no operator facts: {envelope}"
     );
 

@@ -5,9 +5,9 @@
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use http::HeaderMap;
+use http::{HeaderMap, HeaderName};
 
-use crate::anthropic::X_JAYNSHARE_ACCOUNT;
+pub const X_JAYNSHARE_ACCOUNT: HeaderName = HeaderName::from_static("x-jaynshare-account");
 
 /// The decoded reference is at most this long.
 const MAX_REFERENCE_BYTES: usize = 1_024;

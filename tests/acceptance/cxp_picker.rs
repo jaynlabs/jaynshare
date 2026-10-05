@@ -10,36 +10,49 @@ use crate::harness::*;
 #[allow(unused_imports)]
 use crate::proxy::claude_request;
 
+/// An unselectable row is drawn dim and marked, without a number.
 #[tokio::test(flavor = "multi_thread")]
-async fn an_unselectable_number_reprompts_the_numbered_picker() {
+async fn an_unselectable_row_has_no_number_in_the_numbered_picker() {
     let _leak_sweep = crate::leaks::LeakGuard::default();
     let instance = Instance::start_client("numbered-unselectable-number-a").await;
     add_two(&instance);
     instance.cli(&["account", "disable", "FSUB2"], None);
     let machine = install_client(&instance).await;
 
-    // Answer 3 (unselectable), then 9 (out of range), then 2 (FSUB).
+    // Answer 3 (out of range: FSUB2 has no number), then 2 (FSUB).
     let (code, transcript) = machine.pty(
         &["claude", "--picker", "numbered"],
-        &[],
+        &[("NO_COLOR", "1")],
         &[
             ("or q to cancel", "3\r"),
-            ("cannot be chosen now; choose another", "9\r"),
-            ("Enter a number from 1 to 3", "2\r"),
+            ("Enter a number from 1 to 2", "2\r"),
         ],
     );
     assert_eq!(code, 0, "the fake exits 0");
+    let line = |name: &str| {
+        transcript
+            .lines()
+            .find(|line| line.contains(name))
+            .unwrap_or_else(|| panic!("{name:?} missing: {transcript}"))
+            .trim_end()
+            .to_owned()
+    };
     assert!(
-        transcript.contains("1) Automatic (the pool chooses)"),
+        line("Account").contains("5h used"),
+        "the columns' titles: {transcript}"
+    );
+    assert!(
+        line("Automatic").starts_with("  1) Automatic (server decides)"),
         "the automatic row first: {transcript}"
     );
     assert!(
-        transcript.contains("2) FSUB | 5h ? | weekly ?"),
+        line("FSUB ").starts_with("  2) FSUB "),
         "the selectable account row: {transcript}"
     );
+    let fsub2 = line("FSUB2");
     assert!(
-        transcript.contains("3) FSUB2 | 5h ? | weekly ? (cannot be chosen now)"),
-        "the unselectable row is marked: {transcript}"
+        fsub2.starts_with("     FSUB2") && fsub2.ends_with("unavailable"),
+        "the unselectable row is marked, without a number: {transcript}"
     );
     let seen = machine.claude_ran().expect("Claude Code was launched");
     assert_eq!(
@@ -192,36 +205,36 @@ async fn the_picker_draws_ascii_where_utf8_is_not_known() {
     );
 }
 
-/// B — the keyboard picker wraps
-/// (up from the automatic row lands on the last, unselectable row), and
-/// Enter there does nothing: the picker stays until a selectable row is
-/// chosen.
+/// The keyboard marker skips an unselectable row: up from the automatic
+/// row wraps past FSUB2 to FSUB.
 #[tokio::test(flavor = "multi_thread")]
-async fn keyboard_confirm_on_an_unselectable_row_does_nothing() {
+async fn the_keyboard_marker_skips_an_unselectable_row() {
     let _leak_sweep = crate::leaks::LeakGuard::default();
     let instance = Instance::start_client("numbered-unselectable-number-b").await;
     add_two(&instance);
     instance.cli(&["account", "disable", "FSUB2"], None);
     let machine = install_client(&instance).await;
 
-    // Rows: automatic, FSUB, FSUB2 (unselectable). Up wraps from automatic
-    // to FSUB2, Enter does nothing there, up moves to FSUB, Enter picks it.
-    let keys = format!("{KEY_UP}{KEY_ENTER}{KEY_UP}{KEY_ENTER}");
+    let keys = format!("{KEY_UP}{KEY_ENTER}");
     let (code, transcript) = machine.pty(
         &["claude", "--picker", "keyboard"],
-        &[],
+        &[("NO_COLOR", "1")],
         &[("Esc cancels", &keys)],
     );
     assert_eq!(code, 0, "the fake exits 0: {transcript}");
     assert!(
-        transcript.contains("❯ Automatic (the pool chooses)"),
+        transcript.contains("❯ Automatic (server decides)"),
         "the marker starts on the automatic row: {transcript}"
+    );
+    assert!(
+        transcript.contains("❯ FSUB ") && !transcript.contains("❯ FSUB2"),
+        "the marker went from the automatic row to FSUB: {transcript}"
     );
     let seen = machine.claude_ran().expect("Claude Code was launched");
     assert_eq!(
         seen.pin(),
         Some(token(true, &instance.handle("FSUB"))),
-        ": Enter on the unselectable row did nothing; FSUB was chosen"
+        "FSUB was chosen"
     );
 }
 
@@ -413,12 +426,12 @@ async fn the_picker_only_in_pick_mode_with_account_rate_limits() {
     // Pick mode, numbered: the rows in the server's order, automatic first.
     let (code, transcript) = machine.pty(
         &["claude", "--picker", "numbered"],
-        &[],
+        &[("NO_COLOR", "1")],
         &[("or q to cancel", "1\r")],
     );
     assert_eq!(code, 0, "answering the automatic row exits 0");
     let automatic = transcript
-        .find("1) Automatic (the pool chooses)")
+        .find("1) Automatic (server decides)")
         .expect("the automatic row first");
     let fsub = transcript.find("2) FSUB").expect("the first account row");
     let fsub2 = transcript.find("3) FSUB2").expect("the second account row");
@@ -426,15 +439,24 @@ async fn the_picker_only_in_pick_mode_with_account_rate_limits() {
         automatic < fsub && fsub < fsub2,
         "server's order: {transcript}"
     );
-    assert!(
-        transcript.contains("FSUB | 5h 12% | weekly 3%"),
+    // A row's percentages, each after its bar.
+    let windows = |at: usize| -> Vec<&str> {
+        let row = transcript[at..].lines().next().unwrap_or_default();
+        row.split_whitespace()
+            .filter(|word| word.ends_with('%') || *word == "?")
+            .collect()
+    };
+    assert_eq!(
+        windows(fsub),
+        ["12%", "3%"],
         "the learned windows: {transcript}"
     );
-    assert!(
-        transcript.contains("FSUB2 | 5h ? | weekly ?"),
+    assert_eq!(
+        windows(fsub2),
+        ["?", "?"],
         "unknown windows stay explicit: {transcript}"
     );
-    for word in ["reset", "token", "health", "quota", "@"] {
+    for word in ["token", "health", "quota", "@"] {
         assert!(
             !transcript.to_lowercase().contains(&word.to_lowercase()),
             "unrequested detail {word:?} in the rows: {transcript}"
@@ -638,6 +660,111 @@ async fn cancel_interrupt_and_end_of_input_each_end_with_15() {
         machine.claude_ran().is_some(),
         "a selection launches Claude Code even though the watcher watched"
     );
+}
+
+/// Bare `jaynshare` offers every provider's accounts, each provider's
+/// indented under its own automatic row named after its tool, and launches
+/// the tool of the row picked; `JAYNSHARE_ACCOUNT` does not skip it. Without a terminal it
+/// refuses like any pick, and without an installation it is the help.
+#[tokio::test(flavor = "multi_thread")]
+async fn bare_jaynshare_picks_across_providers_and_launches_the_picked_tool() {
+    let _leak_sweep = crate::leaks::LeakGuard::default();
+    let mut instance = Instance::start_client("bare-picks-across-providers").await;
+    add_two(&instance);
+    instance.restart_with_state(|state| {
+        let record = state["accounts"]
+            .as_array_mut()
+            .expect("accounts")
+            .iter_mut()
+            .find(|r| r["display_name"] == "FSUB2")
+            .expect("the FSUB2 record");
+        record["provider"] = json!("codex");
+        record["chatgpt_account_id"] = json!("ws-fsub2");
+    });
+    let machine = install_client(&instance).await;
+    let pin = |name: &str| Some(token(true, &instance.handle(name)));
+    // The fake answers as either tool; its CA variable tells which ran.
+    let ran = |why: &str| {
+        let seen = machine.claude_ran().expect(why);
+        let tool = if seen.env.contains_key("CODEX_CA_CERTIFICATE") {
+            "codex"
+        } else {
+            assert!(seen.env.contains_key("NODE_EXTRA_CA_CERTS"), "{why}");
+            "claude"
+        };
+        (tool, seen.pin())
+    };
+
+    let numbered = [("JAYNSHARE_PICKER", "numbered"), ("NO_COLOR", "1")];
+    let (code, transcript) = machine.pty(&[], &numbered, &[("or q to cancel", "4\r")]);
+    assert_eq!(code, 0, "the fake exits 0: {transcript}");
+    let lines = [
+        "\n  1) Claude Code (server decides)\r",
+        "\n    2) FSUB ",
+        "\n  3) Codex (server decides)\r",
+        "\n    4) FSUB2 ",
+        "Enter a number (1-4)",
+    ];
+    let at: Vec<usize> = lines
+        .iter()
+        .map(|line| {
+            transcript
+                .find(line)
+                .unwrap_or_else(|| panic!("{line:?} missing: {transcript}"))
+        })
+        .collect();
+    assert!(at.windows(2).all(|w| w[0] < w[1]), "in order: {transcript}");
+    assert_eq!(ran("4: FSUB2"), ("codex", pin("FSUB2")));
+
+    let (code, _) = machine.pty(&[], &numbered, &[("or q to cancel", "1\r")]);
+    assert_eq!(code, 0);
+    assert_eq!(ran("1: Claude Code's automatic row"), ("claude", None));
+
+    // The marker starts on Claude Code's line and follows an account's
+    // indent: up wraps to FSUB2, and down twice lands on Codex's line.
+    let keyboard = [("JAYNSHARE_PICKER", "keyboard"), ("NO_COLOR", "1")];
+    for (keys, drawn, want) in [
+        (
+            format!("{KEY_UP}{KEY_ENTER}"),
+            "  ❯ FSUB2 ",
+            ("codex", pin("FSUB2")),
+        ),
+        (
+            format!("{KEY_DOWN}{KEY_DOWN}{KEY_ENTER}"),
+            "❯ Codex (server decides)",
+            ("codex", None),
+        ),
+    ] {
+        let (code, transcript) = machine.pty(&[], &keyboard, &[("Esc cancels", &keys)]);
+        assert_eq!(code, 0, "{keys:?}: {transcript}");
+        for text in ["❯ Claude Code (server decides)", drawn] {
+            assert!(transcript.contains(text), "{text:?}: {transcript}");
+        }
+        assert_eq!(ran(&format!("{keys:?}")), want, "{keys:?}");
+    }
+
+    let (code, transcript) = machine.pty(
+        &[],
+        &[
+            ("JAYNSHARE_PICKER", "numbered"),
+            ("JAYNSHARE_ACCOUNT", "FSUB"),
+        ],
+        &[("or q to cancel", "3\r")],
+    );
+    assert_eq!(code, 0, "{transcript}");
+    let seen = machine.claude_ran().expect("Codex was launched");
+    assert!(!seen.env.contains_key("JAYNSHARE_ACCOUNT"));
+    assert_eq!(seen.pin(), None, "the picker, not the variable, chose");
+
+    let (code, _, stderr) = machine.jaynshare(&[], &[], None);
+    assert_eq!(code, 16, "{stderr}");
+    assert!(stderr.starts_with("cli_no_terminal:"), "{stderr}");
+
+    fs::remove_file(machine.client_dir.join("client.toml")).expect("remove client.toml");
+    let (code, _, stderr) = machine.jaynshare(&[], &[], None);
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("Usage: jaynshare"), "{stderr}");
+    instance.stop();
 }
 
 /// `--picker` matches the leg's name.

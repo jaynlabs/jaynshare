@@ -11,10 +11,14 @@ use http::{Method, StatusCode};
 use http_body_util::{BodyExt, Full};
 use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::HttpConnector;
+use serde::Deserialize;
 use serde_json::{Value, json};
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 use toml::Table;
 
 use crate::config::platform;
+use crate::provider::Provider;
 
 /// The client result: the installation facts and the files it wrote.
 pub struct ClientInstallation {
@@ -502,18 +506,45 @@ pub struct CatalogueEntry {
     pub handle: String,
     pub display_name: String,
     pub selectable: bool,
-    pub five_hour: Option<f64>,
-    pub weekly: Option<f64>,
+    pub five_hour: Window,
+    pub weekly: Window,
+    pub provider: Provider,
+}
+
+/// One rate-limit window: how much of it is used, and when it resets.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Window {
+    pub used: Option<f64>,
+    pub reset: Option<OffsetDateTime>,
+}
+
+impl Window {
+    /// The `name` window of a `rate_limits` member.
+    fn from_value(limits: &Value, name: &str) -> Self {
+        Self {
+            used: limits[name].as_f64(),
+            reset: limits[format!("{name}_reset_at")]
+                .as_str()
+                .and_then(|at| OffsetDateTime::parse(at, &Rfc3339).ok()),
+        }
+    }
 }
 
 impl CatalogueEntry {
+    /// A 2.1.x server names no provider: its accounts are Anthropic's. A
+    /// provider this build does not know drops the entry.
     fn from_value(value: &Value) -> Option<Self> {
+        let provider = match &value["provider"] {
+            Value::Null => Provider::Anthropic,
+            named => Provider::deserialize(named).ok()?,
+        };
         Some(Self {
             handle: value["handle"].as_str()?.to_string(),
             display_name: value["display_name"].as_str()?.to_string(),
             selectable: value["selectable"].as_bool()?,
-            five_hour: value["rate_limits"]["five_hour"].as_f64(),
-            weekly: value["rate_limits"]["weekly"].as_f64(),
+            five_hour: Window::from_value(&value["rate_limits"], "five_hour"),
+            weekly: Window::from_value(&value["rate_limits"], "weekly"),
+            provider,
         })
     }
 }
@@ -666,18 +697,24 @@ pub async fn catalogue(
         })
 }
 
-/// The read-only resolve: the entry, or 6 (nothing matched) /
-/// 7 (ambiguous, the message carries the server's safe display names).
+/// The read-only resolve among `provider`'s accounts: the entry, or 6
+/// (nothing matched) / 7 (ambiguous, the message carries the server's safe
+/// display names). Anthropic is the server's default, so a 2.1.x server is
+/// never sent the parameter.
 pub async fn resolve(
     installation: &ClientInstallation,
     secret: &str,
     reference: &str,
+    provider: Provider,
     timeout: Duration,
 ) -> Result<CatalogueEntry, (i32, String)> {
-    let path = format!(
+    let mut path = format!(
         "/control/v1/client/accounts/resolve?reference={}",
         percent_encode(reference)
     );
+    if !provider.is_default() {
+        path.push_str(&format!("&provider={}", provider.as_str()));
+    }
     let request = base_url_request(installation, timeout)?;
     let (status, body) = request.call(Method::GET, &path, Some(secret), None).await?;
     if status.is_success() {
@@ -720,5 +757,19 @@ mod tests {
             toml::Value::String("sha256/pin".into())
         );
         assert_eq!(parsed["no_proxy"], toml::Value::Array(vec![]));
+    }
+
+    #[test]
+    fn a_catalogue_entry_s_provider_defaults_to_anthropic() {
+        let entry = |provider: Value| {
+            let mut value = json!({ "handle": "h", "display_name": "A", "selectable": true });
+            if !provider.is_null() {
+                value["provider"] = provider;
+            }
+            CatalogueEntry::from_value(&value).map(|e| e.provider)
+        };
+        assert_eq!(entry(Value::Null), Some(Provider::Anthropic));
+        assert_eq!(entry(json!("codex")), Some(Provider::Codex));
+        assert_eq!(entry(json!("gemini")), None);
     }
 }

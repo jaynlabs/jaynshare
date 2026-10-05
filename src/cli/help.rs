@@ -61,6 +61,17 @@ pub(super) static DOCS: &[VerbDoc] = &[
         ]
     ),
     verb!(
+        "codex",
+        Engineer,
+        None,
+        "Launch Codex through the pool (it still needs your own `codex login`); after the launch the exit code is Codex's",
+        [4, 6, 7, 11, 13, 14, 15, 16],
+        [
+            "jaynshare codex --auto -- exec \"<prompt>\"",
+            "jaynshare codex --account <reference>"
+        ]
+    ),
+    verb!(
         "env",
         Engineer,
         None,
@@ -68,6 +79,7 @@ pub(super) static DOCS: &[VerbDoc] = &[
         [4, 6, 7, 11, 14],
         [
             "eval \"$(jaynshare env)\"",
+            "eval \"$(jaynshare env --provider codex)\"; codex --no-daemon",
             "jaynshare env --shell fish --show"
         ]
     ),
@@ -83,7 +95,7 @@ pub(super) static DOCS: &[VerbDoc] = &[
         "join",
         Engineer,
         None,
-        "Join a pool with the operator's invite, install its client and add your Claude account",
+        "Join a pool with the operator's invite, install its client and add your Claude and ChatGPT accounts",
         [4, 5, 8, 10, 14, 17, 18],
         ["jaynshare join <invite>"]
     ),
@@ -134,7 +146,7 @@ pub(super) static DOCS: &[VerbDoc] = &[
         "status",
         Engineer,
         None,
-        "As the enrolled client: this client's view of the pool (--client, --line, --session)",
+        "As the enrolled client: rate-limit table; --verbose adds diagnostics (--client, --line, --session)",
         [4, 5, 11, 12],
         ["jaynshare status --client", "jaynshare status --line"]
     ),
@@ -150,11 +162,11 @@ pub(super) static DOCS: &[VerbDoc] = &[
         "account login",
         Engineer,
         None,
-        "As the enrolled client: log in a Claude account of your own, or log it in again",
+        "As the enrolled client: log in a Claude or ChatGPT account of your own, or log it in again",
         [4, 5, 8, 9, 10, 11],
         [
             "jaynshare account login",
-            "jaynshare account login --name <name>"
+            "jaynshare account login --provider codex"
         ]
     ),
     verb!(
@@ -186,7 +198,7 @@ pub(super) static DOCS: &[VerbDoc] = &[
         "status",
         Operator,
         None,
-        "Read the pool table with utilisation bars; --verbose adds the diagnostics; --check prints nothing",
+        "Read the rate-limit table; --verbose adds the diagnostics; --check prints nothing",
         [3, 4, 5, 10],
         ["jaynshare status", "jaynshare status --verbose"]
     ),
@@ -221,10 +233,11 @@ pub(super) static DOCS: &[VerbDoc] = &[
         "account login",
         Operator,
         None,
-        "Start a browser login; prints the authorisation URL first",
+        "Start a browser login, Claude's or (--provider codex) ChatGPT's; prints the authorisation URL first",
         [3, 4, 5, 8, 9, 10],
         [
             "jaynshare account login --name <name>",
+            "jaynshare account login --provider codex",
             "jaynshare account login --no-wait"
         ]
     ),
@@ -769,11 +782,14 @@ pub(super) fn doc(path: &str) -> Option<&'static VerbDoc> {
 pub(super) fn top_level() -> String {
     let mut out = String::new();
     out.push_str(&format!(
-        "jaynshare {} — the pooled Anthropic proxy for Claude Code\n\n",
+        "jaynshare {} — the pooled proxy for Claude Code and Codex\n\n",
         crate::server::VERSION
     ));
     out.push_str(
-        "Usage: jaynshare [global options] <verb> [options] [arguments] [-- passthrough]\n\n",
+        "Usage: jaynshare [global options] <verb> [options] [arguments] [-- passthrough]\n",
+    );
+    out.push_str(
+        "On an enrolled machine, `jaynshare` alone picks any pooled account and launches its tool.\n\n",
     );
     let width = DOCS.iter().map(|d| d.path.len()).max().unwrap_or(0);
     let groups: [(Role, &str); 5] = [
@@ -892,7 +908,7 @@ pub(super) fn exit_meaning(code: i32) -> &'static str {
         10 => "server failed or answered incompatibly",
         11 => "not enrolled or installation incomplete",
         12 => "CA not trusted or fingerprint mismatch",
-        13 => "Claude Code not found",
+        13 => "Claude Code or Codex not found",
         14 => "MITM mode impossible for this enrollment",
         15 => "picker cancelled",
         16 => "pick mode with no usable terminal",
@@ -1018,8 +1034,8 @@ mod tests {
         }
         // The kept product words.
         for word in [
-            "status", "switch", "claude", "env", "probe", "route", "client", "service", "api",
-            "alias",
+            "status", "switch", "claude", "codex", "env", "probe", "route", "client", "service",
+            "api", "alias",
         ] {
             assert!(help.contains(&format!("  {word}")), "{word} missing");
         }

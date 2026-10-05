@@ -633,6 +633,7 @@ mod tests {
     fn round_trip_keeps_exactly_five_keys() {
         let state = State {
             accounts: vec![Account::new(
+                crate::provider::Provider::Anthropic,
                 "k".into(),
                 Profile::default(),
                 Source::ApiKeyEntry,

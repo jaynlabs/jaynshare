@@ -21,15 +21,15 @@ impl Pool {
         collected: Option<&[u8]>,
         now: OffsetDateTime,
     ) -> quota::Classification {
-        let spend_cap = quota::spend_cap_429(collected);
         self.learn_family(model, headers);
         let Some(account) = self.get(handle) else {
             return quota::Classification::Throttle;
         };
+        let spend_cap = account.provider.is_spend_cap_429(collected);
         let kind = account.kind();
         let name = account.display_name.clone();
         let org = account.profile.organization_uuid;
-        let fresh = quota::observe_headers(kind, headers);
+        let fresh = account.provider.observe_headers(kind, headers);
         let classification = if spend_cap {
             // An organisation cap is exhaustion of the shared spend-cap
             // bucket; without a verified organisation the hold is account-alone.
@@ -332,12 +332,14 @@ mod tests {
 
     fn oauth(email: &str, org: Option<&str>, account_uuid: Uuid) -> Account {
         Account::new(
+            crate::provider::Provider::Anthropic,
             String::new(),
             Profile {
                 email: Some(email.into()),
                 account_uuid: Some(account_uuid),
                 organization_uuid: None,
                 organization_name: org.map(String::from),
+                chatgpt_account_id: None,
             },
             Source::PortableJson,
             Credential::OAuth(OAuthCredential {

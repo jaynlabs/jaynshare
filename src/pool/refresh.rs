@@ -193,7 +193,7 @@ async fn run(server: &Arc<Server>, handle: Uuid, trigger: Trigger) -> Outcome {
     if let Some(outcome) = without_refresh_for(server, handle, trigger, now) {
         return outcome;
     }
-    let (display_name, family) = {
+    let (provider, display_name, family) = {
         let pool = server.pool.lock().expect("pool lock");
         let Some(account) = pool.get(handle) else {
             return Outcome::Ready;
@@ -201,7 +201,11 @@ async fn run(server: &Arc<Server>, handle: Uuid, trigger: Trigger) -> Outcome {
         let Credential::OAuth(family) = &account.credential else {
             return Outcome::Ready;
         };
-        (account.display_name.clone(), family.clone())
+        (
+            account.provider,
+            account.display_name.clone(),
+            family.clone(),
+        )
     };
     let sent = family.refresh_token.clone();
     let Some(refresh_token) = sent.as_ref() else {
@@ -228,7 +232,7 @@ async fn run(server: &Arc<Server>, handle: Uuid, trigger: Trigger) -> Outcome {
     let result = loop {
         match server
             .upstream
-            .refresh_family(refresh_token, deadline)
+            .refresh_family(provider, refresh_token, deadline)
             .await
         {
             Err(RefreshFailure::Transient(error)) => {
@@ -244,13 +248,14 @@ async fn run(server: &Arc<Server>, handle: Uuid, trigger: Trigger) -> Outcome {
     };
     match result {
         Ok(fresh) => publish_family(server, handle, &display_name, sent.as_ref(), family, fresh),
-        Err(RefreshFailure::Permanent(status)) => {
-            tracing::warn!(event = "refresh_failed", account = %display_name, class = "permanent", status = status.as_u16(), call, "OAuth refresh rejected");
+        Err(RefreshFailure::Permanent { status, code }) => {
+            tracing::warn!(event = "refresh_failed", account = %display_name, class = "permanent", status = status.as_u16(), code = code.unwrap_or(""), call, "OAuth refresh rejected");
+            let code = code.map(|code| format!(", {code}")).unwrap_or_default();
             persist_errored(
                 server,
                 handle,
                 sent.as_ref(),
-                format!("refresh rejected by the token endpoint (HTTP {status})"),
+                format!("refresh rejected by the token endpoint (HTTP {status}{code})"),
                 OffsetDateTime::now_utc(),
             )
         }
@@ -388,6 +393,7 @@ mod tests {
 
     fn account(now: OffsetDateTime) -> Account {
         Account::new(
+            crate::provider::Provider::Anthropic,
             "FSUB".into(),
             crate::pool::Profile::default(),
             crate::pool::Source::PortableJson,

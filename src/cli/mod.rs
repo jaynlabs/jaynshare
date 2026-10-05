@@ -9,7 +9,6 @@
 mod alias;
 mod args;
 mod bundle;
-mod claude;
 mod client_accounts;
 mod control;
 mod deploy;
@@ -22,6 +21,7 @@ mod join;
 mod schema;
 mod search_path;
 mod tail;
+mod tool;
 mod trust_ca;
 mod uninstall;
 mod update;
@@ -42,6 +42,7 @@ use crate::data_plane::upstream::Upstream;
 use crate::identity::{self, Identity};
 use crate::pool::refresh::{self, Trigger};
 use crate::pool::{Credential, Errored, Pool, probe};
+use crate::provider::Provider;
 use crate::server::{COMMIT, Server, Stop, TARGET, VERSION};
 use crate::{data_plane, logging, mitm, state};
 
@@ -140,6 +141,10 @@ fn dual_role(cli: &Cli, operator_flag: bool, client_flag: bool) -> Role {
 
 pub fn main() -> i32 {
     let argv: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    // Bare, on an enrolled machine: pick any account, launch its tool.
+    if argv.len() == 1 && client_installation().1 {
+        return tool::pick();
+    }
     let json_asked = argv.iter().any(|a| a == "--json");
     let color = if argv.iter().any(|a| a == "--no-color") || std::env::var_os("NO_COLOR").is_some()
     {
@@ -249,8 +254,9 @@ pub fn main() -> i32 {
         // error and always exit 0.
         Verb::Statusline => return crate::statusline::main(),
         Verb::TitleHook => return crate::title_hook::main(),
-        // `claude` exits with its own codes only before it replaces itself.
-        Verb::Claude(args) => return claude::claude(args),
+        // A launch exits with its own codes only before it replaces itself.
+        Verb::Claude(args) => return tool::launch(Provider::Anthropic, args),
+        Verb::Codex(args) => return tool::launch(Provider::Codex, args),
         Verb::Env(args) => return finish(&cli, path, None, env::env(args)),
         // Print-only, but still an engineer verb.
         Verb::Alias { shell } => {
@@ -663,6 +669,7 @@ fn verb_path(verb: &Verb) -> &'static str {
             ServiceVerb::Status => "service status",
         },
         Verb::Claude(_) => "claude",
+        Verb::Codex(_) => "codex",
         Verb::Env(_) => "env",
         Verb::Alias { .. } => "alias",
         Verb::Join { .. } => "join",
@@ -1003,16 +1010,21 @@ fn serve_inner(cli: &Cli) -> Result<i32, (i32, String)> {
                 refresh::ensure_fresh(&server, handle, Trigger::Startup).await;
             });
         }
-        // The startup line always names the upstream it will use.
+        // The startup line always names the upstreams it will use; the
+        // override stages every provider on one origin.
+        let mut origins: Vec<String> =
+            Provider::ALL.iter().map(|p| server.upstream.origin(*p).to_string()).collect();
+        origins.dedup();
+        let upstream = origins.join(", ");
         let upstream_note = if server.upstream.override_active() {
-            format!(" upstream override {}", server.upstream.origin())
+            format!(" upstream override {upstream}")
         } else {
-            format!(" upstream {} verified against the system trust store", server.upstream.origin())
+            format!(" upstream {upstream} verified against the system trust store")
         };
         // The one startup line; the scheme names the transport.
         let scheme = if server.config().config.data_plane.tls.is_on() { "https" } else { "http" };
         println!("jaynshare {VERSION} listening on {scheme}://{listen} configuration {} digest {digest}{upstream_note}", path.display());
-        tracing::info!(event = "server_started", listen = %listen, configuration = %path.display(), digest = %digest, upstream = %server.upstream.origin(), upstream_override = server.upstream.override_active(), "server started");
+        tracing::info!(event = "server_started", listen = %listen, configuration = %path.display(), digest = %digest, upstream = %upstream, upstream_override = server.upstream.override_active(), "server started");
         // The bootstrap exception says so, once, until it ends.
         if server.bootstrap() {
             tracing::warn!(event = "bootstrap_authorisation", "no client is enrolled and no operator secret exists: every loopback caller is the loopback operator whatever it presents; the first issue or operator secret ends this");

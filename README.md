@@ -26,15 +26,17 @@
   <a href="https://jayn.app/jaynshare">Website</a>
 </p>
 
-jaynshare is a self-hosted proxy for Claude Code (or third party hosted if you
-have trust to spare). After hosting a server, connecting several accounts to it
-and enrolling a client, replace `claude` by `jaynshare claude` and you will be
-able to choose from which account to draw for your session.
+jaynshare is a self-hosted proxy for Claude Code and Codex (or third party
+hosted if you have trust to spare). After hosting a server, connecting several
+accounts to it and enrolling a client, replace `claude` by `jaynshare claude`
+(or `codex` by `jaynshare codex`) and you will be able to choose from which
+account to draw for your session.
 
 > [!WARNING]
 > Pooling Claude subscriptions conflicts with Anthropic's published terms and
 > can lead to suspension or termination of every account involved, without a
-> refund. Whether a particular deployment also raises legal issues depends on
+> refund. Pooling ChatGPT subscriptions for Codex conflicts with OpenAI's terms
+> too. Whether a particular deployment also raises legal issues depends on
 > its facts and jurisdiction; this project does not claim that it is legal or
 > authorized. Read the [subscription-sharing risk summary](is_this_safe.md), the
 > [security and privacy model](docs/security-and-privacy.md), and the
@@ -55,14 +57,15 @@ able to choose from which account to draw for your session.
 
 Before having to set up a server, you can spin up one on your own Mac easily
 using this (it downloads the latest release, runs it, joins a client and
-prompts you to log your Claude account).
+offers to add your accounts).
 
-It needs `python3` and Claude Code installed.
+It needs `python3`, and Claude Code or Codex installed.
 
 ```sh
 curl -fsSLO https://github.com/jaynlabs/jaynshare/releases/latest/download/quickstart.sh
 bash quickstart.sh          #sets up everything
 bash quickstart.sh claude   #launches claude
+bash quickstart.sh codex    #launches codex
 ```
 
 ## Demo
@@ -105,7 +108,7 @@ a product of Anthropic.
   account
 - A one-line join for macOS and Windows from a single-use invite, with a secret
   per client, rotation and revocation
-- Claude accounts added by their owners while joining
+- Claude and ChatGPT accounts added by their owners while joining
 - Private-network listeners only, TLS pinned to the server's own identity, and
   an audit log that never holds a body or a credential
 - Signed releases, a one-command systemd install, optional nightly updates,
@@ -117,7 +120,7 @@ a product of Anthropic.
 - A Linux server with systemd
 - A private network between the engineers and the server, such as a tailnet
   (but I'm sure you can make it work with other clever solutions)
-- Claude Code already installed on each engineer's machine
+- Claude Code or Codex already installed on each engineer's machine
 
 ## Quick start
 
@@ -165,22 +168,34 @@ On Windows, in PowerShell:
 ```
 
 The join checks that the server is the one the invite names, installs that
-server's client and offers to add your Claude account to the pool. Then run
-`jaynshare claude` wherever you would have run `claude`. The client updates
-itself whenever the server does.
+server's client and offers to add each of your accounts to the pool, Claude
+and ChatGPT alike. Then run `jaynshare claude` wherever you would have run
+`claude`, and `jaynshare codex` wherever you would have run `codex`. The client
+updates itself whenever the server does.
 
-`jaynshare claude` opens a picker when the pool cannot choose for you;
-`--account <name>` names the account, `--auto` lets the pool pick, and
-`--direct` runs Claude Code outside the pool under your own login. Arguments
-after `--` go to Claude Code unchanged. `jaynshare status` checks enrollment
-and connectivity, `jaynshare account login` adds your account later, and
+`jaynshare claude` and `jaynshare codex` open a picker when the pool cannot
+choose for you; `--account <name>` names the account, `--auto` lets the pool
+pick, and `--direct` runs the tool outside the pool under your own login.
+`jaynshare` alone opens one picker over every pooled account, grouped by tool
+with each account's five-hour and weekly usage, and launches the tool of the
+account you pick.
+Arguments after `--` go to the tool unchanged. `jaynshare status` checks enrollment
+and connectivity and shows every pooled account's five-hour and weekly usage
+in a colored table (`?` means unknown); `--verbose` adds the other status
+details. A cyan `┃` marks the elapsed share of the reset period when the reset
+time is known. `jaynshare account login` adds your account later, and
 `jaynshare alias` prints a shell alias so that `claude` itself goes through the
 pool.
+
+`jaynshare codex` does the same for Codex over the pool's ChatGPT accounts,
+added with `jaynshare account login --provider codex`. Codex still needs your
+own `codex login`; the pool replaces it on every request.
 
 ## Roadmap / Ideas
 
 - [x] Rust v2
-- [ ] `jaynshare codex`
+- [x] `jaynshare codex`
+- [ ] OpenAI API-key accounts for `jaynshare codex`
 - [ ] API-key subscriptions from other providers, like OpenCode Go
 - [ ] Account features (settings, plugins, skills, MCP servers) when you draw
       from your own account (the pool refuses them for everyone today)

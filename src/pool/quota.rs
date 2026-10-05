@@ -1,13 +1,9 @@
-//! Buckets and how response headers teach them.
-//! Also the 429 classification and the hold arithmetic it feeds.
+//! Buckets and the observations that update them; each provider parses its
+//! own. Also the 429 classification and the hold arithmetic it feeds.
 
-use http::HeaderMap;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use time::format_description::well_known::Rfc3339;
 use time::{Duration, OffsetDateTime};
-
-use crate::anthropic::{RATELIMIT_PREFIX, RATELIMIT_UNIFIED_PREFIX};
 
 use super::account::Kind;
 
@@ -16,9 +12,8 @@ pub const SESSION: &str = "session";
 pub const WEEKLY: &str = "weekly";
 pub const SPEND_CAP: &str = "spend-cap";
 pub const API_KEY_BUCKETS: [&str; 4] = ["requests", "tokens", "input-tokens", "output-tokens"];
-/// The one verified family and its header identifier.
+/// The one verified family.
 pub const FAMILY_FABLE: &str = "fable";
-pub const FAMILY_FABLE_HEADER: &str = "7d_oi";
 pub const FAMILY_SONNET: &str = "sonnet";
 
 pub fn is_bucket_name(name: &str) -> bool {
@@ -30,9 +25,6 @@ pub fn is_bucket_name(name: &str) -> bool {
             .strip_prefix("weekly:")
             .is_some_and(|f| matches!(f, FAMILY_FABLE | FAMILY_SONNET))
 }
-
-/// The error code that classifies a 429 as organisation spend-cap exhaustion.
-pub const SPEND_CAP_CODE: &str = "enforced_spend_limit_reached";
 
 /// The buckets an account of this kind is expected to have.
 pub fn expected_buckets(kind: Kind) -> Vec<Bucket> {
@@ -153,7 +145,7 @@ pub struct Observation {
 }
 
 impl Observation {
-    fn new(name: String, scope: Scope) -> Self {
+    pub(crate) fn new(name: String, scope: Scope) -> Self {
         Self {
             name,
             scope,
@@ -165,169 +157,13 @@ impl Observation {
         }
     }
 
-    fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.utilization.is_none()
             && self.status.is_none()
             && self.limit.is_none()
             && self.remaining.is_none()
             && self.reset_at.is_none()
     }
-}
-
-/// Parse one usage response. Percent values become the
-/// fractions used by the shared quota model; omitted windows remain omitted.
-pub fn observe_usage(value: &Value) -> Result<Vec<Observation>, String> {
-    let object = value
-        .as_object()
-        .ok_or_else(|| "usage response is not a JSON object".to_string())?;
-    let mut observations = Vec::new();
-    for (key, name, scope) in [
-        ("five_hour", SESSION, Scope::Account),
-        ("seven_day", WEEKLY, Scope::Account),
-        ("seven_day_sonnet", "weekly:sonnet", Scope::Family),
-    ] {
-        let Some(window) = object.get(key).filter(|value| !value.is_null()) else {
-            continue;
-        };
-        observations.push(usage_window(window, name, scope)?);
-    }
-    if let Some(limits) = object.get("limits") {
-        let limits = limits
-            .as_array()
-            .ok_or_else(|| "usage response limits is not an array".to_string())?;
-        for limit in limits {
-            let is_fable = limit["group"] == "weekly"
-                && limit
-                    .pointer("/scope/model/display_name")
-                    .and_then(Value::as_str)
-                    .is_some_and(|name| name.to_ascii_lowercase().contains(FAMILY_FABLE));
-            if is_fable {
-                observations.push(usage_limit(limit, "weekly:fable")?);
-            }
-        }
-    }
-    observations.retain(|observation| !observation.is_empty());
-    if observations.is_empty() {
-        Err("usage response contains no recognised quota observations".into())
-    } else {
-        Ok(observations)
-    }
-}
-
-fn usage_window(value: &Value, name: &str, scope: Scope) -> Result<Observation, String> {
-    let object = value
-        .as_object()
-        .ok_or_else(|| format!("usage response {name} window is not an object"))?;
-    let mut observation = Observation::new(name.to_string(), scope);
-    observation.utilization = object
-        .get("utilization")
-        .or_else(|| object.get("used_percentage"))
-        .and_then(percent);
-    observation.reset_at = object.get("resets_at").and_then(reset_value);
-    Ok(observation)
-}
-
-fn usage_limit(value: &Value, name: &str) -> Result<Observation, String> {
-    let object = value
-        .as_object()
-        .ok_or_else(|| "usage response limit is not an object".to_string())?;
-    let mut observation = Observation::new(name.to_string(), Scope::Family);
-    observation.utilization = object.get("percent").and_then(percent);
-    observation.reset_at = object.get("resets_at").and_then(reset_value);
-    Ok(observation)
-}
-
-fn percent(value: &Value) -> Option<f64> {
-    value
-        .as_f64()
-        .filter(|percent| percent.is_finite() && (0.0..=100.0).contains(percent))
-        .map(|percent| percent / 100.0)
-}
-
-fn reset_value(value: &Value) -> Option<OffsetDateTime> {
-    match value {
-        Value::String(value) => parse_reset(value),
-        Value::Number(value) => parse_reset(&value.to_string()),
-        _ => None,
-    }
-}
-
-/// What one attempt's response headers say about the serving account.
-pub fn observe_headers(kind: Kind, headers: &HeaderMap) -> Vec<Observation> {
-    let mut found: Vec<Observation> = Vec::new();
-    fn slot(found: &mut Vec<Observation>, name: &str, scope: Scope) -> usize {
-        match found.iter().position(|o| o.name == name) {
-            Some(i) => i,
-            None => {
-                found.push(Observation::new(name.to_string(), scope));
-                found.len() - 1
-            }
-        }
-    }
-    for (header, value) in headers {
-        let Ok(value) = value.to_str() else { continue };
-        let name = header.as_str();
-        match kind {
-            Kind::OAuth => {
-                // anthropic-ratelimit-unified-<window>-<field>
-                let Some(rest) = name.strip_prefix(RATELIMIT_UNIFIED_PREFIX) else {
-                    continue;
-                };
-                let Some((window, field)) = rest.rsplit_once('-') else {
-                    continue;
-                };
-                let (bucket, scope) = match window {
-                    "5h" => (SESSION.to_string(), Scope::Account),
-                    "7d" => (WEEKLY.to_string(), Scope::Account),
-                    w if w == FAMILY_FABLE_HEADER => {
-                        (format!("weekly:{FAMILY_FABLE}"), Scope::Family)
-                    }
-                    _ => continue,
-                };
-                let i = slot(&mut found, &bucket, scope);
-                match field {
-                    "utilization" => {
-                        found[i].utilization =
-                            value.trim().parse::<f64>().ok().filter(|u| u.is_finite())
-                    }
-                    "status" => found[i].status = Some(value.trim().to_string()),
-                    "reset" => found[i].reset_at = parse_reset(value),
-                    _ => {}
-                }
-            }
-            Kind::ApiKey => {
-                // anthropic-ratelimit-<bucket>-<limit|remaining|reset>
-                let Some(rest) = name.strip_prefix(RATELIMIT_PREFIX) else {
-                    continue;
-                };
-                if rest.starts_with("unified-") {
-                    continue;
-                }
-                let Some((bucket, field)) = rest.rsplit_once('-') else {
-                    continue;
-                };
-                if !API_KEY_BUCKETS.contains(&bucket) {
-                    continue;
-                }
-                let i = slot(&mut found, bucket, Scope::Account);
-                let number = || {
-                    value
-                        .trim()
-                        .parse::<f64>()
-                        .ok()
-                        .filter(|n| n.is_finite() && *n >= 0.0)
-                };
-                match field {
-                    "limit" => found[i].limit = number(),
-                    "remaining" => found[i].remaining = number(),
-                    "reset" => found[i].reset_at = parse_reset(value),
-                    _ => {}
-                }
-            }
-        }
-    }
-    found.retain(|o| !o.is_empty());
-    found
 }
 
 /// What one 429 is.
@@ -337,19 +173,6 @@ pub enum Classification {
     Exhaustion { buckets: Vec<String> },
     /// A burst throttle; admission is held and the client owns the wait.
     Throttle,
-}
-
-/// The spend-cap 429 carries the code under `error.details`.
-pub fn spend_cap_429(body: Option<&[u8]>) -> bool {
-    let Some(bytes) = body else { return false };
-    serde_json::from_slice::<Value>(bytes)
-        .ok()
-        .and_then(|v| {
-            v.pointer("/error/details/error_code")
-                .and_then(Value::as_str)
-                .map(str::to_string)
-        })
-        .is_some_and(|code| code == SPEND_CAP_CODE)
 }
 
 /// The throttle hold length: `retry-after`, 60 s fallback, 1…300 s.
@@ -500,7 +323,8 @@ pub fn expire(buckets: &mut [Bucket], now: OffsetDateTime) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use http::HeaderValue;
+    use crate::provider::anthropic::observe_headers;
+    use http::{HeaderMap, HeaderValue};
     use time::macros::datetime;
 
     fn headers(pairs: &[(&str, &str)]) -> HeaderMap {
@@ -512,55 +336,6 @@ mod tests {
             );
         }
         h
-    }
-
-    #[test]
-    fn unified_headers_become_session_and_weekly_observations() {
-        let h = headers(&[
-            ("anthropic-ratelimit-unified-5h-utilization", "0.42"),
-            ("anthropic-ratelimit-unified-5h-status", "allowed"),
-            ("anthropic-ratelimit-unified-5h-reset", "1757900000"),
-            ("anthropic-ratelimit-unified-7d-utilization", "0.9"),
-            ("anthropic-ratelimit-unified-7d_oi-utilization", "1.2"),
-            ("anthropic-ratelimit-unified-status", "allowed"),
-            (
-                "anthropic-ratelimit-unified-representative-claim",
-                "five_hour",
-            ),
-        ]);
-        let obs = observe_headers(Kind::OAuth, &h);
-        let names: Vec<&str> = obs.iter().map(|o| o.name.as_str()).collect();
-        assert_eq!(names, ["session", "weekly", "weekly:fable"]);
-        assert_eq!(obs[0].utilization, Some(0.42));
-        assert_eq!(obs[0].status.as_deref(), Some("allowed"));
-        assert_eq!(obs[0].reset_at.unwrap().unix_timestamp(), 1_757_900_000);
-        assert_eq!(obs[2].scope, Scope::Family);
-        assert_eq!(obs[2].utilization, Some(1.2));
-    }
-
-    #[test]
-    fn api_key_headers_keep_four_independent_windows() {
-        let h = headers(&[
-            ("anthropic-ratelimit-requests-limit", "50"),
-            ("anthropic-ratelimit-requests-remaining", "10"),
-            ("anthropic-ratelimit-requests-reset", "2026-09-16T10:00:00Z"),
-            ("anthropic-ratelimit-tokens-limit", "1000"),
-            ("anthropic-ratelimit-tokens-remaining", "1000"),
-            ("anthropic-ratelimit-unified-5h-utilization", "0.5"),
-        ]);
-        let obs = observe_headers(Kind::ApiKey, &h);
-        let names: Vec<&str> = obs.iter().map(|o| o.name.as_str()).collect();
-        assert_eq!(names, ["requests", "tokens"]);
-        let mut buckets = expected_buckets(Kind::ApiKey);
-        apply(
-            &mut buckets,
-            obs,
-            Source::ResponseHeaders,
-            datetime!(2026-09-16 09:00 UTC),
-        );
-        assert_eq!(buckets[0].effective_utilization(), Some(0.8));
-        assert_eq!(buckets[1].effective_utilization(), Some(0.0));
-        assert_eq!(buckets[2].effective_utilization(), None);
     }
 
     /// The live API returns `…-reset` equal to the response time for a
@@ -686,39 +461,5 @@ mod tests {
             t
         );
         assert!(parse_reset("soon").is_none());
-    }
-
-    #[test]
-    fn usage_percent_and_reset_shapes_become_shared_observations() {
-        let usage = serde_json::json!({
-            "five_hour": { "utilization": 25.0, "resets_at": 1_757_900_000 },
-            "seven_day": { "used_percentage": 40.0, "resets_at": 1_757_900_000_123_i64 },
-            "seven_day_sonnet": { "utilization": 12.5, "resets_at": "2025-09-15T01:33:20Z" },
-            "limits": [{
-                "group": "weekly",
-                "scope": { "model": { "display_name": "Claude Fable" } },
-                "percent": 110.0,
-                "resets_at": "2025-09-15T01:33:20Z",
-            }],
-        });
-
-        let observations = observe_usage(&usage).expect("valid usage response");
-
-        assert_eq!(
-            observations
-                .iter()
-                .map(|observation| observation.name.as_str())
-                .collect::<Vec<_>>(),
-            ["session", "weekly", "weekly:sonnet", "weekly:fable"]
-        );
-        assert_eq!(observations[0].utilization, Some(0.25));
-        assert_eq!(observations[1].utilization, Some(0.4));
-        assert_eq!(observations[2].utilization, Some(0.125));
-        assert_eq!(
-            observations[3].utilization, None,
-            "percent is bounded to 0…100"
-        );
-        assert_eq!(observations[0].reset_at, observations[1].reset_at);
-        assert_eq!(observations[1].reset_at, observations[2].reset_at);
     }
 }

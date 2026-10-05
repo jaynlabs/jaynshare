@@ -1,6 +1,6 @@
-//! The operator's runtime steer — who owns the default and the
-//! per-route preferences. Never persisted: a restart returns the
-//! default to the pool's own ranking and drops every preference.
+//! The operator's runtime steer — who owns each provider's default and
+//! the per-route preferences. Never persisted: a restart returns the
+//! defaults to the pool's own ranking and drops every preference.
 
 use std::collections::HashMap;
 
@@ -8,18 +8,24 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::config::Route;
+use crate::provider::Provider;
 
 use super::{Pool, fold, references};
 
 #[derive(Debug, Default, Clone)]
 pub struct Operator {
-    pub default: Option<Uuid>,
+    pub defaults: HashMap<Provider, DefaultAccount>,
+    /// Configured route name → the preferred account.
+    pub route_preferences: HashMap<String, Uuid>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DefaultAccount {
+    pub handle: Uuid,
     /// The default came from `switch`, not from the ranking.
     pub chosen: bool,
     /// When the current default was last set, by either.
-    pub since: Option<OffsetDateTime>,
-    /// Configured route name → the preferred account.
-    pub route_preferences: HashMap<String, Uuid>,
+    pub since: OffsetDateTime,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,26 +39,50 @@ impl Pool {
         &self.operator
     }
 
-    /// The default moves whether or not the account is eligible.
+    /// The account's provider's default moves whether or not the account is
+    /// eligible; an account removed since it was resolved moves nothing.
     /// Returns the previous default.
     pub fn switch_default(&mut self, handle: Uuid, now: OffsetDateTime) -> Option<Uuid> {
-        let previous = self.operator.default;
-        if previous != Some(handle) {
-            self.operator.since = Some(now);
-        }
-        self.operator.default = Some(handle);
-        self.operator.chosen = true;
-        previous
+        let provider = self.get(handle)?.provider;
+        self.set_default(provider, handle, true, now)
     }
 
     /// The ranking, an automatic move or a removal: the pool's own move, which forgets the
     /// operator's choice.
-    pub(super) fn move_default(&mut self, handle: Option<Uuid>, now: OffsetDateTime) {
-        if self.operator.default != handle {
-            self.operator.since = handle.map(|_| now);
+    pub(super) fn move_default(
+        &mut self,
+        provider: Provider,
+        handle: Option<Uuid>,
+        now: OffsetDateTime,
+    ) {
+        match handle {
+            Some(handle) => {
+                self.set_default(provider, handle, false, now);
+            }
+            None => {
+                self.operator.defaults.remove(&provider);
+            }
         }
-        self.operator.default = handle;
-        self.operator.chosen = false;
+    }
+
+    fn set_default(
+        &mut self,
+        provider: Provider,
+        handle: Uuid,
+        chosen: bool,
+        now: OffsetDateTime,
+    ) -> Option<Uuid> {
+        let previous = self.operator.defaults.get(&provider).copied();
+        let since = previous
+            .filter(|d| d.handle == handle)
+            .map_or(now, |d| d.since);
+        let default = DefaultAccount {
+            handle,
+            chosen,
+            since,
+        };
+        self.operator.defaults.insert(provider, default);
+        previous.map(|d| d.handle)
     }
 
     /// Refused when the route's list lacks the account; an
@@ -106,6 +136,7 @@ mod tests {
 
     fn key(name: &str) -> Account {
         Account::new(
+            Provider::Anthropic,
             name.into(),
             Profile::default(),
             Source::ApiKeyEntry,
@@ -121,22 +152,40 @@ mod tests {
     fn switch_marks_chosen_and_a_pool_move_forgets_it() {
         let mut pool = Pool::from_accounts(vec![key("A"), key("B")], T0);
         let (a, b) = (pool.accounts()[0].handle, pool.accounts()[1].handle);
-        pool.move_default(Some(a), T0);
-        assert_eq!(pool.operator().since, Some(T0));
-        assert!(!pool.operator().chosen);
+        let default = |pool: &Pool| pool.operator().defaults[&Provider::Anthropic];
+        pool.move_default(Provider::Anthropic, Some(a), T0);
+        assert_eq!(default(&pool).since, T0);
+        assert!(!default(&pool).chosen);
 
         assert_eq!(pool.switch_default(b, T1), Some(a));
-        assert_eq!(pool.operator().default, Some(b));
-        assert!(pool.operator().chosen);
-        assert_eq!(pool.operator().since, Some(T1));
+        assert_eq!(default(&pool).handle, b);
+        assert!(default(&pool).chosen);
+        assert_eq!(default(&pool).since, T1);
 
         // The same account switched to again: `since` stays.
         pool.switch_default(b, T2);
-        assert_eq!(pool.operator().since, Some(T1));
+        assert_eq!(default(&pool).since, T1);
 
-        pool.move_default(Some(a), T2);
-        assert!(!pool.operator().chosen);
-        assert_eq!(pool.operator().since, Some(T2));
+        pool.move_default(Provider::Anthropic, Some(a), T2);
+        assert!(!default(&pool).chosen);
+        assert_eq!(default(&pool).since, T2);
+    }
+
+    #[test]
+    fn each_provider_keeps_its_own_default() {
+        let mut codex = key("C");
+        codex.provider = Provider::Codex;
+        let mut pool = Pool::from_accounts(vec![key("A"), codex], T0);
+        let (a, c) = (pool.accounts()[0].handle, pool.accounts()[1].handle);
+        pool.move_default(Provider::Anthropic, Some(a), T0);
+        assert_eq!(pool.switch_default(c, T1), None);
+        assert_eq!(pool.default_account(Provider::Codex), Some(c));
+        assert_eq!(pool.default_account(Provider::Anthropic), Some(a));
+        // Removing a provider's default moves it within that provider only.
+        pool.remove(c);
+        assert_eq!(pool.default_account(Provider::Codex), None);
+        assert_eq!(pool.default_account(Provider::Anthropic), Some(a));
+        assert_eq!(pool.switch_default(c, T2), None, "a removed account");
     }
 
     #[test]

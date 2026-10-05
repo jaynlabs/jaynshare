@@ -5,7 +5,25 @@
 //! reload (the state cross-references).
 
 use super::{Config, ConfigError, ReferenceSite, Site};
-use crate::pool::{Pool, ReferenceConflict, Resolve, Why, references};
+use crate::pool::{Account, Pool, ReferenceConflict, Resolve, Why};
+use crate::provider::Provider;
+
+/// A reference resolves among one provider's accounts, which is all
+/// selection sees: one account per provider at most, and one at least.
+fn resolve<'p>(pool: &'p Pool, reference: &str) -> Result<Vec<&'p Account>, Resolve> {
+    let mut found = Vec::new();
+    for provider in Provider::ALL {
+        match pool.resolve_in(provider, reference) {
+            Ok(account) => found.push(account),
+            Err(Resolve::NotFound) => {}
+            Err(ambiguous) => return Err(ambiguous),
+        }
+    }
+    if found.is_empty() {
+        return Err(Resolve::NotFound);
+    }
+    Ok(found)
+}
 
 /// Route and priority references against the state: a reference that
 /// resolves to no account or to several, and a second priority entry
@@ -16,17 +34,19 @@ pub fn errors(sites: &[ReferenceSite], pool: &Pool) -> Vec<ConfigError> {
     let mut covered = Vec::new();
     for site in sites {
         let target = site.target.clone();
-        match (pool.resolve(&site.literal), &site.site) {
-            (Ok(account), Site::Priority) if covered.contains(&account.handle) => {
-                out.push(ConfigError {
-                    target,
-                    message: format!(
-                        "{:?} resolves to {}, which an earlier entry already covers",
-                        site.literal, account.display_name
-                    ),
-                });
+        match (resolve(pool, &site.literal), &site.site) {
+            (Ok(accounts), Site::Priority) => {
+                match accounts.iter().find(|a| covered.contains(&a.handle)) {
+                    Some(account) => out.push(ConfigError {
+                        target,
+                        message: format!(
+                            "{:?} resolves to {}, which an earlier entry already covers",
+                            site.literal, account.display_name
+                        ),
+                    }),
+                    None => covered.extend(accounts.iter().map(|a| a.handle)),
+                }
             }
-            (Ok(account), Site::Priority) => covered.push(account.handle),
             (Ok(_), Site::Route(_)) => {}
             (Err(why), Site::Route(route)) => out.push(ConfigError {
                 target,
@@ -46,7 +66,7 @@ fn describe(reference: &str, why: &Resolve) -> String {
         Resolve::NotFound => format!("no account matches {reference:?}"),
         Resolve::Ambiguous(names) => format!(
             "{reference:?} matches several accounts: {}",
-            names.join(", ")
+            Resolve::listed(names)
         ),
     }
 }
@@ -79,15 +99,10 @@ pub fn conflicts(config: &Config, pool: &Pool) -> Vec<ReferenceConflict> {
 }
 
 fn resolution(pool: &Pool, reference: &str) -> Option<Why> {
-    match pool
-        .accounts()
-        .iter()
-        .filter(|a| references(a, reference))
-        .count()
-    {
-        0 => Some(Why::Unresolvable),
-        1 => None,
-        _ => Some(Why::Ambiguous),
+    match resolve(pool, reference) {
+        Ok(_) => None,
+        Err(Resolve::NotFound) => Some(Why::Unresolvable),
+        Err(Resolve::Ambiguous(_)) => Some(Why::Ambiguous),
     }
 }
 
@@ -142,12 +157,14 @@ mod tests {
 
     fn oauth(email: &str, org: &str) -> Account {
         Account::new(
+            crate::provider::Provider::Anthropic,
             String::new(),
             Profile {
                 email: Some(email.into()),
                 account_uuid: Some(Uuid::new_v4()),
                 organization_uuid: None,
                 organization_name: Some(org.into()),
+                chatgpt_account_id: None,
             },
             Source::PortableJson,
             Credential::OAuth(crate::pool::OAuthCredential {
@@ -202,6 +219,49 @@ mod tests {
                 conflict("priority 1", "Gone", Why::Unresolvable),
             ]
         );
+    }
+
+    /// The same person's Claude and Codex logins share an email; a
+    /// reference resolves within each provider, so the second login breaks
+    /// nothing, and a priority covers both.
+    #[test]
+    fn a_reference_resolves_within_each_provider() {
+        let codex = |org| Account {
+            provider: Provider::Codex,
+            ..oauth("a@x.io", org)
+        };
+        let mut pool = Pool::default();
+        pool.add(oauth("a@x.io", "One"), None).unwrap();
+        let config = config(
+            vec![route("by-email", Some(&["a@x.io"]))],
+            vec![priority("a@x.io")],
+        );
+        let before = conflicts(&config, &pool);
+        let login = pool.add(codex("One"), Some("CODEX".into())).unwrap();
+        assert_eq!(introduced(&before, &conflicts(&config, &pool)), vec![]);
+
+        let site = |literal: &str| ReferenceSite {
+            target: literal.into(),
+            literal: literal.into(),
+            site: Site::Priority,
+        };
+        let found = errors(&[site("a@x.io"), site("codex")], &pool);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(found[0].message.contains("CODEX"), "{found:?}");
+
+        // Two logins of one provider are still ambiguous, and say which provider.
+        pool.add(codex("Two"), None).unwrap();
+        assert_eq!(
+            conflicts(&config, &pool),
+            vec![
+                conflict("route by-email", "a@x.io", Why::Ambiguous),
+                conflict("priority 0", "a@x.io", Why::Ambiguous),
+            ]
+        );
+        let found = errors(&[site("a@x.io")], &pool);
+        assert!(found[0].message.contains("(codex)"), "{found:?}");
+        pool.remove(login);
+        assert_eq!(conflicts(&config, &pool), vec![]);
     }
 
     /// At start and reload: every broken reference under its

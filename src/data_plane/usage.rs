@@ -15,7 +15,8 @@ pub struct Tokens {
 
 #[derive(Debug)]
 pub enum UsageExtractor {
-    /// SSE: `message_start` carries input tokens, `message_delta` the cumulative output count.
+    /// SSE: `message_start` carries input tokens, `message_delta` the
+    /// cumulative output count; Codex's `response.completed` carries both.
     Stream { line: Vec<u8>, tokens: Tokens },
     /// A JSON body with a top-level `usage` object.
     Json { copy: Vec<u8> },
@@ -86,6 +87,15 @@ fn note_event(data: &[u8], tokens: &mut Tokens) {
                 tokens.output = tokens.output.max(u.output);
             }
         }
+        Some("response.completed") => {
+            if let Some(u) = event
+                .get("response")
+                .and_then(|r| r.get("usage"))
+                .and_then(usage_of)
+            {
+                *tokens = u;
+            }
+        }
         _ => {}
     }
 }
@@ -115,6 +125,20 @@ mod tests {
             Tokens {
                 input: 12,
                 output: 40
+            }
+        );
+    }
+
+    #[test]
+    fn codex_usage_comes_from_response_completed() {
+        let sse = b"event: response.created\ndata: {\"type\":\"response.created\",\"response\":{}}\n\nevent: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":11,\"output_tokens\":7,\"total_tokens\":18}}}\n\n";
+        let mut x = UsageExtractor::for_content_type(Some("text/event-stream"));
+        x.feed(sse);
+        assert_eq!(
+            x.finish(),
+            Tokens {
+                input: 11,
+                output: 7
             }
         );
     }

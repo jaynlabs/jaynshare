@@ -109,7 +109,8 @@ pub(super) async fn secret_set(cli: &Cli, channel: &SecretChannel) -> Outcome {
 // ------------------------------------------------------------------ status
 
 /// The client read plus the origins the installation
-/// holds; the human form is labelled lines, `--line` is exactly the
+/// holds; the human form is a rate-limit table with diagnostics under
+/// `--verbose`, `--line` is exactly the
 /// status-line text, `--json` is the envelope result.
 pub(super) async fn status(cli: &Cli, args: &StatusArgs) -> Outcome {
     if args.check {
@@ -122,10 +123,8 @@ pub(super) async fn status(cli: &Cli, args: &StatusArgs) -> Outcome {
     if let Some(session) = &args.session {
         path.push_str(&format!("?session_id={session}"));
     }
-    if args.line {
-        path.push_str(if args.session.is_some() { "&" } else { "?" });
-        path.push_str("rate_limits=true");
-    }
+    path.push_str(if args.session.is_some() { "&" } else { "?" });
+    path.push_str("rate_limits=true");
     let (status, body) = match request(&installation, cli)?
         .call(Method::GET, &path, Some(&secret_value), None)
         .await
@@ -164,7 +163,7 @@ pub(super) async fn status(cli: &Cli, args: &StatusArgs) -> Outcome {
     let probe = crate::probe_client::probe(&installation, &secret_value).await;
     result["probe"] = crate::probe_client::member(&probe);
     let failure = crate::probe_client::failure(&probe);
-    let human = status_human(&result);
+    let human = status_human(&result, cli, args);
     match failure {
         // The probe's failure class is the exit code. The facts still
         // read on standard output; the failure is its one line on stderr.
@@ -198,23 +197,31 @@ pub(super) async fn status(cli: &Cli, args: &StatusArgs) -> Outcome {
     }
 }
 
-/// The human form, labelled lines built
-/// from `result` (the status body plus `client.origins` and
-/// `probe`) and nothing else.
-fn status_human(result: &Value) -> String {
+/// Rate limits, followed by client diagnostics under `--verbose`.
+fn status_human(result: &Value, cli: &Cli, args: &StatusArgs) -> String {
+    let table = result["accounts"]
+        .as_array()
+        .map(|accounts| super::verbs::rate_limits_table(accounts, colour_wanted(cli)))
+        .unwrap_or_else(|| "accounts  (rate limits unavailable)".to_owned());
+    if !args.verbose {
+        return table;
+    }
     let client = &result["client"];
     let origins = &client["origins"];
     let proxy = origins["proxy"]
         .as_str()
         .filter(|p| !p.is_empty())
         .unwrap_or("none");
-    let mut lines = vec![format!(
-        "client:   {} ({}) · base URL {}, proxy {}",
-        client["id"].as_str().unwrap_or(""),
-        client["display_name"].as_str().unwrap_or(""),
-        origins["base_url"].as_str().unwrap_or(""),
-        proxy
-    )];
+    let mut lines = vec![
+        table,
+        format!(
+            "client:   {} ({}) · base URL {}, proxy {}",
+            client["id"].as_str().unwrap_or(""),
+            client["display_name"].as_str().unwrap_or(""),
+            origins["base_url"].as_str().unwrap_or(""),
+            proxy
+        ),
+    ];
     let server = &result["server"];
     lines.push(format!(
         "server:   {}, {}, control API {}",
