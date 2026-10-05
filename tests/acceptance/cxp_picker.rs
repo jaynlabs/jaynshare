@@ -444,7 +444,7 @@ async fn the_picker_only_in_pick_mode_with_account_rate_limits() {
     let windows = |at: usize| -> Vec<&str> {
         let row = transcript[at..].lines().next().unwrap_or_default();
         row.split_whitespace()
-            .filter(|word| word.ends_with('%') || *word == "?")
+            .filter(|word| word.ends_with('%'))
             .collect()
     };
     assert_eq!(
@@ -454,8 +454,8 @@ async fn the_picker_only_in_pick_mode_with_account_rate_limits() {
     );
     assert_eq!(
         windows(fsub2),
-        ["?", "?"],
-        "unknown windows stay explicit: {transcript}"
+        ["0%", "0%"],
+        "unknown windows read as reset: {transcript}"
     );
     for word in ["token", "health", "quota", "@"] {
         assert!(

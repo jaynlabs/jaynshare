@@ -179,11 +179,10 @@ with each account's five-hour and weekly usage, and launches the tool of the
 account you pick.
 Arguments after `--` go to the tool unchanged. `jaynshare status` checks enrollment
 and connectivity and shows every pooled account's five-hour and weekly usage
-in a colored table (`?` means unknown); `--verbose` adds the other status
-details. A cyan `┃` marks the elapsed share of the reset period when the reset
-time is known. `jaynshare account login` adds your account later, and
-`jaynshare alias` prints a shell alias so that `claude` itself goes through the
-pool.
+in a colored table; `--verbose` adds the other status details. A cyan `┃`
+marks the elapsed share of the reset period when the reset time is known.
+`jaynshare account login` adds your account later, and `jaynshare alias` prints
+a shell alias so that `claude` itself goes through the pool.
 
 `jaynshare codex` does the same for Codex over the pool's ChatGPT accounts,
 added with `jaynshare account login --provider codex`. Codex still needs your
