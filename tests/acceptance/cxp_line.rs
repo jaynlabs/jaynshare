@@ -170,7 +170,7 @@ async fn the_line_names_the_serving_account_and_rate_limits() {
     );
     assert_eq!(code, 0, "{stderr}");
     assert_eq!(stderr, "");
-    let expected = "jaynshare → FSUB 12%/3% · FSUB2 ?/? · 1 active\n";
+    let expected = "jaynshare → FSUB 12%/3% · FSUB2 0%/0% · 1 active\n";
     assert_eq!(
         stdout,
         expected,

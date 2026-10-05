@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 
 use crate::client;
+use crate::picker::render::{Charset, percentage, sanitize};
 use crate::provider::Provider;
 
 /// Claude Code's: the only tool with this status line.
@@ -205,11 +206,7 @@ fn account_cell(account: &Value) -> String {
 /// A display name at most 16 characters, control characters removed, long
 /// names cut with an ellipsis.
 fn short_name(name: &str) -> String {
-    crate::picker::render::sanitize(name, 16, crate::picker::render::Charset::Unicode)
-}
-
-fn percentage(value: Option<f64>) -> String {
-    value.map_or_else(|| "?".to_owned(), |value| format!("{:.0}%", value * 100.0))
+    sanitize(name, 16, Charset::Unicode)
 }
 
 #[cfg(test)]
@@ -254,7 +251,7 @@ mod render_tests {
     fn the_picked_account_first_with_a_short_limits_pair() {
         assert_eq!(
             render(&answer(Some("FSUB")), false),
-            "jaynshare → FSUB 12%/34% · FSUB2 ?/100%"
+            "jaynshare → FSUB 12%/34% · FSUB2 0%/100%"
         );
     }
 
@@ -269,7 +266,7 @@ mod render_tests {
         });
         assert_eq!(
             render(&Snapshot::Answer(body), false),
-            "jaynshare → pending · FSUB 12%/34% · FSUB2 ?/100% · 1 active"
+            "jaynshare → pending · FSUB 12%/34% · FSUB2 0%/100% · 1 active"
         );
     }
 
@@ -301,7 +298,7 @@ mod render_tests {
         });
         assert_eq!(
             render(&Snapshot::Answer(body), false),
-            "jaynshare → FSUB 12%/34% · FSUB2 ?/100% · 2 active"
+            "jaynshare → FSUB 12%/34% · FSUB2 0%/100% · 2 active"
         );
     }
 

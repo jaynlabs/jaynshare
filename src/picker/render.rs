@@ -154,7 +154,7 @@ impl Paint {
     }
 
     /// The `width`-cell utilisation bar: filled to `ratio` on the
-    /// gradient, `?`s when usage is unknown, with a cyan marker at `pace`.
+    /// gradient, empty when usage is unknown, with a cyan marker at `pace`.
     pub fn bar(&self, ratio: Option<f64>, pace: Option<f64>, width: usize) -> String {
         let (filled, empty, marker) = self.cells();
         let fill = (ratio.unwrap_or(0.0).clamp(0.0, 1.0) * width as f64).round() as usize;
@@ -163,8 +163,6 @@ impl Paint {
         for index in 0..width {
             if at == Some(index) {
                 bar.push_str(&self.wrap("1;36", marker));
-            } else if ratio.is_none() {
-                bar.push_str(&self.gray("?"));
             } else if index < fill {
                 bar.push_str(&self.rgb(gradient(index, width), filled));
             } else {
@@ -176,7 +174,7 @@ impl Paint {
 
     /// A window's cell: its bar, unless `width` is zero, then its percentage.
     pub fn usage(&self, ratio: Option<f64>, pace: Option<f64>, width: usize) -> String {
-        let percentage = ratio.map_or_else(|| "?".to_owned(), |r| format!("{:.0}%", r * 100.0));
+        let percentage = percentage(ratio);
         if width == 0 {
             return format!("{percentage:>4}");
         }
@@ -188,6 +186,12 @@ impl Paint {
         let marker = self.cells().2;
         self.dim(&format!("  {marker} = elapsed share of the reset period"))
     }
+}
+
+/// A window's usage as a whole percentage. Unknown usage is `0%`: the
+/// server forgets a window when it resets.
+pub fn percentage(ratio: Option<f64>) -> String {
+    format!("{:.0}%", ratio.unwrap_or(0.0) * 100.0)
 }
 
 /// The elapsed share of the `name` window that resets at `reset`, while
@@ -505,7 +509,8 @@ mod tests {
             paint.bar(Some(0.25), None, BAR_WIDTH),
             "[█████░░░░░░░░░░░░░]"
         );
-        assert_eq!(paint.bar(None, None, BAR_WIDTH), "[??????????????????]");
+        assert_eq!(paint.bar(None, None, BAR_WIDTH), "[░░░░░░░░░░░░░░░░░░]");
+        assert_eq!(percentage(None), "0%");
         for (pace, position) in [(0.0, 1), (0.5, 10), (1.0, 18)] {
             let bar = paint.bar(Some(0.25), Some(pace), BAR_WIDTH);
             assert_eq!(bar.chars().count(), BAR_WIDTH + 2);

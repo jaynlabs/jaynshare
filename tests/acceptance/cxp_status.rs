@@ -684,7 +684,7 @@ async fn the_three_forms_of_status_agree() {
 
     // The line's only facts are the picked account, every Claude Code
     // account's limits and the active count.
-    for fact in ["→ Other Account ?/100%", "4 active"] {
+    for fact in ["→ Other Account 0%/100%", "4 active"] {
         assert!(line.contains(fact), "line lacks {fact:?}: {line}");
     }
     for unrelated in ["Zed Account", "12%/34%", "7/9", "capture", "hold"] {
@@ -736,7 +736,7 @@ async fn the_three_forms_of_status_agree() {
         .unwrap();
     assert!(
         other.contains("anthropic")
-            && other.contains("[??????????????????]")
+            && other.contains("[░░░░░░░░░░░░░░░░░░]   0%")
             && other.contains("100%"),
         "{other}"
     );
