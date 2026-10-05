@@ -3,7 +3,7 @@
 //! terminal (`/dev/tty` where there is one), raw mode and the cursor
 //! restored on every exit path by a guard's `Drop`.
 
-use super::render::Table;
+use super::render::{TITLE, Table};
 use super::{Choice, Line, PickError};
 use std::fs::File;
 use std::io::Write;
@@ -42,8 +42,7 @@ pub(super) fn pick(lines: &[Line]) -> Result<(usize, Choice), PickError> {
         terminal::Clear(terminal::ClearType::FromCursorDown)
     )
     .map_err(io)?;
-    let mut text =
-        String::from("Choose the account for this session (up/down or j/k, Enter; Esc cancels):");
+    let mut text = String::from(TITLE);
     for row in screen(lines, &table, marker, current) {
         text.push_str("\r\n\r");
         text.push_str(&row);
@@ -86,20 +85,25 @@ fn step(lines: &[Line], from: usize, by: usize) -> usize {
 }
 
 /// The header, every line indented with the marker on `current`'s, then
-/// the legend.
+/// the legend and the keys.
 fn screen(lines: &[Line], table: &Table, marker: &str, current: usize) -> Vec<String> {
-    let rows = lines.iter().enumerate().map(|(i, line)| {
+    let mut screen = vec![format!("  {}", table.header())];
+    for (i, line) in lines.iter().enumerate() {
+        if line.opens_section() {
+            screen.push(String::new());
+        }
         let marker = if i == current { marker } else { " " };
-        format!(
+        screen.push(format!(
             "{}{marker} {}",
             line.indent(),
             table.line(line, i == current)
-        )
-    });
-    std::iter::once(format!("  {}", table.header()))
-        .chain(rows)
-        .chain(table.legend())
-        .collect()
+        ));
+    }
+    if let Some(legend) = table.legend() {
+        screen.extend([String::new(), legend]);
+    }
+    screen.extend([String::new(), table.keys()]);
+    screen
 }
 
 /// Rewrite the lines in place after a move.
