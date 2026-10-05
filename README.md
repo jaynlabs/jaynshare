@@ -8,7 +8,7 @@
 </p>
 
 <p align="center">
-  <b>You can share your Claude subscriptions!</b><br>
+  <b>You can share your Claude and Codex subscriptions!</b><br>
   <sub>Self-hosted · Linux server · macOS &amp; Windows client</sub>
 </p>
 
@@ -31,6 +31,7 @@ hosted if you have trust to spare). After hosting a server, connecting several
 accounts to it and enrolling a client, replace `claude` by `jaynshare claude`
 (or `codex` by `jaynshare codex`) and you will be able to choose from which
 account to draw for your session.
+Oh, and `jaynshare` opens a picker to choose from every accounts connected to the server.
 
 > [!WARNING]
 > Pooling Claude subscriptions conflicts with Anthropic's published terms and
