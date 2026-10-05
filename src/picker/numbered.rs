@@ -4,7 +4,7 @@
 //! repeats; the
 //! cancel word or end of input cancels, and a closed input never selects.
 
-use super::render::Table;
+use super::render::{TITLE, Table};
 use super::{CANCELLED, Choice, Line, PickError};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
@@ -92,11 +92,14 @@ pub(super) fn pick(lines: &[Line]) -> Result<(usize, Choice), PickError> {
         .recv()
         .map_err(|_| PickError::Io("the interrupt watcher ended".into()))?;
 
-    writeln!(output, "Choose the account for this session:").map_err(io)?;
+    writeln!(output, "{TITLE}").map_err(io)?;
     let blank = " ".repeat(digits + 1);
     writeln!(output, "  {blank} {}", table.header()).map_err(io)?;
     let mut number = 0;
     for line in lines {
+        if line.opens_section() {
+            writeln!(output).map_err(io)?;
+        }
         let label = if line.choice().is_some() {
             number += 1;
             format!("{number:>digits$})")
@@ -107,8 +110,9 @@ pub(super) fn pick(lines: &[Line]) -> Result<(usize, Choice), PickError> {
         writeln!(output, "{}", text.trim_end()).map_err(io)?;
     }
     if let Some(legend) = table.legend() {
-        writeln!(output, "{legend}").map_err(io)?;
+        writeln!(output, "\n{legend}").map_err(io)?;
     }
+    writeln!(output).map_err(io)?;
     prompt_once(&mut output)?;
 
     let mut line = String::new();

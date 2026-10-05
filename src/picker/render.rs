@@ -1,7 +1,7 @@
-//! What the pickers draw: under the columns' titles, per section, the
-//! automatic row (after the section's heading, if any), then each account's
-//! name and its five-hour and weekly bars as `status` draws them, all sized
-//! to the terminal. The character set is ASCII on Windows and
+//! What the pickers draw: under the title and the bars' titles, per
+//! section, the automatic row (after the section's heading, if any), then
+//! each account's name and its five-hour and weekly bars as `status` draws
+//! them, all sized to the terminal. The character set is ASCII on Windows and
 //! wherever the locale names no UTF-8.
 
 use time::OffsetDateTime;
@@ -14,6 +14,8 @@ pub enum Charset {
     Ascii,
 }
 
+/// Above everything, in both pickers.
+pub const TITLE: &str = "Choose an account:";
 /// Appended to an unselectable row.
 pub const UNAVAILABLE: &str = "unavailable";
 /// `status`'s bar width, in cells; a picker's never exceeds it.
@@ -22,7 +24,6 @@ pub const BAR_WIDTH: usize = 18;
 const MIN_BAR_WIDTH: usize = 6;
 /// Names are cut before the bars go, down to this width.
 const MIN_NAME_WIDTH: usize = 16;
-const ACCOUNT: &str = "Account";
 const FIVE_HOUR: &str = "5h used";
 const WEEKLY: &str = "Weekly used";
 
@@ -251,7 +252,7 @@ impl Table {
                 let name = sanitize(&line.row?.display_name, usize::MAX, paint.charset);
                 Some(line.indent().len() + name.chars().count())
             })
-            .fold(ACCOUNT.len(), usize::max);
+            .fold(0, usize::max);
         let unavailable = lines
             .iter()
             .any(|line| line.row.is_some_and(|row| !row.selectable));
@@ -280,10 +281,11 @@ impl Table {
         self.paint.charset
     }
 
-    /// The columns' titles, after a blank marker or number.
+    /// The bars' titles, after a blank marker or number.
     pub(super) fn header(&self) -> String {
         self.paint.bold(&format!(
-            "{ACCOUNT:<name$}  {FIVE_HOUR:<five$}  {WEEKLY}",
+            "{:<name$}  {FIVE_HOUR:<five$}  {WEEKLY}",
+            "",
             name = self.name,
             five = column(self.bar, FIVE_HOUR)
         ))
@@ -347,6 +349,14 @@ impl Table {
     /// The pace legend, under bars.
     pub(super) fn legend(&self) -> Option<String> {
         (self.bar > 0).then(|| self.paint.legend())
+    }
+
+    /// The keyboard picker's keys, last.
+    pub(super) fn keys(&self) -> String {
+        self.paint.dim(match self.paint.charset {
+            Charset::Unicode => "↑/↓ move · enter choose · esc cancel",
+            Charset::Ascii => "up/down move - enter choose - esc cancel",
+        })
     }
 }
 
@@ -417,11 +427,11 @@ mod tests {
         assert_eq!(
             drawn(&sections, 80),
             [
-                "Account  5h used                    Weekly used",
+                "     5h used                    Weekly used",
                 "Claude Code (server decides)",
-                "  A      [##................]  12%  [######............]  34%",
+                "  A  [##................]  12%  [######............]  34%",
                 "Codex (server decides)",
-                "  B      [##................]  12%  [######............]  34% unavailable",
+                "  B  [##................]  12%  [######............]  34% unavailable",
                 "  | = elapsed share of the reset period",
             ]
         );

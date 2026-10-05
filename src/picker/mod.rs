@@ -66,6 +66,11 @@ impl Line<'_> {
         }
     }
 
+    /// A blank line goes before every section's automatic row but the first.
+    fn opens_section(&self) -> bool {
+        self.row.is_none() && self.section > 0
+    }
+
     /// Before the marker or number: an account sits under a headed
     /// section's automatic row.
     fn indent(&self) -> &'static str {

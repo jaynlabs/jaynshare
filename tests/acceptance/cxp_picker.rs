@@ -37,9 +37,10 @@ async fn an_unselectable_row_has_no_number_in_the_numbered_picker() {
             .trim_end()
             .to_owned()
     };
+    let header = line("5h used");
     assert!(
-        line("Account").contains("5h used"),
-        "the columns' titles: {transcript}"
+        header.trim_start().starts_with("5h used") && header.ends_with("Weekly used"),
+        "the bars' titles, and no other: {transcript}"
     );
     assert!(
         line("Automatic").starts_with("  1) Automatic (server decides)"),
@@ -219,7 +220,7 @@ async fn the_keyboard_marker_skips_an_unselectable_row() {
     let (code, transcript) = machine.pty(
         &["claude", "--picker", "keyboard"],
         &[("NO_COLOR", "1")],
-        &[("Esc cancels", &keys)],
+        &[("esc cancel", &keys)],
     );
     assert_eq!(code, 0, "the fake exits 0: {transcript}");
     assert!(
@@ -263,7 +264,7 @@ async fn the_terminal_is_restored_after_every_outcome() {
         (KEY_ESC, "exit=15", ": Esc cancels"),
         (KEY_CTRL_C, "exit=15", ": Ctrl-C is a key in raw mode"),
     ] {
-        let (code, transcript) = shell("Esc cancels", keys);
+        let (code, transcript) = shell("esc cancel", keys);
         assert_eq!(code, 0, "the shell exits 0 ({why}): {transcript}");
         let after = transcript
             .rsplit("exit=")
@@ -354,7 +355,7 @@ async fn account_and_picker_pin_auto_sends_none() {
     let (code, _) = machine.pty(
         &["claude", "--picker", "keyboard"],
         &[],
-        &[("Esc cancels", &format!("{KEY_DOWN}{KEY_ENTER}"))],
+        &[("esc cancel", &format!("{KEY_DOWN}{KEY_ENTER}"))],
     );
     assert_eq!(code, 0, "the fake exits 0");
     let seen = machine.claude_ran().expect("Claude Code was launched");
@@ -418,7 +419,7 @@ async fn the_picker_only_in_pick_mode_with_account_rate_limits() {
         let (code, transcript) = machine.pty(&args, &extra, &[]);
         assert_eq!(code, 0, "the launch {args:?} exits 0");
         assert!(
-            !transcript.contains("Choose the account"),
+            !transcript.contains("Choose an account"),
             "{args:?} never shows the picker: {transcript}"
         );
     }
@@ -490,7 +491,7 @@ async fn the_descriptor_chooses_and_an_override_forces_either() {
     let machine = install_client(&instance).await;
 
     // A terminal that can go raw, no override: the keyboard picker.
-    let (code, _) = machine.pty(&["claude"], &[], &[("Esc cancels", KEY_ENTER)]);
+    let (code, _) = machine.pty(&["claude"], &[], &[("esc cancel", KEY_ENTER)]);
     assert_eq!(code, 0, "the keyboard picker's header appeared and chose");
 
     // The variable forces the numbered prompt.
@@ -517,7 +518,7 @@ async fn the_descriptor_chooses_and_an_override_forces_either() {
     let (code, _) = machine.pty(
         &["claude", "--picker", "keyboard"],
         &[("JAYNSHARE_PICKER", "numbered")],
-        &[("Esc cancels", KEY_ENTER)],
+        &[("esc cancel", KEY_ENTER)],
     );
     assert_eq!(code, 0, "the keyboard header appeared and chose");
 }
@@ -544,11 +545,11 @@ async fn picker_output_stays_on_the_terminal() {
     );
     assert_eq!(code, 0, "the shell line exits 0: {transcript}");
     assert!(
-        transcript.contains("Choose the account") && transcript.contains("exit=0"),
+        transcript.contains("Choose an account") && transcript.contains("exit=0"),
         "the picker drew on the terminal: {transcript}"
     );
     let redirected = fs::read_to_string(&out).expect("the redirect file");
-    for word in ["Choose the account", "Automatic", "Enter a number"] {
+    for word in ["Choose an account", "Automatic", "Enter a number"] {
         assert!(
             !redirected.contains(word),
             "{word:?} went to standard output: {redirected}"
@@ -563,16 +564,16 @@ async fn picker_output_stays_on_the_terminal() {
             out.display()
         ),
         &[],
-        &[("Esc cancels", KEY_ENTER)],
+        &[("esc cancel", KEY_ENTER)],
     );
     assert_eq!(code, 0, "the shell line exits 0: {transcript}");
     assert!(
-        transcript.contains("Esc cancels") && transcript.contains("exit=0"),
+        transcript.contains("esc cancel") && transcript.contains("exit=0"),
         "the keyboard picker drew on the terminal: {transcript}"
     );
     let redirected = fs::read_to_string(&out).expect("the redirect file");
     assert!(
-        !redirected.contains("Choose the account"),
+        !redirected.contains("Choose an account"),
         "the header went to standard output: {redirected}"
     );
     let _ = fs::remove_file(&out);
@@ -585,7 +586,7 @@ async fn picker_output_stays_on_the_terminal() {
     );
     assert_eq!(code, 0, "the shell line exits 0: {transcript}");
     assert!(
-        transcript.contains("Choose the account") && transcript.contains("exit=0"),
+        transcript.contains("Choose an account") && transcript.contains("exit=0"),
         "the picker drew despite the redirected input: {transcript}"
     );
 }
@@ -607,10 +608,10 @@ async fn cancel_interrupt_and_end_of_input_each_end_with_15() {
 
     let message = "cli_picker_cancelled: the account picker was cancelled; nothing was launched. Launch without the picker with --account <reference> or --auto";
     let legs: &[(&str, &str, &str)] = &[
-        ("keyboard, Esc", "Esc cancels", KEY_ESC),
-        ("keyboard, Ctrl-C", "Esc cancels", KEY_CTRL_C),
-        ("keyboard, Ctrl-D", "Esc cancels", "\u{4}"),
-        ("keyboard, q", "Esc cancels", "q"),
+        ("keyboard, Esc", "esc cancel", KEY_ESC),
+        ("keyboard, Ctrl-C", "esc cancel", KEY_CTRL_C),
+        ("keyboard, Ctrl-D", "esc cancel", "\u{4}"),
+        ("keyboard, q", "esc cancel", "q"),
         ("numbered, q", "or q to cancel", "q\r"),
         (
             "numbered, Ctrl-C (the interrupt)",
@@ -701,9 +702,9 @@ async fn bare_jaynshare_picks_across_providers_and_launches_the_picked_tool() {
     let lines = [
         "\n  1) Claude Code (server decides)\r",
         "\n    2) FSUB ",
-        "\n  3) Codex (server decides)\r",
+        "\r\n\r\n  3) Codex (server decides)\r",
         "\n    4) FSUB2 ",
-        "Enter a number (1-4)",
+        "\r\n\r\nEnter a number (1-4)",
     ];
     let at: Vec<usize> = lines
         .iter()
@@ -735,7 +736,7 @@ async fn bare_jaynshare_picks_across_providers_and_launches_the_picked_tool() {
             ("codex", None),
         ),
     ] {
-        let (code, transcript) = machine.pty(&[], &keyboard, &[("Esc cancels", &keys)]);
+        let (code, transcript) = machine.pty(&[], &keyboard, &[("esc cancel", &keys)]);
         assert_eq!(code, 0, "{keys:?}: {transcript}");
         for text in ["❯ Claude Code (server decides)", drawn] {
             assert!(transcript.contains(text), "{text:?}: {transcript}");
