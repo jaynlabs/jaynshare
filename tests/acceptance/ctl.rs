@@ -2303,6 +2303,7 @@ const CLIENT_ALLOW: &[&str] = &[
     "session",
     "serving_account_display_name",
     "sessions",
+    "sessions_active",
     "tls_pin",
     "version",
     "five_hour",

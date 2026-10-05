@@ -579,6 +579,7 @@ fn result_of(path: &str) -> Option<Value> {
                 ("display_name", string()),
                 ("provider", json!({ "enum": Provider::ALL.map(Provider::as_str) })),
                 ("rate_limits", rate_limits()),
+                ("sessions_active", json!({ "type": "integer" })),
             ])),
             "sessions": object(&[
                 ("known", json!({ "type": "integer" })),

@@ -26,7 +26,8 @@ use super::{API_VERSION, error, percent_decode, provider_named, read};
 use crate::timestamp::rfc3339;
 
 /// The client projection. Every member below is named on purpose;
-/// only shared rate-limit usage and resets are exposed per account; identity,
+/// only shared rate-limit usage and resets and the active session count are
+/// exposed per account; identity,
 /// health, routes, configuration and other clients have no path into it.
 /// With `?session_id=` the read
 /// adds `session`: this principal's most recent serving account and when it
@@ -60,6 +61,7 @@ pub(super) fn status(
             })
             .count();
         let rate_limits = include_rate_limits.then(|| {
+            let active = pool.sessions(now).active_per_account(now);
             accounts
                 .iter()
                 .map(|account| {
@@ -67,6 +69,7 @@ pub(super) fn status(
                         "display_name": account.display_name,
                         "provider": account.provider,
                         "rate_limits": rate_limits(account),
+                        "sessions_active": active.get(&account.handle).copied().unwrap_or(0),
                     })
                 })
                 .collect::<Vec<_>>()

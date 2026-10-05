@@ -12,7 +12,10 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 
 use crate::client;
+use crate::provider::Provider;
 
+/// Claude Code's: the only tool with this status line.
+const PROVIDER: Provider = Provider::Anthropic;
 /// A payload larger than this is no payload.
 pub const MAX_PAYLOAD: usize = 64 * 1024;
 /// The whole run, and the one request inside it.
@@ -118,17 +121,17 @@ pub fn parse_payload(payload: Option<&[u8]>) -> Option<String> {
 }
 
 /// The one line — `jaynshare →` the serving account, then every other
-/// account's `five-hour%/weekly%` utilisation, then the active session
-/// count; `offline`, the enrollment state for a refusal. Grey, and only
-/// grey, when `colour` — the line never recolours the terminal — the same
-/// content without it.
+/// `PROVIDER` account's `five-hour%/weekly%` utilisation, then their active
+/// session count; `offline`, the enrollment state for a refusal. Grey, and
+/// only grey, when `colour` — the line never recolours the terminal — the
+/// same content without it.
 pub fn render(snapshot: &Snapshot, colour: bool) -> String {
     let line = match snapshot {
         Snapshot::Answer(body) => {
             let selected = body["session"]["serving_account_display_name"].as_str();
             let accounts: Vec<&Value> = body["accounts"]
                 .as_array()
-                .map(|accounts| accounts.iter().collect())
+                .map(|accounts| accounts.iter().filter(|a| is_ours(a)).collect())
                 .unwrap_or_default();
             let mut parts: Vec<String> = Vec::new();
             match selected {
@@ -156,7 +159,14 @@ pub fn render(snapshot: &Snapshot, colour: bool) -> String {
                     }
                 }
             }
-            let active = body["sessions"]["active"].as_u64().unwrap_or(0);
+            // A server without the per-account count has only the pool's.
+            let active = accounts
+                .iter()
+                .map(|account| account["sessions_active"].as_u64())
+                .sum::<Option<u64>>()
+                .filter(|_| body["accounts"].is_array())
+                .or_else(|| body["sessions"]["active"].as_u64())
+                .unwrap_or(0);
             if active > 0 {
                 parts.push(format!("{active} active"));
             }
@@ -172,6 +182,15 @@ pub fn render(snapshot: &Snapshot, colour: bool) -> String {
     } else {
         line
     }
+}
+
+/// A 2.1.x server names no provider: its accounts are the default's.
+fn is_ours(account: &Value) -> bool {
+    account["provider"]
+        .as_str()
+        .map_or(PROVIDER.is_default(), |provider| {
+            provider == PROVIDER.as_str()
+        })
 }
 
 fn account_cell(account: &Value) -> String {
@@ -251,6 +270,38 @@ mod render_tests {
         assert_eq!(
             render(&Snapshot::Answer(body), false),
             "jaynshare → pending · FSUB 12%/34% · FSUB2 ?/100% · 1 active"
+        );
+    }
+
+    #[test]
+    fn only_claude_code_accounts_and_their_sessions() {
+        let body = json!({
+            "session": { "serving_account_display_name": "FSUB" },
+            "accounts": [
+                {
+                    "display_name": "FSUB",
+                    "provider": "anthropic",
+                    "rate_limits": { "five_hour": 0.12, "weekly": 0.34 },
+                    "sessions_active": 1,
+                },
+                {
+                    "display_name": "Codex Desk",
+                    "provider": "codex",
+                    "rate_limits": { "five_hour": 0.4, "weekly": 0.1 },
+                    "sessions_active": 3,
+                },
+                {
+                    "display_name": "FSUB2",
+                    "provider": "anthropic",
+                    "rate_limits": { "five_hour": null, "weekly": 1.0 },
+                    "sessions_active": 1,
+                },
+            ],
+            "sessions": { "active": 5 },
+        });
+        assert_eq!(
+            render(&Snapshot::Answer(body), false),
+            "jaynshare → FSUB 12%/34% · FSUB2 ?/100% · 2 active"
         );
     }
 

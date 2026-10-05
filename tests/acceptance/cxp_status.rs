@@ -138,7 +138,7 @@ async fn status_shows_the_allow_listed_facts_only() {
                 .keys()
                 .map(String::as_str)
                 .collect::<Vec<_>>(),
-            ["display_name", "provider", "rate_limits"],
+            ["display_name", "provider", "rate_limits", "sessions_active"],
             "the shared account projection: {account}"
         );
         assert_eq!(
@@ -170,6 +170,18 @@ async fn status_shows_the_allow_listed_facts_only() {
             );
         }
     }
+    let sessions_active = |name: &str| {
+        accounts
+            .iter()
+            .find(|account| account["display_name"] == name)
+            .map(|account| account["sessions_active"].clone())
+    };
+    assert_eq!(
+        sessions_active("FSUB"),
+        Some(json!(1)),
+        "the routed session: {result}"
+    );
+    assert_eq!(sessions_active("FSUB2"), Some(json!(0)), "{result}");
 
     let (code, table, stderr) = machine.jaynshare(&["status", "--session", SID], &[], None);
     assert_eq!(code, 0, "{stderr}");
@@ -609,7 +621,7 @@ async fn the_three_forms_of_status_agree() {
     let _leak_sweep = crate::leaks::LeakGuard::default();
     let instance = Instance::start_client("three-forms-status").await;
     let machine = install_client(&instance).await;
-    let mut body = snapshot_body(Some("Zed Account"));
+    let mut body = snapshot_body(Some("Other Account"));
     body["pool"] = json!({ "accounts_configured": 9, "accounts_selectable": 7 });
     body["sessions"] = json!({ "known": 11, "active": 4 });
     body["wire_capture_enabled"] = json!(true);
@@ -670,18 +682,12 @@ async fn the_three_forms_of_status_agree() {
     let result =
         serde_json::from_str::<Value>(json_out.trim()).expect("the envelope")["result"].clone();
 
-    // The line's only facts are the picked account, every account's limits
-    // and the active count.
-    for fact in [
-        "→ Zed Account ",
-        "12%/34%",
-        "Other Account",
-        "?/100%",
-        "4 active",
-    ] {
+    // The line's only facts are the picked account, every Claude Code
+    // account's limits and the active count.
+    for fact in ["→ Other Account ?/100%", "4 active"] {
         assert!(line.contains(fact), "line lacks {fact:?}: {line}");
     }
-    for unrelated in ["7/9", "capture", "hold"] {
+    for unrelated in ["Zed Account", "12%/34%", "7/9", "capture", "hold"] {
         assert!(
             !line.contains(unrelated),
             "line includes {unrelated:?}: {line}"
@@ -739,7 +745,7 @@ async fn the_three_forms_of_status_agree() {
     // And every human fact is in the JSON, at its path.
     assert_eq!(
         result["session"]["serving_account_display_name"],
-        json!("Zed Account")
+        json!("Other Account")
     );
     assert_eq!(result["pool"]["accounts_selectable"], json!(7));
     assert_eq!(result["pool"]["accounts_configured"], json!(9));
