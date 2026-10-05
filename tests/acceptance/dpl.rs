@@ -2095,10 +2095,10 @@ async fn send_after_wait(
         .expect("held request")
 }
 
-/// 8 concurrent 1 MiB uploads complete in about the time of one;
+/// 8 concurrent 1 MiB uploads all reach the upstream before any is answered;
 /// nothing queues behind one another at the transport.
 #[tokio::test(flavor = "multi_thread")]
-async fn concurrent_uploads_complete_in_about_the_time_of_one() {
+async fn concurrent_uploads_all_reach_the_upstream_before_any_answer() {
     let _leak_sweep = crate::leaks::LeakGuard::default();
     let instance = Instance::start("concurrent-uploads-complete").await;
     instance.add_fsub();
@@ -2109,33 +2109,42 @@ async fn concurrent_uploads_complete_in_about_the_time_of_one() {
         "messages": [{ "role": "user", "content": "x".repeat(1024 * 1024) }],
     });
 
-    // The baseline: one such upload on its own.
-    let started = Instant::now();
-    let answer = send(instance.addr, messages(big.clone())).await;
-    let baseline = started.elapsed();
-    assert_eq!(answer.status, StatusCode::OK);
-
-    // Eight at once: every one of them finishes in about the baseline, not
-    // eight of it.
+    // One gate per reply: `Notify` stores one permit, so a reply released
+    // before it reaches its gate still goes through.
+    let gates: Vec<_> = (0..8).map(|_| Arc::new(Notify::new())).collect();
+    instance
+        .upstream
+        .script(gates.iter().map(|gate| Reply::Hold(Arc::clone(gate))));
+    let uploads = || {
+        instance
+            .upstream
+            .seen()
+            .iter()
+            .filter(|seen| seen.path == "/v1/messages")
+            .count()
+    };
     let addr = instance.addr;
-    let started = Instant::now();
     let mut set = tokio::task::JoinSet::new();
     for _ in 0..8 {
         let big = big.clone();
         set.spawn(async move { send(addr, messages(big)).await.status });
     }
-    let mut answers = Vec::new();
-    while let Some(status) = set.join_next().await.transpose().expect("upload task") {
-        answers.push(status);
+    // The fake records a request once its whole body is in.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while uploads() < 8 {
+        assert!(
+            Instant::now() < deadline,
+            "{} of 8 held uploads reached the upstream",
+            uploads()
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    let elapsed = started.elapsed();
-    for status in answers {
+    for gate in &gates {
+        gate.notify_one();
+    }
+    while let Some(status) = set.join_next().await.transpose().expect("upload task") {
         assert_eq!(status, StatusCode::OK, "every concurrent upload is served");
     }
-    assert!(
-        elapsed < baseline * 2 + Duration::from_millis(500),
-        "8 concurrent uploads in {elapsed:?} against a {baseline:?} baseline"
-    );
 }
 
 /// A reset mid-body closes the client connection abruptly, never
