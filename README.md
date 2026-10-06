@@ -69,12 +69,9 @@ bash quickstart.sh codex    #launches codex
 ## Demo
 
 <p align="center">
-  <img width="710" height="454" alt="demo-2"
-    src="https://github.com/user-attachments/assets/e68a0565-4ff2-40c0-96ef-2ae2408603aa">
+  <img src="docs/assets/demo.gif" width="710" height="489"
+    alt="jaynshare demo: Claude Code session, account picker, and status">
 </p>
-
-This demo was v1. Pretty much still the same but v2 is now in Rust and CC config
-changes are less invasive.
 
 ## Purpose and disclaimers
 
