@@ -78,32 +78,23 @@ bash quickstart.sh codex    #launches codex
 This is a project by Jayn Labs started by my friend and I cause we were sick of
 getting rate limited while the other had plenty leftover quota.
 
-PLEASE, yes this was GREATLY done with AI. No matter your opinion on the matter,
-feel free to give us feedback. Reworking everything from the ground up is not
+PLEASE, yes this was GREATLY done with AI. Reworking everything from the ground up is not
 something frightening us. So truly feel free to give any feedback (even to roast
 us), as long as it helps us improve.
 
-Oh, and yes, we've seen Team Claude on github. We were inspired by their
-project. To be fair, our v1 was mostly a fork of their code, that's why we've
-done v2 in Rust to make this codebase our own and not just a fancy fork.
+Shout out to TeamClaude on github. We were more than inspired by their
+work cause our v1 was mostly a fork.
 
 This was not made by, endorsed by, or affiliated with Anthropic; Claude Code is
 a product of Anthropic.
 
-> [!IMPORTANT]
-> jaynshare is a "trusted" intermediary, not an E2E encrypted relay. The
-> server receives EVERYTHING in plaintext so it can route and retry them.
-> A server operator—or anyone who compromises the server—can read or alter
-> that traffic. Only use a server whose operator and deployed code you trust.
-
 ## Highlights
 
 - OAuth subscription and API-key accounts
-- An account picker at launch and a Claude Code status line naming the serving
-  account
-- A one-line join for macOS and Windows from a single-use invite, with a secret
-  per client, rotation and revocation
-- Claude and ChatGPT accounts added by their owners while joining
+- Account picker at launch
+- Claude Code status line naming the serving account
+- One-line join for macOS and Windows from a single-use invite
+- Anthropic and OpenAI accounts added by their owners when joining
 - Private-network listeners only, TLS pinned to the server's own identity, and
   an audit log that never holds a body or a credential
 - Signed releases, a one-command systemd install, optional nightly updates,
