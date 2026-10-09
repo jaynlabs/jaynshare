@@ -94,13 +94,7 @@ fn sections(
         let rows = entries
             .iter()
             .filter(|e| e.provider == of)
-            .map(|e| picker::Row {
-                handle: e.handle.clone(),
-                display_name: e.display_name.clone(),
-                selectable: e.selectable,
-                five_hour: e.five_hour,
-                weekly: e.weekly,
-            })
+            .map(picker::Row::from)
             .collect();
         let heading = provider.is_none().then_some(of.tool().name);
         (of, picker::Section { heading, rows })

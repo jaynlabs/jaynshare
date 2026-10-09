@@ -2492,6 +2492,53 @@ async fn a_stalled_client_pauses_and_a_gone_client_cancels() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn incomplete_tls_handshake_does_not_block_other_clients() {
+    use tokio::io::AsyncReadExt as _;
+
+    let _leak_sweep = crate::leaks::LeakGuard::default();
+    let pair = scratch("incomplete-tls-handshake-pair");
+    let (certificate, private_key) = stage_tls_pair(&pair);
+    let instance = Instance::start_with(
+        "incomplete-tls-handshake",
+        Setup {
+            data_plane: format!(
+                "tls_certificate_file = {}\ntls_private_key_file = {}\n",
+                crate::harness::toml_path(&certificate),
+                crate::harness::toml_path(&private_key)
+            ),
+            ..Setup::default()
+        },
+    )
+    .await;
+    let mut incomplete = TcpStream::connect(instance.addr)
+        .await
+        .expect("open a connection without completing TLS");
+    let request = Request::builder()
+        .uri("/control/v1/status")
+        .body(Full::new(Bytes::new()))
+        .expect("health request");
+    let answer = tokio::time::timeout(
+        Duration::from_secs(2),
+        send_tls(instance.addr, request, false),
+    )
+    .await;
+    assert_eq!(
+        answer
+            .expect("another client must not wait for the incomplete TLS handshake")
+            .status,
+        StatusCode::OK
+    );
+    let mut byte = [0];
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(12), incomplete.read(&mut byte))
+            .await
+            .expect("the stalled handshake is closed within a bounded time")
+            .expect("read the closed connection"),
+        0
+    );
+}
+
 /// The base-URL TLS listener serves the same exchange over
 /// HTTP/1.1 and HTTP/2: status, headers but framing and date, body and audit
 /// facts are identical.

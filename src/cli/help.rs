@@ -72,6 +72,20 @@ pub(super) static DOCS: &[VerbDoc] = &[
         ]
     ),
     verb!(
+        "desktop",
+        Engineer,
+        None,
+        "Open macOS Claude Desktop Chat through a foreground Gateway that monitors the pool's accounts; its arrow keys and Enter switch account, and closing this command stops the connection. Quit Desktop fully before initial setup",
+        [4, 5, 6, 7, 11, 15, 16],
+        [
+            "jaynshare desktop",
+            "jaynshare desktop --account <reference>",
+            "jaynshare desktop --auto",
+            "jaynshare desktop --log",
+            "jaynshare desktop --restore"
+        ]
+    ),
+    verb!(
         "env",
         Engineer,
         None,

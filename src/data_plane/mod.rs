@@ -15,6 +15,7 @@ pub mod usage;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use http::{Request, Response, StatusCode};
 use hyper::body::Incoming;
@@ -67,30 +68,45 @@ pub async fn serve(server: Arc<Server>, listener: TcpListener, tls: Option<TlsAc
             _ = stop.changed() => break,
         };
         let server = Arc::clone(&server);
-        let builder = auto::Builder::new(TokioExecutor::new());
+        let watcher = graceful.watcher();
         match &tls {
             None => {
                 let service =
                     service_fn(move |request| dispatch(Arc::clone(&server), peer, request));
-                serve_one(&builder, &graceful, TokioIo::new(stream), service);
+                tokio::spawn(serve_one(watcher, TokioIo::new(stream), service));
             }
-            Some(acceptor) => match acceptor.accept(stream).await {
-                Ok(secure) => {
+            Some(acceptor) => {
+                let acceptor = acceptor.clone();
+                let mut stop = server.stop_signal();
+                tokio::spawn(async move {
+                    if server.stopping() {
+                        return;
+                    }
+                    let handshake = tokio::select! {
+                        result = tokio::time::timeout(Duration::from_secs(10), acceptor.accept(stream)) =>
+                            result.unwrap_or_else(|_| Err(std::io::Error::new(
+                                std::io::ErrorKind::TimedOut,
+                                "TLS handshake timed out",
+                            ))),
+                        _ = stop.changed() => return,
+                    };
+                    let secure = match handshake {
+                        Ok(secure) => secure,
+                        Err(e) => {
+                            tracing::warn!(
+                                event = "tls_handshake_failed",
+                                source_address = %peer,
+                                error = %e,
+                                "TLS handshake failed"
+                            );
+                            return;
+                        }
+                    };
                     let service =
                         service_fn(move |request| dispatch(Arc::clone(&server), peer, request));
-                    serve_one(&builder, &graceful, TokioIo::new(secure), service);
-                }
-                Err(e) => {
-                    // A failed handshake is a refusal, so its line carries
-                    // the caller's address, as a tunnel refusal's does.
-                    tracing::warn!(
-                        event = "tls_handshake_failed",
-                        source_address = %peer,
-                        error = %e,
-                        "TLS handshake failed"
-                    );
-                }
-            },
+                    serve_one(watcher, TokioIo::new(secure), service).await;
+                });
+            }
         }
     }
     tokio::select! {
@@ -100,12 +116,8 @@ pub async fn serve(server: Arc<Server>, listener: TcpListener, tls: Option<TlsAc
 }
 
 /// Watches one connection under the graceful shutdown.
-fn serve_one<I, S>(
-    builder: &auto::Builder<TokioExecutor>,
-    graceful: &hyper_util::server::graceful::GracefulShutdown,
-    io: I,
-    service: S,
-) where
+async fn serve_one<I, S>(watcher: hyper_util::server::graceful::Watcher, io: I, service: S)
+where
     I: hyper::rt::Read + hyper::rt::Write + Send + Unpin + 'static,
     S: hyper::service::Service<Request<Incoming>, Response = Response<ResponseBody>>
         + Send
@@ -113,12 +125,13 @@ fn serve_one<I, S>(
     S::Future: Send + 'static,
     S::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
 {
-    let watched = graceful.watch(builder.serve_connection(io, service).into_owned());
-    tokio::spawn(async move {
-        if let Err(e) = watched.await {
-            tracing::debug!(event = "connection_ended", error = %e, "connection ended with an error");
-        }
-    });
+    let builder = auto::Builder::new(TokioExecutor::new());
+    if let Err(e) = watcher
+        .watch(builder.serve_connection(io, service).into_owned())
+        .await
+    {
+        tracing::debug!(event = "connection_ended", error = %e, "connection ended with an error");
+    }
 }
 
 /// Principal before path; the prefix decides the
