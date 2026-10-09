@@ -1,6 +1,6 @@
 //! Authenticated loopback inference only; the enrolled credential never reaches Desktop.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use http::header::{AUTHORIZATION, CONTENT_LENGTH, HOST, ORIGIN, USER_AGENT};
@@ -18,6 +18,7 @@ use crate::secret::{Role, Verifier};
 use super::{
     app::App,
     config::{Integration, MODEL},
+    monitor::{Monitor, Output},
     probe,
 };
 
@@ -29,14 +30,33 @@ const TITLE_SYSTEM: &str =
 pub struct Adapter {
     pub app: App,
     pub integration: Integration,
+    /// The record's selector, switched while the adapter runs.
+    pub selector: RwLock<Option<String>>,
     pub installation: ClientInstallation,
     pub http: ClientRequest,
-    pub quiet: bool,
+    pub output: Output,
+    pub monitor: Arc<Monitor>,
     pub probes: Mutex<Vec<tokio::task::JoinHandle<()>>>,
     pub verifier: Verifier,
 }
 
 impl Adapter {
+    pub fn selector(&self) -> Option<String> {
+        self.selector.read().expect("selector").clone()
+    }
+
+    /// Every conversation's next request uses `selector`, once the record holds it.
+    pub fn switch(&self, selector: Option<String>) -> Result<(), String> {
+        let directory = &self.installation.directory;
+        let mut record = Integration::read(directory)?
+            .ok_or_else(|| "the Desktop recovery record is missing".to_string())?;
+        record.selector = selector.clone();
+        record.save(directory)?;
+        *self.selector.write().expect("selector") = selector;
+        self.monitor.switched();
+        Ok(())
+    }
+
     pub async fn handle(
         self: Arc<Self>,
         request: Request<Incoming>,
@@ -44,10 +64,13 @@ impl Adapter {
         let started = Instant::now();
         let mut operation = "rejected";
         let response = self.dispatch(request, started, &mut operation).await;
-        if !self.quiet {
+        let status = response.status().as_u16();
+        if matches!(operation, "inference" | "startup") {
+            self.monitor.answered(operation, status, started.elapsed());
+        }
+        if self.output == Output::Log {
             eprintln!(
-                "desktop request: operation={operation} status={} elapsed_ms={}",
-                response.status().as_u16(),
+                "desktop request: operation={operation} status={status} elapsed_ms={}",
                 started.elapsed().as_millis()
             );
         }
@@ -212,6 +235,13 @@ impl Adapter {
         }
         if !counting {
             *operation = "inference";
+            self.monitor.session(
+                parts
+                    .headers
+                    .get("x-claude-code-session-id")
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_owned),
+            );
         }
         let secret = match client::read_secret(&self.installation) {
             Ok(secret) if secret.starts_with(Role::ClientSecret.prefix()) => secret,
@@ -244,7 +274,7 @@ impl Adapter {
         for field in owned {
             headers.remove(field);
         }
-        if let Some(selector) = &self.integration.selector {
+        if let Some(selector) = self.selector() {
             headers.insert(
                 "x-jaynshare-account",
                 selector.parse().expect("resolved account selector"),
@@ -277,19 +307,24 @@ impl Adapter {
                 .and_then(|v| v.to_str().ok()),
         );
         let status = parts.status.as_u16();
-        let quiet = self.quiet;
+        let output = self.output;
+        let monitor = Arc::clone(&self.monitor);
         let body = RelayBody::new(
             body,
             DEADLINE,
             usage,
             None,
             Box::new(move |end| {
-                if !quiet && !counting {
-                    let completion = match end {
-                        relay::BodyEnd::Complete(_) => "complete",
-                        relay::BodyEnd::Failed(_) => "failed",
-                        relay::BodyEnd::Dropped(_) => "cancelled",
-                    };
+                if counting {
+                    return;
+                }
+                let completion = match end {
+                    relay::BodyEnd::Complete(_) => "complete",
+                    relay::BodyEnd::Failed(_) => "failed",
+                    relay::BodyEnd::Dropped(_) => "cancelled",
+                };
+                monitor.finished(status, completion, started.elapsed());
+                if output == Output::Log {
                     eprintln!(
                         "desktop inference: status={status} completion={completion} elapsed_ms={}",
                         started.elapsed().as_millis()

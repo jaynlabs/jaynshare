@@ -43,7 +43,7 @@ pub(super) fn pick(lines: &[Line]) -> Result<(usize, Choice), PickError> {
     )
     .map_err(io)?;
     let mut text = String::from(TITLE);
-    for row in screen(lines, &table, marker, current) {
+    for row in keyed(lines, &table, marker, current) {
         text.push_str("\r\n\r");
         text.push_str(&row);
     }
@@ -69,12 +69,12 @@ pub(super) fn pick(lines: &[Line]) -> Result<(usize, Choice), PickError> {
             _ => continue,
         };
         current = step(lines, current, by);
-        redraw(restore.0, &screen(lines, &table, marker, current))?;
+        redraw(restore.0, &keyed(lines, &table, marker, current))?;
     }
 }
 
 /// The next line that can be chosen, `by` lines on from `from`, wrapping.
-fn step(lines: &[Line], from: usize, by: usize) -> usize {
+pub(super) fn step(lines: &[Line], from: usize, by: usize) -> usize {
     let mut at = from;
     loop {
         at = (at + by) % lines.len();
@@ -84,25 +84,36 @@ fn step(lines: &[Line], from: usize, by: usize) -> usize {
     }
 }
 
+/// The screen, then the keys.
+fn keyed(lines: &[Line], table: &Table, marker: &str, current: usize) -> Vec<String> {
+    let mut screen = screen(lines, table, marker, Some(current));
+    screen.extend([String::new(), table.keys()]);
+    screen
+}
+
 /// The header, every line indented with the marker on `current`'s, then
-/// the legend and the keys.
-fn screen(lines: &[Line], table: &Table, marker: &str, current: usize) -> Vec<String> {
+/// the legend.
+pub(super) fn screen(
+    lines: &[Line],
+    table: &Table,
+    marker: &str,
+    current: Option<usize>,
+) -> Vec<String> {
     let mut screen = vec![format!("  {}", table.header())];
     for (i, line) in lines.iter().enumerate() {
         if line.opens_section() {
             screen.push(String::new());
         }
-        let marker = if i == current { marker } else { " " };
+        let marker = if Some(i) == current { marker } else { " " };
         screen.push(format!(
             "{}{marker} {}",
             line.indent(),
-            table.line(line, i == current)
+            table.line(line, Some(i) == current)
         ));
     }
     if let Some(legend) = table.legend() {
         screen.extend([String::new(), legend]);
     }
-    screen.extend([String::new(), table.keys()]);
     screen
 }
 

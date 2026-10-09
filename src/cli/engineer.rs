@@ -54,7 +54,7 @@ pub(super) async fn desktop(cli: &Cli, args: &DesktopArgs) -> Outcome {
     for notice in notices {
         eprintln!("{notice}");
     }
-    crate::desktop::run(installation, selector, cli.quiet)
+    crate::desktop::run(installation, selector, cli.quiet, args.log)
         .await
         .map_err(|why| local(1, "cli_internal", why))?;
     Ok((Value::Null, String::new()))

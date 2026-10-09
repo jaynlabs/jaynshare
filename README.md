@@ -186,14 +186,22 @@ runtime, then quit the app fully. Start the connection from a terminal:
 jaynshare desktop                       # Anthropic account picker
 jaynshare desktop --account <reference> # pin new sessions to that account
 jaynshare desktop --auto                # automatic selection
+jaynshare desktop --log                 # one line per request, no monitor
 ```
 
 This command opens Desktop after its authenticated loopback Gateway is ready.
-Keep the command running: Ctrl-C or closing its terminal stops the connection.
+Keep the command running: `q`, Ctrl-C or closing its terminal stops the
+connection. Its terminal shows the account in use, each Anthropic account's
+5-hour and weekly usage in the picker's table, and the last message. The arrow
+keys move through the table and Enter switches every conversation, open ones
+included, from its next message; a moved conversation starts without its prompt
+cache on the new account. With `--log`,
+or when standard error is not a terminal, it prints one line per request instead.
+
 A second command with the same account and enrollment reuses the active adapter.
-Stop the original command and quit Desktop fully before changing accounts.
-Existing sessions keep their server-side account binding; an exhausted bound
-account returns an error instead of switching accounts mid-conversation.
+Changing accounts never requires quitting Desktop. With `--auto`, existing
+sessions keep their server-side account binding; an exhausted account returns an
+error instead of switching accounts by itself.
 
 The integration checks Desktop **2.26454.0 with Claude Code 2.1.289**, and
 **2.26454.2 or 2.31226.0 with Claude Code 2.1.293**. The 2.31226.0 profile and

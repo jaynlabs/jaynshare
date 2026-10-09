@@ -751,6 +751,9 @@ pub(super) struct DesktopArgs {
     /// Select automatically; existing sessions keep their account binding.
     #[arg(long, conflicts_with = "restore")]
     pub(super) auto: bool,
+    /// Print one line per request instead of the account monitor.
+    #[arg(long, conflicts_with = "restore")]
+    pub(super) log: bool,
     /// Remove the managed Gateway integration, preserving conversations.
     #[arg(long)]
     pub(super) restore: bool,

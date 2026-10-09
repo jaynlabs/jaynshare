@@ -2,20 +2,23 @@
 
 mod app;
 mod config;
+mod monitor;
 mod probe;
 mod transport;
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use http::Method;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 use tokio::net::TcpListener;
+use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
 use crate::client::{ClientInstallation, ClientRequest};
 use config::Integration;
+use monitor::Output;
 
 pub async fn restore_if_present(directory: &std::path::Path) -> Result<(), String> {
     let Some(_) = Integration::read(directory)? else {
@@ -45,14 +48,19 @@ pub async fn run(
     installation: ClientInstallation,
     selector: Option<String>,
     quiet: bool,
+    log: bool,
 ) -> Result<(), String> {
+    let output = Output::new(quiet, log);
     let app = app::App::resolve().await?;
     let lock = match config::lock(&installation.directory) {
         Ok(lock) => lock,
         Err(why) => {
             if let Some(record) = Integration::read(&installation.directory)? {
-                if !same(&record, &installation, &selector) || !record.installed()? {
-                    return Err("a Desktop adapter is active with a different account or profile; stop its foreground command and quit Desktop fully before switching".into());
+                if !same_enrollment(&record, &installation) || !record.installed()? {
+                    return Err("a Desktop adapter is active with a different enrollment or profile; stop its foreground command and quit Desktop fully before switching".into());
+                }
+                if record.selector != selector {
+                    return Err("a Desktop adapter is active with another account; switch from its terminal, or stop it and launch again".into());
                 }
                 let http = ClientRequest::new(&record.origin, Duration::from_secs(2), &[])?;
                 let response = http
@@ -69,7 +77,7 @@ pub async fn run(
                     return Err("the active Desktop adapter did not confirm its identity".into());
                 }
                 app.open().await?;
-                if !quiet {
+                if output != Output::Quiet {
                     eprintln!(
                         "reused the running Desktop adapter; its original foreground command owns the connection"
                     );
@@ -88,11 +96,12 @@ pub async fn run(
         .map(|r| r.installed())
         .transpose()?
         .unwrap_or(false);
-    let changed = record
+    // Desktop never sees the account, so only setup and a new enrollment need it closed.
+    let moved = record
         .as_ref()
-        .is_some_and(|r| !same(r, &installation, &selector));
-    if (!installed || changed) && app::running(&app.bundle).await? {
-        return Err("quit Claude Desktop fully before Gateway setup or changing accounts; an active conversation was left untouched".into());
+        .is_some_and(|r| !same_enrollment(r, &installation));
+    if (!installed || moved) && app::running(&app.bundle).await? {
+        return Err("quit Claude Desktop fully before Gateway setup or changing enrollment; an active conversation was left untouched".into());
     }
     let address = record
         .as_ref()
@@ -108,8 +117,8 @@ pub async fn run(
         record = Some(Integration::new(&installation, origin, selector.clone())?);
     }
     let mut record = record.expect("created integration");
-    if changed {
-        record.selector = selector;
+    record.selector = selector;
+    if moved {
         record.client_id = installation.client_id.clone();
         record.server = installation.base_url.clone();
         record.pin = installation.server_identity.clone();
@@ -122,10 +131,12 @@ pub async fn run(
     let adapter = Arc::new(transport::Adapter {
         verifier: crate::secret::Verifier::new(crate::secret::Role::ClientSecret, &record.key),
         app,
+        selector: RwLock::new(record.selector.clone()),
         integration: record,
         installation,
         http,
-        quiet,
+        output,
+        monitor: Arc::default(),
         probes: Mutex::new(Vec::new()),
     });
     serve(adapter, listener).await?;
@@ -133,13 +144,8 @@ pub async fn run(
     Ok(())
 }
 
-fn same(
-    record: &Integration,
-    installation: &ClientInstallation,
-    selector: &Option<String>,
-) -> bool {
-    record.selector == *selector
-        && record.client_id == installation.client_id
+fn same_enrollment(record: &Integration, installation: &ClientInstallation) -> bool {
+    record.client_id == installation.client_id
         && record.server == installation.base_url
         && record.pin == installation.server_identity
 }
@@ -153,7 +159,16 @@ async fn serve(adapter: Arc<transport::Adapter>, listener: TcpListener) -> Resul
     let interrupt = tokio::signal::ctrl_c();
     let termination = terminate();
     tokio::pin!(interrupt, termination);
-    if !adapter.quiet {
+    // Raw mode turns Ctrl-C into a key, so the monitor sends it here.
+    let (quit, mut quitting) = mpsc::unbounded_channel();
+    let screen = match adapter.output {
+        Output::Monitor => Some(monitor::Screen::start(Arc::clone(&adapter), quit.clone())?),
+        _ => None,
+    };
+    let refresh = screen
+        .is_some()
+        .then(|| tokio::spawn(monitor::refresh(Arc::clone(&adapter))));
+    if adapter.output == Output::Log {
         eprintln!(
             "Desktop Gateway ready at {}; keep this command open to stay connected",
             adapter.integration.origin
@@ -183,8 +198,15 @@ async fn serve(adapter: Arc<transport::Adapter>, listener: TcpListener) -> Resul
             }
             _ = &mut interrupt => break Ok(()),
             _ = &mut termination => break Ok(()),
+            _ = quitting.recv() => break Ok(()),
         }
     };
+    if let Some(refresh) = refresh {
+        refresh.abort();
+    }
+    if let Some(screen) = screen {
+        screen.close().await;
+    }
     drop(listener);
     connections.abort_all();
     while connections.join_next().await.is_some() {}

@@ -100,6 +100,15 @@ mod macos {
             self.client.client_dir.join("desktop.json")
         }
 
+        /// Whether the fake `pgrep` finds Desktop running; `new` adds its rule first.
+        fn app_running(&self, running: bool) {
+            fs::write(
+                self.tools.dir.join("pgrep/0000/exit"),
+                if running { "0" } else { "1" },
+            )
+            .unwrap();
+        }
+
         fn spawn(&self, args: &[&str]) -> Running {
             let mut command = self.command();
             command
@@ -118,13 +127,21 @@ mod macos {
         }
 
         async fn ready(&self, running: &mut Running) -> Gateway {
-            let deadline = Instant::now() + Duration::from_secs(10);
-            loop {
+            self.ready_while(|| {
                 assert!(
                     running.child.try_wait().unwrap().is_none(),
                     "adapter exited: {}",
                     self.logs()
-                );
+                )
+            })
+            .await
+        }
+
+        /// `alive` asserts that the adapter still runs.
+        async fn ready_while(&self, mut alive: impl FnMut()) -> Gateway {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                alive();
                 if self.record().exists() {
                     let record = read(&self.record());
                     let gateway = Gateway {
@@ -770,6 +787,8 @@ mod macos {
         .unwrap();
         assert_eq!(metadata["account_uuid"], FSUB2_UUID);
         running.stop().await;
+        // Desktop never sees the account, so changing it does not need Desktop closed.
+        desktop.app_running(true);
         let mut running = desktop.spawn(&["desktop", "--auto"]);
         let gateway = desktop.ready(&mut running).await;
         assert_eq!(
@@ -817,6 +836,7 @@ mod macos {
             "FSUB"
         );
         running.stop().await;
+        desktop.app_running(false);
         assert_eq!(desktop.cli(&["uninstall"]).0, 0);
         assert!(
             !desktop
@@ -825,6 +845,93 @@ mod macos {
                 .join(format!("{}.json", gateway.id))
                 .exists()
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_monitor_switches_every_conversation_and_log_keeps_the_lines() {
+        let _leak_sweep = crate::leaks::LeakGuard::default();
+        let instance = Instance::start_client("desktop-monitor").await;
+        add_two(&instance);
+        let desktop = Desktop::new(&instance).await;
+        let tools = desktop.tools.env();
+        let env: Vec<(&str, &str)> = tools
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        let (code, transcript) = std::thread::scope(|scope| {
+            let monitor = scope.spawn(|| {
+                desktop.client.pty(
+                    &["desktop", "--auto"],
+                    &env,
+                    // Each key waits for the step before it: the pool's accounts and
+                    // the first message, then the message after the switch. The
+                    // count follows its dim label's reset sequence.
+                    &[
+                        ("FSUB2", ""),
+                        ("1 since start", "jj\r"),
+                        ("2 since start", "q"),
+                    ],
+                )
+            });
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(async {
+                    let gateway = desktop
+                        .ready_while(|| assert!(!monitor.is_finished(), "the monitor exited"))
+                        .await;
+                    assert_eq!(
+                        send(gateway.addr, gateway.engine("open-conversation"))
+                            .await
+                            .status,
+                        StatusCode::OK
+                    );
+                    assert_eq!(
+                        instance.last_record(1)["serving_account"]["display_name"],
+                        "FSUB"
+                    );
+                    let deadline = Instant::now() + Duration::from_secs(20);
+                    while read(&desktop.record())["selector"].is_null() {
+                        assert!(
+                            Instant::now() < deadline,
+                            "the switch never reached the record"
+                        );
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                    // A second command with the switched account reuses the adapter.
+                    let (code, _, error) = desktop.cli(&["desktop", "--account", "FSUB2"]);
+                    assert_eq!(code, 0, "{error}");
+                    let (code, _, error) = desktop.cli(&["desktop", "--auto"]);
+                    assert_eq!(code, 1);
+                    assert!(error.contains("switch from its terminal"), "{error}");
+                    // The open conversation moves to the switched account too.
+                    assert_eq!(
+                        send(gateway.addr, gateway.engine("open-conversation"))
+                            .await
+                            .status,
+                        StatusCode::OK
+                    );
+                    assert_eq!(
+                        instance.last_record(2)["serving_account"]["display_name"],
+                        "FSUB2"
+                    );
+                })
+            });
+            monitor.join().unwrap()
+        });
+        assert_eq!(code, 0, "{transcript}");
+        assert!(transcript.contains("FSUB2 (pinned)"), "{transcript}");
+        assert!(
+            transcript.contains("\x1b[?1049l"),
+            "the alternate screen was left"
+        );
+        assert!(!transcript.contains("desktop request:"), "{transcript}");
+        let (code, transcript) = desktop.client.pty(
+            &["desktop", "--auto", "--log"],
+            &env,
+            &[("keep this command open", "\x03")],
+        );
+        assert_eq!(code, 0, "{transcript}");
+        assert!(!transcript.contains("enter switch"), "{transcript}");
+        assert!(read(&desktop.record())["selector"].is_null());
     }
 
     #[tokio::test(flavor = "multi_thread")]

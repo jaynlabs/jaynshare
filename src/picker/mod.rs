@@ -17,7 +17,7 @@ pub mod numbered;
 pub mod render;
 pub mod tty;
 
-use crate::client::Window;
+use crate::client::{CatalogueEntry, Window};
 
 /// One catalogue entry as the picker shows it.
 #[derive(Debug, Clone, PartialEq)]
@@ -27,6 +27,18 @@ pub struct Row {
     pub selectable: bool,
     pub five_hour: Window,
     pub weekly: Window,
+}
+
+impl From<&CatalogueEntry> for Row {
+    fn from(entry: &CatalogueEntry) -> Self {
+        Self {
+            handle: entry.handle.clone(),
+            display_name: entry.display_name.clone(),
+            selectable: entry.selectable,
+            five_hour: entry.five_hour,
+            weekly: entry.weekly,
+        }
+    }
 }
 
 /// Rows after their own automatic row; a heading names that row and
@@ -129,5 +141,93 @@ pub fn pick(sections: &[Section], kind: Kind) -> Result<(usize, Choice), PickErr
     match kind {
         Kind::Keyboard => keyboard::pick(&lines),
         Kind::Numbered => numbered::pick(&lines),
+    }
+}
+
+/// After the row in use in `listing`.
+const IN_USE: &str = "in use";
+
+/// The line of `handle`'s row; `None` is the automatic row.
+fn position(lines: &[Line], handle: Option<&str>) -> Option<usize> {
+    lines
+        .iter()
+        .position(|line| line.row.map(|row| row.handle.as_str()) == handle)
+}
+
+/// The keyboard picker's table without its title or keys, for a picker
+/// that stays on screen: the marker on `cursor`'s row and `in use` after
+/// `active`'s, each the automatic row when `None`.
+pub fn listing(section: &Section, active: Option<&str>, cursor: Option<&str>) -> Vec<String> {
+    let lines = lines(std::slice::from_ref(section));
+    let table = render::Table::for_terminal(&lines, 3 + IN_USE.len());
+    let marker = render::marker(table.charset());
+    let mut screen = keyboard::screen(&lines, &table, marker, position(&lines, cursor));
+    if let Some(at) = position(&lines, active) {
+        // One section: the header, then a screen line per row.
+        screen[1 + at].push_str(&table.dim(&format!(" {IN_USE}")));
+    }
+    screen
+}
+
+/// The row the keyboard picker's marker reaches from `from`'s, down or up,
+/// skipping what cannot be chosen; from a row that is gone, it starts at the
+/// automatic row.
+pub fn step(section: &Section, from: Option<&str>, down: bool) -> Option<String> {
+    let lines = lines(std::slice::from_ref(section));
+    let by = if down { 1 } else { lines.len() - 1 };
+    let at = keyboard::step(&lines, position(&lines, from).unwrap_or(0), by);
+    lines[at].row.map(|row| row.handle.clone())
+}
+
+/// Whether `handle`'s row can be chosen now; the automatic row always can.
+pub fn choosable(section: &Section, handle: Option<&str>) -> bool {
+    handle.is_none_or(|handle| {
+        section
+            .rows
+            .iter()
+            .any(|row| row.handle == handle && row.selectable)
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn section() -> Section {
+        let row = |handle: &str, selectable| Row {
+            handle: handle.into(),
+            display_name: handle.into(),
+            selectable,
+            five_hour: Window::default(),
+            weekly: Window::default(),
+        };
+        Section {
+            heading: None,
+            rows: vec![row("a", true), row("held", false), row("b", true)],
+        }
+    }
+
+    #[test]
+    fn the_marker_skips_what_cannot_be_chosen_and_wraps() {
+        let section = section();
+        assert_eq!(step(&section, None, true).as_deref(), Some("a"));
+        assert_eq!(step(&section, Some("a"), true).as_deref(), Some("b"));
+        assert_eq!(step(&section, Some("b"), true), None);
+        assert_eq!(step(&section, None, false).as_deref(), Some("b"));
+        assert_eq!(step(&section, Some("gone"), true).as_deref(), Some("a"));
+        assert!(choosable(&section, None) && choosable(&section, Some("b")));
+        assert!(!choosable(&section, Some("held")) && !choosable(&section, Some("gone")));
+    }
+
+    #[test]
+    fn the_listing_marks_the_cursor_and_the_row_in_use_apart() {
+        // The header, then the automatic row, `a`, `held` and `b`.
+        let screen = listing(&section(), Some("held"), Some("b"));
+        let marker = render::marker(render::charset());
+        assert!(screen[3].contains("held") && screen[3].contains(IN_USE));
+        assert!(screen[4].starts_with(marker) && !screen[4].contains(IN_USE));
+        for line in &screen[1..3] {
+            assert!(!line.starts_with(marker) && !line.contains(IN_USE));
+        }
     }
 }
