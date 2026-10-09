@@ -257,6 +257,18 @@ pub fn main() -> i32 {
         // A launch exits with its own codes only before it replaces itself.
         Verb::Claude(args) => return tool::launch(Provider::Anthropic, args),
         Verb::Codex(args) => return tool::launch(Provider::Codex, args),
+        Verb::Desktop(args) => {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime");
+            return finish(
+                &cli,
+                path,
+                None,
+                runtime.block_on(engineer::desktop(&cli, args)),
+            );
+        }
         Verb::Env(args) => return finish(&cli, path, None, env::env(args)),
         // Print-only, but still an engineer verb.
         Verb::Alias { shell } => {
@@ -670,6 +682,7 @@ fn verb_path(verb: &Verb) -> &'static str {
         },
         Verb::Claude(_) => "claude",
         Verb::Codex(_) => "codex",
+        Verb::Desktop(_) => "desktop",
         Verb::Env(_) => "env",
         Verb::Alias { .. } => "alias",
         Verb::Join { .. } => "join",

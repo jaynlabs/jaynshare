@@ -343,8 +343,11 @@ impl ClientRequest {
             let mut request = request
                 .body(Full::new(body.clone().unwrap_or_default()))
                 .map_err(|e| (1, e.to_string()))?;
+            for (name, _) in headers {
+                request.headers_mut().remove(name);
+            }
             for (name, value) in headers {
-                request.headers_mut().insert(name.clone(), value.clone());
+                request.headers_mut().append(name.clone(), value.clone());
             }
             Ok::<_, (i32, String)>(request)
         };

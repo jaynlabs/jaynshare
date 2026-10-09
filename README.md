@@ -176,6 +176,75 @@ a shell alias so that `claude` itself goes through the pool.
 added with `jaynshare account login --provider codex`. Codex still needs your
 own `codex login`; the pool replaces it on every request.
 
+### Claude Desktop Chat on macOS
+
+On an enrolled Mac, install Claude Desktop in `/Applications` or
+`~/Applications`, open it once to finish installing its managed Claude Code
+runtime, then quit the app fully. Start the connection from a terminal:
+
+```sh
+jaynshare desktop                       # Anthropic account picker
+jaynshare desktop --account <reference> # pin new sessions to that account
+jaynshare desktop --auto                # automatic selection
+```
+
+This command opens Desktop after its authenticated loopback Gateway is ready.
+Keep the command running: Ctrl-C or closing its terminal stops the connection.
+A second command with the same account and enrollment reuses the active adapter.
+Stop the original command and quit Desktop fully before changing accounts.
+Existing sessions keep their server-side account binding; an exhausted bound
+account returns an error instead of switching accounts mid-conversation.
+
+The integration checks Desktop **2.26454.0 with Claude Code 2.1.289**, and
+**2.26454.2 or 2.31226.0 with Claude Code 2.1.293**. The 2.31226.0 profile and
+startup/title contracts were verified from its installed bundle with mocked
+transport; a live Chat test completed on 2.31226.0. Other versions, missing
+or ambiguous managed runtimes, and managed device policies produce a clear
+error before profile setup. An app or runtime replacement stops the adapter; quit Desktop
+fully and relaunch the command to check compatibility again.
+
+The integration selects a named **Jaynshare** Gateway in Desktop's separate
+`Claude-3p` profile. Desktop receives a fresh local bearer, while the Rust client
+uses your enrollment and server identity pin internally. No system CA or Node
+relay is installed. Only **Chat with Sonnet 4.6** is in scope. Text and explicitly
+permitted local-file access were exercised in the compatibility experiment;
+uploaded images, PDFs and text attachments, Cowork, Code, Chrome, connectors,
+projects, memory and artifacts have not passed the native app release gates.
+The managed engine's token-count requests use the same enrolled pool transport
+as inference; Desktop can issue many independent counts for its context breakdown.
+Model discovery is unsupported because the model is configured explicitly.
+Connection warming is answered locally. The [gateway compatibility guide](https://code.claude.com/docs/en/llm-gateway-protocol)
+describes the engine's optional endpoint behavior.
+Request logs identify the operation: relayed token counts use `count_tokens`.
+Direct token counts outside the managed engine, `title_fallback` and `models`
+return local `501`s with `x-should-retry: false` to avoid SDK retries.
+A successful relayed request logs `operation=inference`
+with status `200`; `unsupported_direct` identifies a request needing a compatibility
+update. These labels contain no prompts, session identifiers or credentials.
+
+Desktop and its child engine can still make other outbound connections. A strict
+guarantee that all inference uses Jaynshare requires a traffic audit and an OS
+egress policy covering both processes. Updates, downloads and tool traffic also
+need an explicit policy; the local Gateway alone does not enforce one.
+
+Quit Desktop and stop the adapter before removing the integration:
+
+```sh
+jaynshare desktop --restore
+```
+
+Restore and client uninstall remove the local credential and Jaynshare entry,
+restore owned selection fields only while they still match the installed
+values, and preserve other Gateways, preferences and conversation history.
+An interrupted setup can be retried or restored. A port collision leaves the
+recorded origin in place; stop the competing process, or restore while Desktop
+is closed before setting up again. Unknown direct auxiliary requests fail
+locally; changed probe/title formats need a compatibility update.
+
+Live attachment/tool/permission checks, current-app startup/title/chat timings
+and comparison with normal Desktop remain release gates. The server rollout
+must also include the independent incomplete-TLS-handshake fix.
+
 ## Roadmap / Ideas
 
 - [x] Rust v2

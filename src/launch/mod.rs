@@ -180,22 +180,14 @@ pub fn prepare(request: Request, launch: bool) -> Result<Prepared, Refusal> {
     // The hold hint; an unreadable snapshot leaves the deadline alone.
     let hold_hint = snapshot.and_then(|snapshot| snapshot["hold_hint_seconds"].as_u64());
 
-    let (provider, token) = runtime.block_on(async {
-        match (&intent, request.provider) {
-            (IntentFlag::Account(reference), Some(provider)) => {
-                let token =
-                    intent::resolve(&installation, &secret, reference, provider, &mut notices)
-                        .await?;
-                Ok((provider, token))
-            }
-            (IntentFlag::Pick, provider) => {
-                let kind = picker_kind.expect("pick mode");
-                intent::pick(&installation, &secret, provider, kind).await
-            }
-            (IntentFlag::Auto, Some(provider)) => Ok((provider, None)),
-            _ => unreachable!("only a pick leaves the tool to the account"),
-        }
-    })?;
+    let (provider, token) = runtime.block_on(select(
+        &installation,
+        &secret,
+        request.provider,
+        intent,
+        picker_kind,
+        &mut notices,
+    ))?;
     let tool = provider.tool();
     let executable = if found.is_some() {
         found
@@ -231,6 +223,43 @@ pub fn prepare(request: Request, launch: bool) -> Result<Prepared, Refusal> {
         args,
         notices,
     })
+}
+
+/// Provider selection shared by the MITM launcher and Desktop's native Gateway.
+pub async fn select(
+    installation: &ClientInstallation,
+    secret: &str,
+    provider: Option<Provider>,
+    flag: IntentFlag,
+    kind: Option<picker::Kind>,
+    notices: &mut Vec<String>,
+) -> Result<(Provider, Option<String>), Refusal> {
+    let flag = match (flag, std::env::var("JAYNSHARE_ACCOUNT").ok()) {
+        (IntentFlag::Pick, Some(reference)) if !reference.is_empty() && provider.is_some() => {
+            IntentFlag::Account(reference)
+        }
+        (flag, _) => flag,
+    };
+    match (flag, provider) {
+        (IntentFlag::Account(reference), Some(provider)) => {
+            let token =
+                intent::resolve(installation, secret, &reference, provider, notices).await?;
+            Ok((provider, token))
+        }
+        (IntentFlag::Pick, provider) => {
+            let kind = picker::choose(kind)
+                .map_err(|message| Refusal::new(2, "cli_usage", message))?
+                .ok_or_else(|| Refusal::new(16, "cli_no_terminal",
+                    "there is no terminal for the account picker; launch with --account <reference> or --auto"))?;
+            intent::pick(installation, secret, provider, kind).await
+        }
+        (IntentFlag::Auto, Some(provider)) => Ok((provider, None)),
+        _ => Err(Refusal::new(
+            2,
+            "cli_usage",
+            "this selection requires a provider and a pooled account",
+        )),
+    }
 }
 
 /// The tool's executable for a launch; `env` looks nothing up.

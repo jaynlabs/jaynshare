@@ -5,13 +5,59 @@
 use http::Method;
 use serde_json::{Value, json};
 
-use super::args::{ApiArgs, Cli, SecretChannel, StatusArgs};
+use super::args::{ApiArgs, Cli, DesktopArgs, SecretChannel, StatusArgs};
 use super::verbs::{api_request, api_response, read_input};
 use super::{Failure, Outcome};
 use crate::client::{self, ClientInstallation, ClientRequest};
 
 fn local(code: i32, slug: &str, message: impl Into<String>) -> Failure {
     Failure::local(code, slug, message)
+}
+
+pub(super) async fn desktop(cli: &Cli, args: &DesktopArgs) -> Outcome {
+    if !cfg!(target_os = "macos") {
+        return Err(local(
+            2,
+            "cli_usage",
+            "Claude Desktop integration supports macOS only",
+        ));
+    }
+    if args.restore {
+        crate::desktop::restore()
+            .await
+            .map_err(|why| local(1, "cli_internal", why))?;
+        return Ok((
+            Value::Null,
+            "removed the Jaynshare Gateway integration; conversations are preserved".into(),
+        ));
+    }
+    let installation = installation()?;
+    let secret_value = secret(&installation)?;
+    let intent = if let Some(reference) = &args.account {
+        crate::launch::IntentFlag::Account(reference.clone())
+    } else if args.auto {
+        crate::launch::IntentFlag::Auto
+    } else {
+        crate::launch::IntentFlag::Pick
+    };
+    let mut notices = Vec::new();
+    let (_, selector) = crate::launch::select(
+        &installation,
+        &secret_value,
+        Some(crate::provider::Provider::Anthropic),
+        intent,
+        None,
+        &mut notices,
+    )
+    .await
+    .map_err(|refusal| local(refusal.code, refusal.slug, refusal.message))?;
+    for notice in notices {
+        eprintln!("{notice}");
+    }
+    crate::desktop::run(installation, selector, cli.quiet)
+        .await
+        .map_err(|why| local(1, "cli_internal", why))?;
+    Ok((Value::Null, String::new()))
 }
 
 /// A `(exit code, message)` from the client's HTTP layer as a `Failure`.
