@@ -224,8 +224,12 @@ update. These labels contain no prompts, session identifiers or credentials.
 
 Desktop and its child engine can still make other outbound connections. A strict
 guarantee that all inference uses Jaynshare requires a traffic audit and an OS
-egress policy covering both processes. Updates, downloads and tool traffic also
-need an explicit policy; the local Gateway alone does not enforce one.
+egress policy covering both processes. The Jaynshare profile disables Desktop
+auto-updates; install a checked newer Desktop version manually for security and
+compatibility fixes. Required runtime downloads, public model-catalog downloads
+and tool traffic still need an explicit policy; the local Gateway alone does
+not enforce one. Upgrading a profile created by the first RC requires stopping
+the adapter and quitting Desktop fully before setup adds the update setting.
 
 Quit Desktop and stop the adapter before removing the integration:
 

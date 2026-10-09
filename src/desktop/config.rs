@@ -109,6 +109,7 @@ impl Integration {
             "inferenceGatewayAuthScheme": "bearer", "chatTabEnabled": true,
             "modelDiscoveryEnabled": false, "inferenceModels": [MODEL],
             "disableEssentialTelemetry": true, "disableNonessentialTelemetry": true,
+            "disableAutoUpdates": true,
         })
     }
 
@@ -143,9 +144,19 @@ impl Integration {
 
     pub fn install(&self) -> Result<(), String> {
         let (mut config, mut meta) = documents()?;
-        if self.gateway_path().exists()
-            && !self.gateway_matches(&read_object(&self.gateway_path())?)
-        {
+        let gateway_path = self.gateway_path();
+        let exists = gateway_path.exists();
+        let mut gateway = if exists {
+            read_object(&gateway_path)?
+        } else {
+            self.gateway()
+        };
+        let upgrade = exists && gateway.get("disableAutoUpdates").is_none();
+        if upgrade {
+            // The first RC did not own this field; install it only when absent.
+            gateway["disableAutoUpdates"] = json!(true);
+        }
+        if !self.gateway_matches(&gateway) {
             return Err("the Jaynshare Gateway entry was changed; run `jaynshare desktop --restore` before setup".into());
         }
         for (current, before, installed) in [
@@ -182,8 +193,8 @@ impl Integration {
         state::check_private(&profile())?;
         state::ensure_private_dir(&profile().join("configLibrary")).map_err(|e| e.to_string())?;
         state::check_private(&profile().join("configLibrary"))?;
-        if !self.gateway_path().exists() {
-            write(&self.gateway_path(), &self.gateway())?;
+        if !exists || upgrade {
+            write(&gateway_path, &gateway)?;
         }
         write(&profile().join("configLibrary/_meta.json"), &meta)?;
         write(&profile().join("claude_desktop_config.json"), &config)

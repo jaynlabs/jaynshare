@@ -614,6 +614,7 @@ mod macos {
             .join("configLibrary")
             .join(format!("{}.json", gateway.id));
         let mut entry = read(&gateway_path);
+        assert_eq!(entry["disableAutoUpdates"], true);
         entry["uiHint"] = json!("user preference");
         write_private(&gateway_path, &entry.to_string());
         assert_ne!(gateway.key, desktop.client.client.secret);
@@ -629,6 +630,10 @@ mod macos {
         assert!(error.contains("port is occupied"));
         assert_eq!(read(&desktop.record()), installed);
         drop(occupied);
+        // Upgrade the first RC's entry without replacing its credential or user preferences.
+        let mut legacy = entry.clone();
+        legacy.as_object_mut().unwrap().remove("disableAutoUpdates");
+        write_private(&gateway_path, &legacy.to_string());
         // Simulate interruption after the record and entry, before selection commits.
         write_private(
             &config_path,
@@ -643,6 +648,7 @@ mod macos {
         let restarted = desktop.ready(&mut running).await;
         assert_eq!(restarted.addr, gateway.addr);
         assert_eq!(restarted.key, gateway.key);
+        assert_eq!(read(&desktop.record()), installed);
         assert_eq!(read(&config_path)["theme"], "changed");
         assert_eq!(read(&gateway_path), entry);
         running.stop().await;
