@@ -11,6 +11,7 @@ use crate::client::ClientInstallation;
 use crate::state;
 
 const RECORD: &str = "desktop.json";
+const NAME: &str = "Jaynshare";
 
 pub fn profile() -> PathBuf {
     crate::config::platform::home().join("Library/Application Support/Claude-3p")
@@ -79,10 +80,11 @@ impl Integration {
         origin: String,
         selector: Option<String>,
     ) -> Result<Self, String> {
-        let (config, meta) = documents()?;
+        let id = uuid::Uuid::new_v4().to_string();
+        let (config, meta) = documents(&id)?;
         Ok(Self {
             version: 1,
-            id: uuid::Uuid::new_v4().to_string(),
+            id,
             origin,
             key: crate::secret::Secret::generate(crate::secret::Role::ClientSecret).into_string(),
             selector,
@@ -114,7 +116,7 @@ impl Integration {
     }
 
     fn entry(&self) -> Value {
-        json!({"id": self.id, "name": "Jaynshare"})
+        json!({"id": self.id, "name": NAME})
     }
 
     fn gateway_path(&self) -> PathBuf {
@@ -137,7 +139,7 @@ impl Integration {
     }
 
     pub fn installed(&self) -> Result<bool, String> {
-        let (config, meta) = documents()?;
+        let (config, meta) = documents(&self.id)?;
         Ok(config["deploymentMode"] == "3p"
             && meta["appliedId"] == self.id
             && meta["entries"]
@@ -148,7 +150,7 @@ impl Integration {
     }
 
     pub fn install(&self) -> Result<(), String> {
-        let (mut config, mut meta) = documents()?;
+        let (mut config, mut meta) = documents(&self.id)?;
         let gateway_path = self.gateway_path();
         let exists = gateway_path.exists();
         let mut gateway = if exists {
@@ -298,12 +300,21 @@ fn restore_field(document: &mut Value, field: &str, installed: &Value, before: &
     }
 }
 
-fn documents() -> Result<(Value, Value), String> {
+/// Refuses a managed policy and another installation's entry, whose restore would undo this one.
+fn documents(id: &str) -> Result<(Value, Value), String> {
     let (config, meta) = profile_documents()?;
     if meta.get("hybridPointer").is_some() {
         return Err(
             "Desktop uses a managed Gateway policy; ask its administrator to configure it".into(),
         );
+    }
+    if meta["entries"]
+        .as_array()
+        .expect("validated entries")
+        .iter()
+        .any(|entry| entry["name"] == NAME && entry["id"] != id)
+    {
+        return Err("another jaynshare installation set up Desktop; restore it first".into());
     }
     Ok((config, meta))
 }

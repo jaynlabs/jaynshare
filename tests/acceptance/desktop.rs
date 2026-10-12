@@ -1533,6 +1533,15 @@ esac
         );
         assert_eq!(desktop.cli(&["desktop", "--auto"]).0, 1);
         assert!(!desktop.record().exists());
+        // Another installation's entry, such as the quickstart's.
+        let other = Uuid::new_v4().to_string();
+        let foreign = json!({"appliedId": other, "entries": [{"id": other, "name": "Jaynshare"}]});
+        write_private(&meta_path, &foreign.to_string());
+        let (code, _, error) = desktop.cli(&["desktop", "--auto"]);
+        assert_eq!(code, 1);
+        assert!(error.contains("another jaynshare installation"), "{error}");
+        assert!(!desktop.record().exists());
+        assert_eq!(read(&meta_path), foreign);
         fs::remove_file(meta_path).unwrap();
         let mut running = desktop.spawn(&["desktop", "--auto"]);
         let gateway = desktop.ready(&mut running).await;
