@@ -362,6 +362,10 @@ impl Table {
             Charset::Ascii => "up/down move - enter choose - esc cancel",
         })
     }
+
+    pub(super) fn dim(&self, text: &str) -> String {
+        self.paint.dim(text)
+    }
 }
 
 #[cfg(test)]

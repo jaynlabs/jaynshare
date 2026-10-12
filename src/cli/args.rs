@@ -126,6 +126,7 @@ pub(super) enum Verb {
     // ---- engineer
     Claude(ToolArgs),
     Codex(ToolArgs),
+    Desktop(DesktopArgs),
     Env(EnvArgs),
     Alias {
         #[arg(long, value_enum, value_name = "shell")]
@@ -740,6 +741,22 @@ pub(super) struct ToolArgs {
         allow_hyphen_values = true
     )]
     pub(super) args: Vec<std::ffi::OsString>,
+}
+
+#[derive(Args)]
+pub(super) struct DesktopArgs {
+    /// Pin Desktop to one pooled Anthropic account.
+    #[arg(long, value_name = "reference", conflicts_with_all = ["auto", "restore"])]
+    pub(super) account: Option<String>,
+    /// Select automatically; existing sessions keep their account binding.
+    #[arg(long, conflicts_with = "restore")]
+    pub(super) auto: bool,
+    /// Print one line per request instead of the account monitor.
+    #[arg(long, conflicts_with = "restore")]
+    pub(super) log: bool,
+    /// Remove the managed Gateway integration, preserving conversations.
+    #[arg(long)]
+    pub(super) restore: bool,
 }
 
 #[derive(Args)]

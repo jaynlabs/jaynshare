@@ -23,6 +23,10 @@ pub(super) async fn uninstall(cli: &Cli) -> Outcome {
         }
     })?;
 
+    crate::desktop::restore_if_present(&installation.directory)
+        .await
+        .map_err(|why| Failure::local(1, "cli_internal", format!("Desktop integration could not be restored: {why}; the client installation is kept so restore can be retried")))?;
+
     let executable = crate::config::platform::client_binary();
     match crate::settings::plan_uninstall(&executable) {
         Ok(Some(plan)) => {
@@ -42,6 +46,7 @@ pub(super) async fn uninstall(cli: &Cli) -> Outcome {
     let mut paths = vec![
         directory.join("client-secret"),
         directory.join("client.toml"),
+        directory.join("desktop.lock"),
     ];
     for ca in [
         directory.join("ca.pem"),

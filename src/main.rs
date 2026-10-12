@@ -13,6 +13,7 @@ mod config;
 mod control;
 mod data_plane;
 mod deploy;
+mod desktop;
 mod identity;
 mod invite;
 mod launch;

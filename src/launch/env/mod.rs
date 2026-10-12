@@ -49,6 +49,12 @@ impl EnvPlan {
 pub const PROXY_VARIABLES: [&str; 4] = ["https_proxy", "HTTPS_PROXY", "http_proxy", "HTTP_PROXY"];
 /// The no-proxy spellings.
 pub const NO_PROXY_VARIABLES: [&str; 2] = ["NO_PROXY", "no_proxy"];
+pub const CLAUDE_TELEMETRY_VARIABLES: [&str; 4] = [
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+    "DISABLE_TELEMETRY",
+    "DISABLE_GROWTHBOOK",
+    "DISABLE_ERROR_REPORTING",
+];
 
 /// What every rule may read.
 pub struct Inputs<'a> {
@@ -69,6 +75,11 @@ pub fn build(inputs: &Inputs<'_>) -> EnvPlan {
     // Consumed by the launcher, never seen by the child.
     plan.unset("JAYNSHARE_ACCOUNT");
     mitm::apply(&mut plan, inputs);
+    if inputs.tool.executable == "claude" {
+        for name in CLAUDE_TELEMETRY_VARIABLES {
+            plan.set(name, "1");
+        }
+    }
     no_proxy::apply(&mut plan, &inputs.installation.no_proxy);
     if let Some(deadline) = &inputs.tool.deadline {
         timeout::apply(
@@ -134,6 +145,9 @@ mod tests {
         assert!(removed(&plan, "ANTHROPIC_BASE_URL"));
         assert_eq!(plan.get("CODEX_CA_CERTIFICATE"), None);
         assert_eq!(plan.get("API_TIMEOUT_MS"), Some("601000"));
+        for name in CLAUDE_TELEMETRY_VARIABLES {
+            assert_eq!(plan.get(name), Some("1"));
+        }
     }
 
     #[test]
@@ -152,6 +166,9 @@ mod tests {
         let mut claude = EnvPlan::default();
         direct::apply(&mut claude, Provider::Anthropic.tool());
         for name in ["NODE_EXTRA_CA_CERTS", "ANTHROPIC_API_KEY", "API_TIMEOUT_MS"] {
+            assert!(removed(&claude, name), "{name}");
+        }
+        for name in CLAUDE_TELEMETRY_VARIABLES {
             assert!(removed(&claude, name), "{name}");
         }
     }

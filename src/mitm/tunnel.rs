@@ -279,6 +279,15 @@ pub(crate) async fn route_target(
     host: &str,
     port: u16,
 ) -> Result<Path, Refusal> {
+    if ["http-intake.logs.us5.datadoghq.com", "ab.chatgpt.com"]
+        .iter()
+        .any(|target| host.trim_end_matches('.').eq_ignore_ascii_case(target))
+    {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "product telemetry is not forwarded through the pool proxy".into(),
+        ));
+    }
     let settings = &server.config().config.data_plane;
     let via_proxy = match &settings.corporate_proxy_url {
         Some(_) => !no_proxy_match(&settings.no_proxy, host),

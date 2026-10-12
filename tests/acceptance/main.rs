@@ -32,6 +32,7 @@ mod dep_install;
 mod dep_native;
 mod dep_net;
 mod dep_release;
+mod desktop;
 mod dpl;
 mod enrol;
 mod fake_tools;

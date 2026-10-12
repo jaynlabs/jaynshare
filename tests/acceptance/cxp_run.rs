@@ -828,7 +828,17 @@ async fn codex_launches_with_its_own_variables() {
     let seen = machine.claude_ran().expect("Codex was launched");
     assert_eq!(
         seen.argv,
-        ["--no-daemon", "exec", "hello"],
+        [
+            "--no-daemon",
+            "-c",
+            "analytics.enabled=false",
+            "-c",
+            "feedback.enabled=false",
+            "-c",
+            "otel.metrics_exporter=\"none\"",
+            "exec",
+            "hello"
+        ],
         "Codex's shared server never takes a pooled turn"
     );
     assert_eq!(seen.env.get("CODEX_CA_CERTIFICATE"), Some(&ca));

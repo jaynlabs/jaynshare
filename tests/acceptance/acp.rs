@@ -101,6 +101,17 @@ async fn other_failures_skip_the_account_then_502() {
     let answer = send(instance.addr, messages(haiku_prompt())).await;
     assert_eq!(answer.status, StatusCode::OK);
     assert_eq!(instance.upstream.calls(), calls + 2);
+    let seen = instance.upstream.seen();
+    let identities: Vec<Value> = seen[seen.len() - 2..]
+        .iter()
+        .map(|attempt| {
+            serde_json::from_str(attempt.json()["metadata"]["user_id"].as_str().unwrap()).unwrap()
+        })
+        .collect();
+    assert_ne!(
+        identities[0]["device_id"], identities[1]["device_id"],
+        "failover normalizes for the newly selected account"
+    );
     let record = instance.last_record(1);
     assert_eq!(record["serving_account"]["display_name"], "FSUB2");
     assert_eq!(record["failed_over"], true);

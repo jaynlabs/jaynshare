@@ -1027,7 +1027,7 @@ async fn the_configuration_read() {
     assert!(configuration["loaded_at"].is_string());
     assert_eq!(
         configuration["effective"]["data_plane"]["telemetry_policy"],
-        "forward"
+        "block"
     );
     assert_eq!(configuration["effective"]["logging"]["level"], "debug");
 

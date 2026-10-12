@@ -11,7 +11,14 @@ use super::help::DOCS;
 use crate::provider::Provider;
 
 /// Verbs with no `--json` document at all.
-pub(super) const NO_JSON: &[&str] = &["claude", "codex", "env", "statusline", "title-hook"];
+pub(super) const NO_JSON: &[&str] = &[
+    "claude",
+    "codex",
+    "desktop",
+    "env",
+    "statusline",
+    "title-hook",
+];
 
 /// Verbs whose `--json` is one raw object per line and no envelope.
 const PER_LINE: &[&str] = &["log tail", "audit tail"];

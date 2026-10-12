@@ -176,6 +176,99 @@ a shell alias so that `claude` itself goes through the pool.
 added with `jaynshare account login --provider codex`. Codex still needs your
 own `codex login`; the pool replaces it on every request.
 
+### Claude Desktop Chat on macOS
+
+On an enrolled Mac, install Claude Desktop in `/Applications` or
+`~/Applications` and quit the app fully. Run `jaynshare trust-ca add` to trust
+the pool's current interception CA in macOS, then start the connection from a
+terminal. If a CA rotation is staged, also import and trust that next root from
+the enrollment's `ca.pem`; Desktop checks both roots before setup.
+
+```sh
+jaynshare desktop                       # Anthropic account picker
+jaynshare desktop --account <reference> # pin new sessions to that account
+jaynshare desktop --auto                # automatic selection
+jaynshare desktop --log                 # one line per request, no monitor
+```
+
+This command opens Desktop after its authenticated loopback Gateway and fixed
+egress proxy are ready. Its managed runtime can download through that proxy on
+first startup; Chat's connection test waits until the runtime is verified.
+Keep the command running: `q`, Ctrl-C or closing its terminal stops the
+connection. Its terminal shows the account in use, each Anthropic account's
+5-hour and weekly usage in the picker's table, and the last message. The arrow
+keys move through the table and Enter switches every conversation, open ones
+included, from its next message; a moved conversation starts without its prompt
+cache on the new account. With `--log`,
+or when standard error is not a terminal, it prints one line per request instead.
+
+A second command with the same account and enrollment reuses the active adapter.
+Changing accounts never requires quitting Desktop. With `--auto`, existing
+sessions keep their server-side account binding; an exhausted account returns an
+error instead of switching accounts by itself.
+
+The integration checks Desktop **2.26454.0 with Claude Code 2.1.289**, and
+**2.26454.2 or 2.31226.0 with Claude Code 2.1.293**. The 2.31226.0 profile and
+startup/title contracts were verified from its installed bundle with mocked
+transport; a live Chat test completed on 2.31226.0 before the egress changes.
+Other versions, ambiguous managed runtimes, untrusted pool CAs and managed
+device policies produce a clear error before profile setup.
+An app or verified runtime replacement stops the adapter; quit Desktop
+fully and relaunch the command to check compatibility again.
+
+The integration selects a named **Jaynshare** Gateway in Desktop's separate
+`Claude-3p` profile. Desktop receives a fresh local bearer, while the Rust client
+uses your enrollment and server identity pin internally. Its native
+`egressProxyUrl` points at the same loopback listener; the relay adds the proxy
+credential only on its connection to the server. Desktop requires macOS CA
+trust and receives `NODE_EXTRA_CA_CERTS` for its child engine. Setup leaves the
+system proxy and trust store untouched. Only **Chat** is in scope. Desktop lists the models the pool's
+accounts offer through `/v1/models`, and the upstream refuses those an account
+cannot use; live Chat was checked with Sonnet 4.6. Text and explicitly
+permitted local-file access were exercised in the compatibility experiment;
+uploaded images, PDFs and text attachments, Cowork, Code, Chrome, connectors,
+projects, memory and artifacts have not passed the native app release gates.
+The managed engine's token-count requests use the same enrolled pool transport
+as inference; Desktop can issue many independent counts for its context breakdown.
+Connection warming is answered locally. The [gateway compatibility guide](https://code.claude.com/docs/en/llm-gateway-protocol)
+describes the engine's optional endpoint behavior.
+Request logs identify the operation: relayed token counts use `count_tokens` and
+model listings `models`. Direct token counts outside the managed engine and
+`title_fallback` return local `501`s with `x-should-retry: false` to avoid SDK retries.
+A successful relayed request logs `operation=inference`
+with status `200`; `unsupported_direct` identifies a request needing a compatibility
+update. These labels contain no prompts, session identifiers or credentials.
+
+Public catalogs, signatures and runtime downloads at `downloads.claude.ai` use
+an anonymous streaming server route that retains cache and range behavior.
+WebFetch domain checks receive the real upstream response without a pool
+credential; other page requests use opaque tunnels. The relay has no direct
+fallback when the VPS is unavailable. Native app and engine routing, first-run
+downloads and IPv4/IPv6 failure behavior still need a traffic audit; a strict
+guarantee covering every process requires an OS egress policy. The Jaynshare
+profile disables Desktop auto-updates; install a checked newer version manually.
+Upgrading an existing profile requires stopping the adapter and quitting
+Desktop fully before setup adds the proxy and update settings and enables model
+discovery. Repeat the trust check and fully relaunch after CA rotation.
+
+Quit Desktop and stop the adapter before removing the integration:
+
+```sh
+jaynshare desktop --restore
+```
+
+Restore and client uninstall remove the local credential and Jaynshare entry,
+restore owned selection fields only while they still match the installed
+values, and preserve other Gateways, preferences and conversation history.
+An interrupted setup can be retried or restored. A port collision leaves the
+recorded origin in place; stop the competing process, or restore while Desktop
+is closed before setting up again. Unknown direct auxiliary requests fail
+locally; changed probe/title formats need a compatibility update.
+
+Live attachment/tool/permission checks, current-app startup/title/chat timings
+and comparison with normal Desktop remain release gates. The server rollout
+must also include the independent incomplete-TLS-handshake fix.
+
 ## Roadmap / Ideas
 
 - [x] Rust v2

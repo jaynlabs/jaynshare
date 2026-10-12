@@ -120,6 +120,74 @@ fn unix_now() -> i64 {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn codex_identity_metadata_is_removed_from_headers_and_compressed_bodies() {
+    use std::io::Read as _;
+
+    let _leak_sweep = crate::leaks::LeakGuard::default();
+    let instance = start_with_codex("codex-private-metadata", Setup::default()).await;
+    let mut tunnel = codex_tunnel(&instance, &ca_file(&instance)).await.unwrap();
+    let private_metadata = json!({
+        "installation_id":"synthetic-own-machine", "session_id":"synthetic-session",
+        "turn_id":"synthetic-turn", "request_kind":"foreground",
+        "workspaces": {"/Users/synthetic-alice/private-repository": {
+            "associated_remote_urls":{"origin":"https://github.com/synthetic-owner/private-repository.git"},
+            "latest_git_commit_hash":"synthetic-commit", "has_changes":false
+        }},
+        "user_email":"synthetic-alice@example.test", "account_id":"synthetic-own-account"
+    });
+    let turn = private_metadata.to_string();
+    let body = json!({
+        "model":"gpt-5-codex", "input":[], "prompt_cache_key":"synthetic-cache",
+        "client_metadata": {
+            "x-codex-installation-id":"synthetic-own-machine", "x-codex-turn-metadata":turn,
+            "thread_id":"synthetic-thread", "email":"synthetic-alice@example.test",
+            "account_id":"synthetic-own-account", "workspaces":private_metadata["workspaces"]
+        }
+    });
+    let mut request = responses_request(&zstd(&body));
+    request
+        .headers_mut()
+        .insert("x-codex-turn-metadata", turn.parse().unwrap());
+    assert_eq!(tunnel.send(request).await.status, 200);
+    let seen = instance.upstream.last();
+    assert_eq!(seen.header("content-encoding"), Some("zstd"));
+    let mut decoded = Vec::new();
+    ruzstd::decoding::StreamingDecoder::new(&seen.body[..])
+        .unwrap()
+        .read_to_end(&mut decoded)
+        .unwrap();
+    let body: Value = serde_json::from_slice(&decoded).unwrap();
+    let header: Value =
+        serde_json::from_str(seen.header("x-codex-turn-metadata").unwrap()).unwrap();
+    let turn: Value = serde_json::from_str(
+        body["client_metadata"]["x-codex-turn-metadata"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    let machine = seen.header("x-codex-installation-id").unwrap();
+    assert_ne!(machine, "synthetic-own-machine");
+    assert!(uuid::Uuid::parse_str(machine).is_ok());
+    assert_eq!(
+        header,
+        json!({
+            "installation_id":machine, "session_id":"synthetic-session",
+            "turn_id":"synthetic-turn", "request_kind":"foreground"
+        })
+    );
+    assert_eq!(turn, header);
+    assert_eq!(
+        body["client_metadata"],
+        json!({
+            "x-codex-installation-id":machine,
+            "x-codex-turn-metadata":body["client_metadata"]["x-codex-turn-metadata"],
+            "thread_id":"synthetic-thread"
+        })
+    );
+    assert_eq!(body["prompt_cache_key"], "synthetic-cache");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_codex_turn_rides_the_pooled_login_with_its_zstd_bytes_and_model() {
     let _leak_sweep = crate::leaks::LeakGuard::default();
     let instance = start_with_codex("codex-pooled-turn", Setup::default()).await;
@@ -397,7 +465,10 @@ async fn a_pre_codex_ca_keeps_anthropic_and_a_staged_ca_serves_chatgpt_com() {
 
     let missing = instance.events("ca_names_missing");
     assert_eq!(missing.len(), 1, "{missing:?}");
-    assert_eq!(missing[0]["fields"]["names"], "chatgpt.com");
+    assert_eq!(
+        missing[0]["fields"]["names"],
+        "chatgpt.com, downloads.claude.ai"
+    );
     assert_eq!(
         fs::read(state.join("mitm-ca.pem")).expect("the CA file"),
         current,
@@ -439,6 +510,64 @@ async fn a_pre_codex_ca_keeps_anthropic_and_a_staged_ca_serves_chatgpt_com() {
         ))
         .await;
     assert_eq!(check.status, 200, "{}", check.text());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn public_downloads_use_the_anonymous_streaming_route_and_preserve_ranges() {
+    let _leak_sweep = crate::leaks::LeakGuard::default();
+    let instance = Instance::start_client("anonymous-public-download").await;
+    let mut tunnel = intercept(
+        instance.mitm_addr.unwrap(),
+        "downloads.claude.ai:443",
+        None,
+        &ca_file(&instance),
+        Offer::alpn(&["http/1.1"]),
+    )
+    .await
+    .unwrap();
+    let artifact = "synthetic signed artifact fragment";
+    instance.upstream.script([crate::harness::Reply::Raw {
+        status: 206,
+        headers: vec![
+            ("content-type".into(), "application/octet-stream".into()),
+            ("content-range".into(), "bytes 5-37/100".into()),
+            ("etag".into(), "synthetic-etag".into()),
+        ],
+        body: artifact.into(),
+    }]);
+    let request = Request::builder()
+        .uri("/synthetic-artifact")
+        .header("host", "downloads.claude.ai")
+        .header("range", "bytes=5-37")
+        .header("if-range", "synthetic-etag")
+        .header("cookie", "own-login")
+        .header("authorization", "Bearer own-login")
+        .header("user-agent", "own-platform")
+        .body(Full::new(Bytes::new()))
+        .unwrap();
+    let answer = tunnel.send(request).await;
+    assert_eq!(answer.status, 206);
+    assert_eq!(answer.text(), artifact);
+    assert_eq!(answer.header("content-range"), Some("bytes 5-37/100"));
+    assert_eq!(answer.header("etag"), Some("synthetic-etag"));
+    let seen = instance.upstream.last();
+    assert_eq!(seen.header("range"), Some("bytes=5-37"));
+    assert_eq!(seen.header("if-range"), Some("synthetic-etag"));
+    assert!(seen.header("authorization").is_none());
+    assert!(seen.header("cookie").is_none());
+    assert!(seen.header("user-agent").unwrap().starts_with("jaynshare/"));
+    let before = instance.upstream.calls();
+    let answer = tunnel
+        .send(
+            Request::builder()
+                .uri("*")
+                .header("host", "downloads.claude.ai")
+                .body(Full::new(Bytes::new()))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(answer.status, 400);
+    assert_eq!(instance.upstream.calls(), before);
 }
 
 /// A real Codex CLI on `PATH`; asked with a throwaway home, so nothing reads

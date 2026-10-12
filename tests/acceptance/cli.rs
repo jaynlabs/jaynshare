@@ -65,9 +65,16 @@ fn help_grammar_and_schema_name_one_verb_set() {
         .cloned()
         .collect();
     schema_paths.extend(
-        ["claude", "codex", "env", "statusline", "title-hook"]
-            .into_iter()
-            .map(str::to_owned),
+        [
+            "claude",
+            "codex",
+            "desktop",
+            "env",
+            "statusline",
+            "title-hook",
+        ]
+        .into_iter()
+        .map(str::to_owned),
     );
     assert_eq!(
         help_paths, schema_paths,
@@ -880,7 +887,14 @@ async fn every_json_document_validates_against_its_schema() {
     }
     let _ = empty;
     // A verb with no --json has no schema.
-    for verb in ["claude", "codex", "env", "statusline", "title-hook"] {
+    for verb in [
+        "claude",
+        "codex",
+        "desktop",
+        "env",
+        "statusline",
+        "title-hook",
+    ] {
         let (code, _, _) = instance.cli(&["schema", verb], None);
         assert_eq!(code, 2, "schema {verb}");
         assert!(all["result"].get(verb).is_none());

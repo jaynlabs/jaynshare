@@ -15,11 +15,17 @@ pub struct Tokens {
 
 #[derive(Debug)]
 pub enum UsageExtractor {
+    None,
     /// SSE: `message_start` carries input tokens, `message_delta` the
     /// cumulative output count; Codex's `response.completed` carries both.
-    Stream { line: Vec<u8>, tokens: Tokens },
+    Stream {
+        line: Vec<u8>,
+        tokens: Tokens,
+    },
     /// A JSON body with a top-level `usage` object.
-    Json { copy: Vec<u8> },
+    Json {
+        copy: Vec<u8>,
+    },
 }
 
 impl UsageExtractor {
@@ -36,6 +42,7 @@ impl UsageExtractor {
 
     pub fn feed(&mut self, chunk: &[u8]) {
         match self {
+            Self::None => {}
             Self::Stream { line, tokens } => {
                 for byte in chunk {
                     if *byte == b'\n' {
@@ -58,6 +65,7 @@ impl UsageExtractor {
 
     pub fn finish(self) -> Tokens {
         match self {
+            Self::None => Tokens::default(),
             Self::Stream { tokens, .. } => tokens,
             Self::Json { copy } => serde_json::from_slice::<Value>(&copy)
                 .ok()

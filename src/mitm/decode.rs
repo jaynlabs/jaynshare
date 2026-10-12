@@ -71,7 +71,7 @@ async fn one(
     peer: SocketAddr,
     mut request: Request<Incoming>,
 ) -> Result<Response<ResponseBody>, exchange::CloseConnection> {
-    // `None` only for the probe host, which never reaches the exchange.
+    // The probe and public downloads have no inference provider.
     let provider = Provider::for_intercepted_host(&tunnel.host);
     // Re-validated per request, so a revoke or a rotate
     // lands inside an open tunnel.
@@ -112,13 +112,12 @@ async fn one(
             ),
         ));
     }
-    let provider = provider.expect("every intercepted host but the probe's is a provider's");
     // No upgrade is carried inside an intercepted tunnel; the status is the
     // one that makes the provider's client fall back fastest.
     if request.headers().contains_key(UPGRADE) || request.method() == Method::CONNECT {
         return Ok(envelope::error(
-            provider,
-            provider.upgrade_refusal(),
+            provider.unwrap_or_default(),
+            provider.unwrap_or_default().upgrade_refusal(),
             error_type::PROXY,
             "the proxy does not carry protocol upgrades on an intercepted target",
         ));
@@ -134,6 +133,10 @@ async fn one(
     // The caller's own proxy metadata reaches no decoded destination.
     tunnel::strip_proxy_metadata(request.headers_mut());
     server.mitm.record_intercepted_exchange();
+    if crate::data_plane::auxiliary::supports(&tunnel.host, request.uri().path()) {
+        return Ok(crate::data_plane::auxiliary::run(server, &tunnel.host, request).await);
+    }
+    let provider = provider.expect("other intercepted hosts are providers");
     exchange::run(
         server,
         Entry {

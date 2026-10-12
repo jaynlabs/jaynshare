@@ -157,7 +157,6 @@ pub struct TlsFiles {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TelemetryPolicy {
-    Forward,
     Block,
 }
 
@@ -518,7 +517,7 @@ mod tests {
         assert_eq!(c.data_plane.listen.to_string(), DEFAULT_LISTEN);
         assert_eq!(c.data_plane.first_byte_timeout_seconds, 120);
         assert_eq!(c.selection.switch_threshold, 0.98);
-        assert_eq!(c.data_plane.telemetry_policy, TelemetryPolicy::Forward);
+        assert_eq!(c.data_plane.telemetry_policy, TelemetryPolicy::Block);
         assert!(c.data_plane.upstream_origin.is_none());
         assert_eq!(c.audit.retained_files, 7);
         assert!(c.mitm.enabled);
