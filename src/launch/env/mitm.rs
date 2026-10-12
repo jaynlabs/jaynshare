@@ -1,8 +1,9 @@
 //! MITM mode — the four proxy variable spellings carrying
 //! `http://<token>:<secret>@<proxy origin>`, the tool's CA variable
-//! at the installation's `ca.pem` as a native path, and the tool's own
-//! upstream and credential variables removed. The secret travels as the
-//! proxy URL's password; no bearer-token variable.
+//! at the installation's `ca.pem` as a native path, its bundle variable at
+//! `ca-bundle.pem`, and the tool's own upstream and credential variables
+//! removed. The secret travels as the proxy URL's password; no bearer-token
+//! variable.
 
 use super::{EnvPlan, Inputs, PROXY_VARIABLES};
 
@@ -30,6 +31,9 @@ pub fn apply(plan: &mut EnvPlan, inputs: &Inputs<'_>) {
             .display()
             .to_string(),
     );
+    if let (Some(name), Some(bundle)) = (inputs.tool.bundle_variable, inputs.bundle) {
+        plan.set(name, bundle.display().to_string());
+    }
     for name in inputs.tool.upstream_variables {
         plan.unset(name);
     }

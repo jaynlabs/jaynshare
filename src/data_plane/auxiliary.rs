@@ -9,6 +9,7 @@ use hyper::body::Incoming;
 
 use super::{attempt, egress, envelope, relay};
 use crate::provider::anthropic::{API_HOST, error_type};
+use crate::provider::codex;
 use crate::server::Server;
 
 pub const DOWNLOAD_HOST: &str = "downloads.claude.ai";
@@ -18,6 +19,7 @@ pub fn supports(host: &str, path: &str) -> bool {
     host == DOWNLOAD_HOST
         || (host == API_HOST
             && matches!(path, DOMAIN_PATH | "/api/web/domain_info/browser_extension"))
+        || (host == codex::API_HOST && codex::INSTALLERS.contains(&path))
 }
 
 pub async fn run(
@@ -143,5 +145,10 @@ mod tests {
         assert!(!supports(API_HOST, "/api/web/domain_info/account"));
         assert!(!supports(API_HOST, "/api/oauth/profile"));
         assert!(!supports("downloads.claude.ai.example", "/artifact"));
+        assert!(supports(codex::API_HOST, "/codex/install.sh"));
+        assert!(supports(codex::API_HOST, "/codex/install.ps1"));
+        assert!(!supports(codex::API_HOST, "/codex/install.sh/x"));
+        assert!(!supports(codex::API_HOST, "/backend-api/codex/responses"));
+        assert!(!supports(API_HOST, "/codex/install.sh"));
     }
 }

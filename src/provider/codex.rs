@@ -33,8 +33,12 @@ pub const TOOL: Tool = Tool {
         "-c",
         "otel.metrics_exporter=\"none\"",
     ],
+    // Its updater fetches `INSTALLERS` with curl.
+    bundle_variable: Some("CURL_CA_BUNDLE"),
     deadline: None,
 };
+/// The installers Codex's standalone update reruns.
+pub const INSTALLERS: [&str; 2] = ["/codex/install.sh", "/codex/install.ps1"];
 pub const SESSION_ID: HeaderName = HeaderName::from_static("session-id");
 pub const CHATGPT_ACCOUNT_ID: HeaderName = HeaderName::from_static("chatgpt-account-id");
 pub const INSTALLATION_ID: HeaderName = HeaderName::from_static("x-codex-installation-id");
