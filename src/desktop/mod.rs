@@ -1,6 +1,8 @@
 //! macOS Desktop Chat through a foreground native Gateway adapter.
 
 mod app;
+mod bundle;
+mod compatibility;
 mod config;
 mod egress;
 mod monitor;

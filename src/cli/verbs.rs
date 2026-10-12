@@ -1590,7 +1590,7 @@ pub(super) fn typed_line(prompt: &str) -> Result<String, Failure> {
 }
 
 /// A skippable confirmation on the controlling terminal.
-pub(super) fn confirm(prompt: &str) -> Result<bool, Failure> {
+pub(crate) fn confirm(prompt: &str) -> Result<bool, Failure> {
     if !std::io::stdin().is_terminal() {
         return Err(Failure::local(
             21,

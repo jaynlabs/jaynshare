@@ -1,20 +1,20 @@
 //! Compatibility checks against the installed app and its verified managed CLI.
 
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 use std::time::{Duration, SystemTime};
 
 use tokio::process::Command;
+use tokio::sync::OnceCell;
 
-use super::config;
+use super::{bundle, compatibility, config};
 
 type Stamp = (u64, SystemTime);
 
 pub struct App {
     pub bundle: PathBuf,
-    runtime: OnceLock<(PathBuf, Vec<(PathBuf, Stamp)>)>,
+    runtime: OnceCell<(PathBuf, Vec<(PathBuf, Stamp)>)>,
     version: String,
-    runtime_version: &'static str,
+    expected_runtime: bundle::Runtime,
     stamps: Vec<(PathBuf, Stamp)>,
 }
 
@@ -45,36 +45,38 @@ impl App {
                 .arg(&plist),
         )
         .await?;
-        // shortcut: this private profile format is checked only on these versions; recheck the native app before adding versions.
-        let runtime_version = match version.as_str() {
-            "2.26454.0" => "2.1.289",
-            "2.26454.2" | "2.31226.0" => "2.1.293",
-            _ => {
-                return Err(format!(
-                    "Claude Desktop {version} has not been checked; supported versions: 2.26454.0, 2.26454.2 and 2.31226.0"
-                ));
-            }
-        };
-        let stamps = [plist, bundle.join("Contents/Resources/app.asar")]
+        let archive = bundle.join("Contents/Resources/app.asar");
+        let stamps = [plist, archive.clone()]
             .into_iter()
             .map(|path| stamp(&path).map(|stamp| (path, stamp)))
             .collect::<Result<_, _>>()?;
+        let expected_runtime = bundle::runtime(&archive)?;
         let app = Self {
             bundle,
-            runtime: OnceLock::new(),
+            runtime: OnceCell::new(),
             version,
-            runtime_version,
+            expected_runtime,
             stamps,
         };
-        if runtime(runtime_version)?.is_some() {
+        app.unchanged()?;
+        if app.find_runtime()?.is_some() {
             app.runtime().await?;
         }
         Ok(app)
     }
 
     pub async fn runtime(&self) -> Result<&Path, String> {
-        if self.runtime.get().is_none() {
-            let runtime = runtime(self.runtime_version)?.ok_or("Desktop's managed runtime is still provisioning through the proxy; retry after its download finishes")?;
+        self.runtime.get_or_try_init(|| async {
+            let runtime = self.find_runtime()?.ok_or("Desktop's managed runtime is still provisioning through the proxy; retry after its download finishes")?;
+            let marker = runtime
+                .ancestors()
+                .nth(4)
+                .expect("managed bundle")
+                .join(".verified");
+            let stamps: Vec<_> = [runtime.clone(), marker]
+                .into_iter()
+                .map(|path| stamp(&path).map(|stamp| (path, stamp)))
+                .collect::<Result<_, _>>()?;
             let actual = output(
                 Command::new(&runtime)
                     .arg("--version")
@@ -83,23 +85,23 @@ impl App {
                     .env("PATH", "/usr/bin:/bin"),
             )
             .await?;
-            if actual.split_whitespace().next() != Some(self.runtime_version) {
+            if actual.split_whitespace().next() != Some(self.expected_runtime.version.as_str()) {
                 return Err(format!(
                     "the managed Claude Code runtime is incompatible; expected {}",
-                    self.runtime_version
+                    self.expected_runtime.version
                 ));
             }
-            let marker = runtime
-                .ancestors()
-                .nth(4)
-                .expect("managed bundle")
-                .join(".verified");
-            let stamps = [runtime.clone(), marker]
-                .into_iter()
-                .map(|path| stamp(&path).map(|stamp| (path, stamp)))
-                .collect::<Result<_, _>>()?;
-            let _ = self.runtime.set((runtime, stamps));
-        }
+            compatibility::check(&runtime).await?;
+            if stamps
+                .iter()
+                .any(|(path, before)| stamp(path).as_ref() != Ok(before))
+            {
+                return Err(
+                    "Desktop's managed runtime changed during its compatibility check".into(),
+                );
+            }
+            Ok::<_, String>((runtime, stamps))
+        }).await?;
         self.unchanged()?;
         Ok(&self.runtime.get().expect("verified runtime").0)
     }
@@ -113,7 +115,7 @@ impl App {
                 stamps
                     .iter()
                     .any(|(file, before)| stamp(file).as_ref() != Ok(before))
-                    || runtime(self.runtime_version).as_ref() != Ok(&Some(path.clone()))
+                    || self.find_runtime().as_ref() != Ok(&Some(path.clone()))
             })
         {
             return Err(format!(
@@ -122,6 +124,32 @@ impl App {
             ));
         }
         Ok(())
+    }
+
+    fn find_runtime(&self) -> Result<Option<PathBuf>, String> {
+        let expected = &self.expected_runtime;
+        let directory = config::profile()
+            .join("claude-code")
+            .join(&expected.version);
+        let managed = directory.join(&expected.checksum[..12]);
+        let binary = managed.join("claude.app/Contents/MacOS/claude");
+        let marker = managed.join(".verified");
+        if !binary.is_file() || !marker.is_file() {
+            return Ok(None);
+        }
+        if std::fs::metadata(&marker).map_err(|e| e.to_string())?.len() > 128 {
+            return Err("Desktop's managed runtime verification marker is invalid".into());
+        }
+        if std::fs::read_to_string(marker)
+            .map_err(|e| e.to_string())?
+            .trim()
+            != expected.checksum
+        {
+            return Err(
+                "Desktop's managed runtime verification does not match its bundled manifest".into(),
+            );
+        }
+        Ok(Some(binary))
     }
 
     pub async fn open(&self, ca: &Path) -> Result<(), String> {
@@ -134,27 +162,6 @@ impl App {
         .await
         .map(|_| ())
     }
-}
-
-fn runtime(version: &str) -> Result<Option<PathBuf>, String> {
-    let directory = config::profile().join("claude-code").join(version);
-    let mut candidates = Vec::new();
-    let entries = match std::fs::read_dir(&directory) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(format!("cannot read Desktop's managed runtime: {e}")),
-    };
-    for entry in entries {
-        let path = entry.map_err(|e| e.to_string())?.path();
-        let binary = path.join("claude.app/Contents/MacOS/claude");
-        if path.join(".verified").is_file() && binary.is_file() {
-            candidates.push(binary);
-        }
-    }
-    if candidates.len() > 1 {
-        return Err("Desktop's active verified runtime is ambiguous".into());
-    }
-    Ok(candidates.pop())
 }
 
 fn stamp(path: &Path) -> Result<Stamp, String> {
@@ -217,4 +224,20 @@ async fn output(command: &mut Command) -> Result<String, String> {
     String::from_utf8(result.stdout)
         .map(|s| s.trim().to_string())
         .map_err(|_| "invalid Desktop version output".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    #[ignore = "uses the installed macOS Desktop bundle and managed runtime"]
+    async fn installed_runtime_passes_local_streaming_check() {
+        let app = App::resolve()
+            .await
+            .expect("installed Desktop compatibility");
+        app.runtime()
+            .await
+            .expect("managed runtime streaming check");
+    }
 }

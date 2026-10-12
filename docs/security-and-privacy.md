@@ -170,11 +170,20 @@ or `jaynshare codex` launches, through `NODE_EXTRA_CA_CERTS` or
 `CODEX_CA_CERTIFICATE`. Outside Windows, a Codex launch also sets
 `CURL_CA_BUNDLE` to the system's roots plus the CA, so Codex's updater can
 fetch its installer; any `curl` run under that Codex trusts the CA too. It
-enters the operating system's trust store only if the engineer runs
-`jaynshare trust-ca add`, which always asks first. Desktop
+enters the operating system's trust store only after confirmation through
+`jaynshare trust-ca add` or Desktop's inline
+`Install CA globally (needed for Claude Desktop) [y/N]` prompt. Desktop
 requires macOS trust for both current and staged roots before profile setup;
+Enter or `n` cancels, and `--yes` does not bypass this confirmation.
 `trust-ca add` installs only the current root. Desktop's launch also supplies
 the CA bundle to its engine through `NODE_EXTRA_CA_CERTS`.
+Desktop runtime compatibility uses the installed bundle's embedded version and
+checksum, its matching `.verified` marker and a bounded synthetic streaming
+exchange with a local mock gateway. The check has a fresh temporary profile,
+no tools, no enrolled credential and no pooled-account usage. It does not certify
+Desktop's private profile or GUI contracts; changed packaging or protocols can
+require a Jaynshare update. Application and checked-runtime replacement still
+stop the adapter.
 Desktop's egress relay refuses its local Gateway bearer in every Authorization
 value, including duplicate headers and alternate casing; destination credentials
 continue through the proxy.

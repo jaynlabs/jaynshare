@@ -532,7 +532,7 @@ fn remove_next(state_dir: &Path) -> Result<(), String> {
 }
 
 /// `der` as one PEM block.
-fn pem(label: &str, der: &[u8]) -> String {
+pub(crate) fn pem(label: &str, der: &[u8]) -> String {
     let body = base64::engine::general_purpose::STANDARD.encode(der);
     let mut out = format!("-----BEGIN {label}-----\n");
     for line in body.as_bytes().chunks(64) {
