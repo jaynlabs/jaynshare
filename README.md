@@ -57,14 +57,20 @@ Before having to set up a server, you can spin up one on your own Mac easily
 using this (it downloads the latest release, runs it, joins a client and
 offers to add your accounts).
 
-It needs `python3`, and Claude Code or Codex installed.
+It needs `python3`, and Claude Code, Codex or Claude Desktop installed.
 
 ```sh
 curl -fsSLO https://github.com/jaynlabs/jaynshare/releases/latest/download/quickstart.sh
 bash quickstart.sh          #sets up everything
 bash quickstart.sh claude   #launches claude
 bash quickstart.sh codex    #launches codex
+bash quickstart.sh desktop  #launches Claude Desktop
+bash quickstart.sh down     #stops the server
 ```
+
+`desktop` uses your real Claude Desktop: it asks to trust the quickstart's CA
+in your keychain, then points Desktop at the quickstart until `down`.
+`bash quickstart.sh client trust-ca remove` removes the CA.
 
 ## Demo
 
