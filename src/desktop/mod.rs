@@ -183,6 +183,11 @@ async fn serve(adapter: Arc<transport::Adapter>, listener: TcpListener) -> Resul
     }
     let result = loop {
         tokio::select! {
+            // In a cooked terminal, Ctrl-C also interrupts a running `open`: stopping wins.
+            biased;
+            _ = &mut interrupt => break Ok(()),
+            _ = &mut termination => break Ok(()),
+            _ = quitting.recv() => break Ok(()),
             result = &mut open, if !opened => {
                 if let Err(why) = result { break Err(why); }
                 opened = true;
@@ -203,9 +208,6 @@ async fn serve(adapter: Arc<transport::Adapter>, listener: TcpListener) -> Resul
             _ = compatibility.tick() => {
                 if let Err(why) = adapter.app.unchanged() { break Err(why); }
             }
-            _ = &mut interrupt => break Ok(()),
-            _ = &mut termination => break Ok(()),
-            _ = quitting.recv() => break Ok(()),
         }
     };
     if let Some(refresh) = refresh {
