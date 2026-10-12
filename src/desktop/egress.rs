@@ -1,5 +1,7 @@
 //! Loopback forward proxy with the enrollment credential added only at the next hop.
 
+use std::io::IsTerminal as _;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -34,29 +36,61 @@ pub async fn check_trust(installation: &client::ClientInstallation) -> Result<()
         let certificate = certificate.map_err(|_| "the enrolled CA bundle is invalid")?;
         let path = installation
             .directory
-            .join(format!("desktop-ca-check-{}.der", uuid::Uuid::new_v4()));
-        crate::state::write_private_atomic(&path, &certificate)
+            .join(format!("desktop-ca-check-{}.pem", uuid::Uuid::new_v4()));
+        let pem = crate::mitm::ca::pem("CERTIFICATE", &certificate);
+        crate::state::write_private_atomic(&path, pem.as_bytes())
             .map_err(|e| format!("could not prepare the Desktop CA check: {e}"))?;
-        let verified = tokio::time::timeout(
-            Duration::from_secs(3),
-            tokio::process::Command::new("security")
-                .args(["verify-cert", "-L", "-l", "-c"])
-                .arg(&path)
-                .kill_on_drop(true)
-                .output(),
-        )
-        .await;
+        let result = trust_certificate(&path, &crate::mitm::ca::fingerprint(&certificate)).await;
         std::fs::remove_file(&path)
             .map_err(|e| format!("could not remove the Desktop CA check: {e}"))?;
-        if !matches!(verified, Ok(Ok(output)) if output.status.success()) {
-            return Err(format!(
-                "Desktop requires macOS trust for pool CA {}; `jaynshare trust-ca add` installs the current CA; also import and trust any staged CA from {} before relaunching Desktop",
-                crate::mitm::ca::fingerprint(&certificate),
-                ca_path.display()
-            ));
-        }
+        result?;
     }
     Ok(())
+}
+
+async fn trust_certificate(path: &Path, fingerprint: &str) -> Result<(), String> {
+    if trusted(path).await? {
+        return Ok(());
+    }
+    if !std::io::stdin().is_terminal() {
+        return Err("installing the pool CA globally for Claude Desktop requires confirmation in a terminal".into());
+    }
+    eprintln!("Pool CA fingerprint: {fingerprint}");
+    eprintln!("This CA will be trusted by other applications using your macOS trust settings.");
+    let prompt = "Install CA globally (needed for Claude Desktop) [y/N] ";
+    let confirmed = crate::cli::confirm(prompt).map_err(|failure| {
+        failure.error["message"]
+            .as_str()
+            .unwrap_or("could not read the CA installation confirmation")
+            .to_string()
+    })?;
+    if !confirmed {
+        return Err(
+            "CA installation cancelled; Claude Desktop needs macOS trust for the pool CA".into(),
+        );
+    }
+    crate::deploy::trust_store::add(path, fingerprint)?;
+    if !trusted(path).await? {
+        return Err(format!(
+            "macOS still does not trust pool CA {fingerprint} after installation"
+        ));
+    }
+    Ok(())
+}
+
+async fn trusted(path: &Path) -> Result<bool, String> {
+    let output = tokio::time::timeout(
+        Duration::from_secs(3),
+        tokio::process::Command::new("security")
+            .args(["verify-cert", "-L", "-l", "-c"])
+            .arg(path)
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .map_err(|_| "checking macOS CA trust timed out")?
+    .map_err(|e| format!("could not check macOS CA trust: {e}"))?;
+    Ok(output.status.success())
 }
 
 pub async fn handle(

@@ -179,10 +179,12 @@ own `codex login`; the pool replaces it on every request.
 ### Claude Desktop Chat on macOS
 
 On an enrolled Mac, install Claude Desktop in `/Applications` or
-`~/Applications` and quit the app fully. Run `jaynshare trust-ca add` to trust
-the pool's current interception CA in macOS, then start the connection from a
-terminal. If a CA rotation is staged, also import and trust that next root from
-the enrollment's `ca.pem`; Desktop checks both roots before setup.
+`~/Applications` and quit the app fully, then start the connection from a
+terminal. When the pool's CA is missing from macOS trust, the command shows its
+fingerprint and asks `Install CA globally (needed for Claude Desktop) [y/N]`.
+Answer `y` to install it in your login keychain and continue; Enter or `n`
+cancels the launch. A staged replacement CA gets the same confirmation if it
+is not already trusted. Desktop checks both roots before setup.
 
 ```sh
 jaynshare desktop                       # Anthropic account picker
@@ -207,12 +209,20 @@ Changing accounts never requires quitting Desktop. With `--auto`, existing
 sessions keep their server-side account binding; an exhausted account returns an
 error instead of switching accounts by itself.
 
-The integration checks Desktop **2.26454.0 with Claude Code 2.1.289**, and
-**2.26454.2 or 2.31226.0 with Claude Code 2.1.293**. The 2.31226.0 profile and
-startup/title contracts were verified from its installed bundle with mocked
-transport; a live Chat test completed on 2.31226.0 before the egress changes.
-Other versions, ambiguous managed runtimes, untrusted pool CAs and managed
-device policies produce a clear error before profile setup.
+Desktop versions are checked automatically. Jaynshare reads the managed runtime
+version and bundle checksum from Desktop's installed bundle, checks the matching
+verified runtime and runs a synthetic streaming exchange against a temporary
+local gateway. This check uses no pooled account, sends no user prompt and runs
+once per adapter launch. On first startup it runs after runtime provisioning,
+before engine inference is forwarded. Invalid bundle metadata, mismatched runtime
+verification, failed checks, untrusted pool CAs and managed device policies
+produce a clear error. Existing runtimes are checked before profile setup.
+This verifies the engine's protocol, not every Desktop UI feature. Desktop's
+private profile format and startup/title contracts can still change and require
+a Jaynshare update. The native app blocks ordinary remote debugging and custom
+test profiles, so this check does not drive the GUI. The 2.31226.0 profile and
+startup/title contracts were inspected from its installed bundle, and its genuine
+Claude Code 2.1.293 runtime passed the local streaming check.
 An app or verified runtime replacement stops the adapter; quit Desktop
 fully and relaunch the command to check compatibility again.
 
@@ -222,8 +232,9 @@ uses your enrollment and server identity pin internally. Its native
 `egressProxyUrl` points at the same loopback listener; the relay adds the proxy
 credential only on its connection to the server. Desktop requires macOS CA
 trust and receives `NODE_EXTRA_CA_CERTS` for its child engine. Setup leaves the
-system proxy and trust store untouched. Only **Chat** is in scope. Desktop lists the models the pool's
-accounts offer through `/v1/models`, and the upstream refuses those an account
+system proxy untouched and installs missing CAs only after confirmation. Only
+**Chat** is in scope. Desktop lists the models the pool's accounts offer through
+`/v1/models`, and the upstream refuses those an account
 cannot use; live Chat was checked with Sonnet 4.6. Text and explicitly
 permitted local-file access were exercised in the compatibility experiment;
 uploaded images, PDFs and text attachments, Cowork, Code, Chrome, connectors,
@@ -246,7 +257,8 @@ credential; other page requests use opaque tunnels. The relay has no direct
 fallback when the VPS is unavailable. Native app and engine routing, first-run
 downloads and IPv4/IPv6 failure behavior still need a traffic audit; a strict
 guarantee covering every process requires an OS egress policy. The Jaynshare
-profile disables Desktop auto-updates; install a checked newer version manually.
+profile disables Desktop auto-updates; install a newer version manually, then
+relaunch Jaynshare to run its compatibility checks.
 Upgrading an existing profile requires stopping the adapter and quitting
 Desktop fully before setup adds the proxy and update settings and enables model
 discovery. Repeat the trust check and fully relaunch after CA rotation.

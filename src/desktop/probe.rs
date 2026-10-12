@@ -7,7 +7,7 @@ use std::time::Duration;
 use http::{Response, StatusCode};
 use serde_json::{Value, json};
 use tokio::io::AsyncReadExt;
-use tokio::process::Command;
+use tokio::process::{Child, Command};
 use tokio::sync::oneshot;
 
 use crate::data_plane::envelope::{json_response, proxy_response};
@@ -17,6 +17,77 @@ use super::{app::App, config::Integration};
 
 const OUTPUT_LIMIT: u64 = 1024 * 1024;
 const DEADLINE: Duration = Duration::from_secs(9);
+
+pub(super) fn command(
+    runtime: &Path,
+    scratch: &Path,
+    origin: &str,
+    key: &str,
+    model: &str,
+) -> Command {
+    let mut command = Command::new(runtime);
+    // One argument, so a model ID can never be read as another option.
+    command
+        .args([
+            "-p",
+            "Reply with exactly OK. Do not use tools.",
+            &format!("--model={model}"),
+            "--tools",
+            "",
+            "--setting-sources",
+            "",
+            "--strict-mcp-config",
+            "--mcp-config",
+            "{\"mcpServers\":{}}",
+            "--no-session-persistence",
+            "--output-format",
+            "json",
+        ])
+        .current_dir(scratch)
+        .env_clear()
+        .env("HOME", scratch)
+        .env("TMPDIR", scratch)
+        .env("CLAUDE_CONFIG_DIR", scratch)
+        .env("PATH", "/usr/bin:/bin")
+        .env("LANG", "en_US.UTF-8")
+        .env("ANTHROPIC_BASE_URL", origin)
+        .env("ANTHROPIC_AUTH_TOKEN", key)
+        .env("ANTHROPIC_API_KEY", "")
+        .envs(crate::launch::env::CLAUDE_TELEMETRY_VARIABLES.map(|name| (name, "1")))
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    command
+}
+
+pub(super) async fn collect(child: &mut Child) -> std::io::Result<(Vec<u8>, bool)> {
+    let stdout = child.stdout.take().expect("piped stdout");
+    let mut stderr = child.stderr.take().expect("piped stderr");
+    let read = async {
+        let mut bytes = Vec::new();
+        stdout
+            .take(OUTPUT_LIMIT + 1)
+            .read_to_end(&mut bytes)
+            .await?;
+        if bytes.len() as u64 > OUTPUT_LIMIT {
+            return Err(std::io::Error::other("probe output exceeded its limit"));
+        }
+        Ok(bytes)
+    };
+    let collect = async {
+        let mut sink = tokio::io::sink();
+        let (bytes, _, status) =
+            tokio::try_join!(read, tokio::io::copy(&mut stderr, &mut sink), child.wait())?;
+        Ok((bytes, status.success()))
+    };
+    tokio::time::timeout(DEADLINE, collect).await.map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "Claude Code startup check exceeded 9 seconds",
+        )
+    })?
+}
 
 pub async fn run(
     app: &App,
@@ -46,40 +117,14 @@ pub async fn run(
             "could not prepare the isolated Desktop startup check",
         );
     }
-    // One argument, so a model ID can never be read as another option.
-    let model_arg = format!("--model={model}");
-    let child = Command::new(runtime)
-        .args([
-            "-p",
-            "Reply with exactly OK. Do not use tools.",
-            &model_arg,
-            "--tools",
-            "",
-            "--setting-sources",
-            "",
-            "--strict-mcp-config",
-            "--mcp-config",
-            "{\"mcpServers\":{}}",
-            "--no-session-persistence",
-            "--output-format",
-            "json",
-        ])
-        .current_dir(&scratch)
-        .env_clear()
-        .env("HOME", &scratch)
-        .env("TMPDIR", &scratch)
-        .env("CLAUDE_CONFIG_DIR", &scratch)
-        .env("PATH", "/usr/bin:/bin")
-        .env("LANG", "en_US.UTF-8")
-        .env("ANTHROPIC_BASE_URL", &integration.origin)
-        .env("ANTHROPIC_AUTH_TOKEN", &integration.key)
-        .env("ANTHROPIC_API_KEY", "")
-        .envs(crate::launch::env::CLAUDE_TELEMETRY_VARIABLES.map(|name| (name, "1")))
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn();
+    let child = command(
+        runtime,
+        &scratch,
+        &integration.origin,
+        &integration.key,
+        model,
+    )
+    .spawn();
     let Ok(mut child) = child else {
         let _ = std::fs::remove_dir_all(&scratch);
         return proxy_response(
@@ -93,34 +138,15 @@ pub async fn run(
     let model = model.to_owned();
     // The worker owns the child so dropping an HTTP request still kills AND reaps it.
     let worker = tokio::spawn(async move {
-        let stdout = child.stdout.take().expect("piped stdout");
-        let mut stderr = child.stderr.take().expect("piped stderr");
-        let read = async {
-            let mut bytes = Vec::new();
-            stdout
-                .take(OUTPUT_LIMIT + 1)
-                .read_to_end(&mut bytes)
-                .await?;
-            if bytes.len() as u64 > OUTPUT_LIMIT {
-                return Err(std::io::Error::other("probe output exceeded its limit"));
-            }
-            Ok(bytes)
-        };
         let completed = {
-            let collect = async {
-                let mut sink = tokio::io::sink();
-                let (bytes, _, status) =
-                    tokio::try_join!(read, tokio::io::copy(&mut stderr, &mut sink), child.wait())?;
-                Ok::<_, std::io::Error>((bytes, status.success()))
-            };
             tokio::select! {
                 _ = cancelled => None,
-                result = tokio::time::timeout(DEADLINE, collect) => Some(result),
+                result = collect(&mut child) => Some(result),
             }
         };
         let response = match completed {
-            Some(Ok(Ok((bytes, success)))) => convert(&bytes, success, &model),
-            Some(Err(_)) => proxy_response(
+            Some(Ok((bytes, success))) => convert(&bytes, success, &model),
+            Some(Err(why)) if why.kind() == std::io::ErrorKind::TimedOut => proxy_response(
                 StatusCode::GATEWAY_TIMEOUT,
                 "timeout_error",
                 "Claude Code startup check exceeded 9 seconds",
@@ -154,16 +180,7 @@ pub async fn run(
 
 fn convert(bytes: &[u8], success: bool, model: &str) -> Response<ResponseBody> {
     let result: Value = serde_json::from_slice(bytes).unwrap_or(Value::Null);
-    if success
-        && result["type"] == "result"
-        && result["subtype"] == "success"
-        && result["is_error"] == false
-        && result["num_turns"] == 1
-        && result["result"].as_str().is_some_and(|s| !s.is_empty())
-        && result["stop_reason"] == "end_turn"
-        && result["usage"]["input_tokens"].as_u64().is_some()
-        && result["usage"]["output_tokens"].as_u64().is_some()
-    {
+    if success && healthy(&result) {
         return json_response(
             StatusCode::OK,
             &json!({
@@ -188,6 +205,17 @@ fn convert(bytes: &[u8], success: bool, model: &str) -> Response<ResponseBody> {
         },
         "Claude Code could not complete the Desktop startup check",
     )
+}
+
+pub(super) fn healthy(result: &Value) -> bool {
+    result["type"] == "result"
+        && result["subtype"] == "success"
+        && result["is_error"] == false
+        && result["num_turns"] == 1
+        && result["result"].as_str().is_some_and(|s| !s.is_empty())
+        && result["stop_reason"] == "end_turn"
+        && result["usage"]["input_tokens"].as_u64().is_some()
+        && result["usage"]["output_tokens"].as_u64().is_some()
 }
 
 #[cfg(test)]

@@ -228,6 +228,9 @@ impl Adapter {
                 .headers
                 .get(USER_AGENT)
                 .is_some_and(|v| v.as_bytes().starts_with(b"claude-cli/"));
+        if engine && let Err(why) = self.app.runtime().await {
+            return error(StatusCode::SERVICE_UNAVAILABLE, &why);
+        }
         if !engine {
             if counting {
                 return error(

@@ -122,17 +122,191 @@ mod macos {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn untrusted_interception_ca_refuses_before_desktop_profile_setup() {
+    async fn untrusted_interception_ca_requires_terminal_confirmation_before_profile_setup() {
         let _leak_sweep = crate::leaks::LeakGuard::default();
         let instance = Instance::start_client("desktop-egress-untrusted").await;
         instance.add_fsub();
         let desktop = Desktop::new(&instance).await;
         fs::write(desktop.tools.dir.join("security/0000/exit"), "1").unwrap();
-        let (code, _, error) = desktop.cli(&["desktop", "--auto"]);
-        assert_eq!(code, 1);
-        assert!(error.contains("trust-ca add"));
+        for args in [
+            vec!["desktop", "--auto"],
+            vec!["--yes", "desktop", "--auto"],
+        ] {
+            let (code, _, error) = desktop.cli(&args);
+            assert_eq!(code, 1);
+            assert!(error.contains("confirmation in a terminal"), "{error}");
+        }
+        assert!(
+            desktop
+                .tools
+                .calls("security")
+                .iter()
+                .all(|call| call[0] == "verify-cert")
+        );
         assert!(!desktop.record().exists());
         assert!(!desktop.profile.join("claude_desktop_config.json").exists());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn desktop_ca_installation_defaults_to_no() {
+        let _leak_sweep = crate::leaks::LeakGuard::default();
+        let instance = Instance::start_client("desktop-ca-declined").await;
+        instance.add_fsub();
+        let desktop = Desktop::new(&instance).await;
+        fs::write(desktop.tools.dir.join("security/0000/exit"), "1").unwrap();
+        let tools = desktop.tools.env();
+        let env: Vec<(&str, &str)> = tools
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        for answer in ["\n", "n\n"] {
+            let (code, transcript) = desktop.client.pty(
+                &["desktop", "--auto"],
+                &env,
+                &[(
+                    "Install CA globally (needed for Claude Desktop) [y/N]",
+                    answer,
+                )],
+            );
+            assert_eq!(code, 1, "{transcript}");
+            assert!(
+                transcript.contains("CA installation cancelled"),
+                "{transcript}"
+            );
+        }
+        assert!(
+            desktop
+                .tools
+                .calls("security")
+                .iter()
+                .all(|call| call[0] == "verify-cert")
+        );
+        assert!(!desktop.record().exists());
+        assert!(!desktop.profile.join("claude_desktop_config.json").exists());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn desktop_installs_the_confirmed_ca_and_continues_launching() {
+        let _leak_sweep = crate::leaks::LeakGuard::default();
+        let instance = Instance::start_client("desktop-ca-confirmed").await;
+        instance.add_fsub();
+        let desktop = Desktop::new(&instance).await;
+        fs::write(desktop.tools.dir.join("security/0000/exit"), "1").unwrap();
+        fs::write(desktop.tools.dir.join("security/0000/times"), "1").unwrap();
+        let installed = desktop.client.root.join("installed-ca.pem");
+        let keychain = desktop
+            .client
+            .home
+            .join("Library/Keychains/login.keychain-db");
+        desktop
+            .tools
+            .rule(
+                "security",
+                &[
+                    "add-trusted-cert",
+                    "-r",
+                    "trustRoot",
+                    "-k",
+                    keychain.to_str().unwrap(),
+                ],
+            )
+            .run(
+                Path::new("/bin/cp"),
+                &["{argv}", installed.to_str().unwrap()],
+            );
+        let tools = desktop.tools.env();
+        let env: Vec<(&str, &str)> = tools
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        let (code, transcript) = desktop.client.pty(
+            &["desktop", "--auto", "--log"],
+            &env,
+            &[
+                (
+                    "Install CA globally (needed for Claude Desktop) [y/N]",
+                    "y\n",
+                ),
+                ("keep this command open", "\x03"),
+            ],
+        );
+        assert_eq!(code, 0, "{transcript}");
+        assert!(transcript.contains("other applications"), "{transcript}");
+        assert_eq!(
+            fs::read_to_string(installed).unwrap(),
+            fs::read_to_string(desktop.client.client_dir.join("ca.pem")).unwrap()
+        );
+        let calls = desktop.tools.calls("security");
+        assert_eq!(
+            calls
+                .iter()
+                .map(|call| call[0].as_str())
+                .collect::<Vec<_>>(),
+            ["verify-cert", "add-trusted-cert", "verify-cert"]
+        );
+        assert_eq!(calls[0][4], calls[1][5]);
+        assert_eq!(calls[0][4], calls[2][4]);
+        assert!(!Path::new(&calls[0][4]).exists());
+        assert!(desktop.record().exists());
+        let mut running = desktop.spawn(&["desktop", "--auto"]);
+        desktop.ready(&mut running).await;
+        assert!(!desktop.logs().contains("Install CA globally"));
+        assert_eq!(
+            desktop
+                .tools
+                .calls("security")
+                .iter()
+                .filter(|call| call[0] == "add-trusted-cert")
+                .count(),
+            1
+        );
+        running.stop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn desktop_ca_installation_failures_prevent_profile_setup() {
+        let _leak_sweep = crate::leaks::LeakGuard::default();
+        for (status, error) in [
+            (1, "installation denied"),
+            (0, "still does not trust pool CA"),
+        ] {
+            let instance =
+                Instance::start_client(&format!("desktop-ca-install-failure-{status}")).await;
+            instance.add_fsub();
+            let desktop = Desktop::new(&instance).await;
+            fs::write(desktop.tools.dir.join("security/0000/match"), "verify-cert").unwrap();
+            fs::write(desktop.tools.dir.join("security/0000/exit"), "1").unwrap();
+            desktop
+                .tools
+                .rule("security", &["add-trusted-cert"])
+                .exit(status)
+                .stderr("installation denied");
+            let tools = desktop.tools.env();
+            let env: Vec<(&str, &str)> = tools
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_str()))
+                .collect();
+            let (code, transcript) = desktop.client.pty(
+                &["desktop", "--auto"],
+                &env,
+                &[(
+                    "Install CA globally (needed for Claude Desktop) [y/N]",
+                    "y\n",
+                )],
+            );
+            assert_eq!(code, 1, "{transcript}");
+            assert!(transcript.contains(error), "{transcript}");
+            assert!(!desktop.record().exists());
+            assert!(!desktop.profile.join("claude_desktop_config.json").exists());
+            for call in desktop
+                .tools
+                .calls("security")
+                .iter()
+                .filter(|call| call[0] == "verify-cert")
+            {
+                assert!(!Path::new(&call[4]).exists());
+            }
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -158,7 +332,7 @@ mod macos {
         desktop.tools.rule("security", &[]).exit(1);
         let (code, _, error) = desktop.cli(&["desktop", "--auto"]);
         assert_eq!(code, 1);
-        assert!(error.contains("staged CA"), "{error}");
+        assert!(error.contains("confirmation in a terminal"), "{error}");
         assert_eq!(
             fs::read_to_string(&ca)
                 .unwrap()
@@ -176,6 +350,86 @@ mod macos {
             );
         }
         assert!(!desktop.record().exists());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn desktop_installs_only_the_untrusted_staged_root() {
+        let _leak_sweep = crate::leaks::LeakGuard::default();
+        let mut instance = Instance::start_client("desktop-ca-staged-confirmed").await;
+        instance.add_fsub();
+        let desktop = Desktop::new(&instance).await;
+        let ca = desktop.client.client_dir.join("ca.pem");
+        let current = fs::read_to_string(&ca).unwrap();
+        assert_eq!(
+            instance.cli_json(&["ca", "rotate", "--yes"], None)["ok"],
+            true
+        );
+        instance.restart();
+        fs::write(desktop.tools.dir.join("security/0000/times"), "1").unwrap();
+        desktop
+            .tools
+            .rule("security", &["verify-cert"])
+            .times(1)
+            .exit(1);
+        let installed = desktop.client.root.join("installed-staged-ca.pem");
+        let keychain = desktop
+            .client
+            .home
+            .join("Library/Keychains/login.keychain-db");
+        desktop
+            .tools
+            .rule(
+                "security",
+                &[
+                    "add-trusted-cert",
+                    "-r",
+                    "trustRoot",
+                    "-k",
+                    keychain.to_str().unwrap(),
+                ],
+            )
+            .run(
+                Path::new("/bin/cp"),
+                &["{argv}", installed.to_str().unwrap()],
+            );
+        let tools = desktop.tools.env();
+        let env: Vec<(&str, &str)> = tools
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        let (code, transcript) = desktop.client.pty(
+            &["desktop", "--auto", "--log"],
+            &env,
+            &[
+                (
+                    "Install CA globally (needed for Claude Desktop) [y/N]",
+                    "y\n",
+                ),
+                ("keep this command open", "\x03"),
+            ],
+        );
+        assert_eq!(code, 0, "{transcript}");
+        let bundle = fs::read_to_string(ca).unwrap();
+        assert_eq!(
+            fs::read_to_string(installed).unwrap(),
+            bundle.strip_prefix(&current).unwrap()
+        );
+        assert_eq!(
+            desktop
+                .tools
+                .calls("security")
+                .iter()
+                .map(|call| call[0].as_str())
+                .collect::<Vec<_>>(),
+            [
+                "verify-cert",
+                "verify-cert",
+                "add-trusted-cert",
+                "verify-cert"
+            ]
+        );
+        assert_eq!(transcript.matches("Install CA globally").count(), 1);
+        assert!(desktop.record().exists());
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -247,6 +501,32 @@ mod macos {
         serde_json::from_slice(&fs::read(path).expect("read JSON")).expect("JSON")
     }
 
+    fn app_archive(path: &Path, version: &str) {
+        let checksum = "a".repeat(64);
+        let manifest = json!({"version":version,"baseUrl":"https://downloads.claude.ai/claude-code-releases","manifest":{"version":version,"platforms":{
+            "darwin-arm64":{"bundle":{"checksum":checksum}},
+            "darwin-x64":{"bundle":{"checksum":checksum}}}}});
+        let source = format!("function runtime(){{return JSON.parse('{manifest}')}}");
+        let header = json!({"files":{".vite":{"files":{"build":{"files":{"index.js":{
+            "size":source.len(),"offset":"0"}}}}}}})
+        .to_string();
+        let padding = (4 - header.len() % 4) % 4;
+        let header_size = header.len() + padding + 8;
+        let mut bytes = Vec::new();
+        for number in [
+            4,
+            header_size as u32,
+            (header_size - 4) as u32,
+            header.len() as u32,
+        ] {
+            bytes.extend_from_slice(&number.to_le_bytes());
+        }
+        bytes.extend_from_slice(header.as_bytes());
+        bytes.resize(8 + header_size, 0);
+        bytes.extend_from_slice(source.as_bytes());
+        fs::write(path, bytes).unwrap();
+    }
+
     impl Desktop {
         async fn new(instance: &Instance) -> Self {
             let client = install_client(instance).await;
@@ -256,21 +536,54 @@ mod macos {
             let bundle = client.home.join("Applications/Claude.app/Contents");
             fs::create_dir_all(bundle.join("Resources")).unwrap();
             fs::write(bundle.join("Info.plist"), "<?xml version=\"1.0\"?><plist version=\"1.0\"><dict><key>CFBundleShortVersionString</key><string>2.31226.0</string></dict></plist>").unwrap();
-            fs::write(bundle.join("Resources/app.asar"), "fixture app archive").unwrap();
+            app_archive(&bundle.join("Resources/app.asar"), "2.1.293");
             let tools = FakeTools::new(&client.root, &["open", "pgrep", "claude", "security"]);
             tools.rule("security", &[]).exit(0);
             tools.rule("pgrep", &[]).exit(1);
             tools
                 .rule("claude", &["--version"])
                 .stdout("2.1.293 (Claude Code)\n");
-            let managed = profile.join("claude-code/2.1.293/fixture-build");
+            let managed = profile.join("claude-code/2.1.293/aaaaaaaaaaaa");
             fs::create_dir_all(managed.join("claude.app/Contents/MacOS")).unwrap();
-            fs::write(managed.join(".verified"), "verified fixture").unwrap();
+            fs::write(managed.join(".verified"), "a".repeat(64)).unwrap();
             let runtime = managed.join("claude.app/Contents/MacOS/claude");
             let script = format!(
-                "#!/bin/sh\nif [ \"$1\" = --version ]; then FAKE_TOOL_DIR={} exec {} \"$@\"; fi\n/usr/bin/env > {}\nprintf '%s\\n' \"$@\" > {}\nprintf '%s' \"$$\" > {}\ncase \"$(/bin/cat {})\" in\nhang) exec /bin/sleep 30;;\nflood) exec /usr/bin/head -c 1048577 /dev/zero;;\nfail) /bin/cat {}; exit 1;;\n*) exec /bin/cat {};;\nesac\n",
+                r#"#!/bin/sh
+if [ "$1" = --version ]; then FAKE_TOOL_DIR={} exec {} "$@"; fi
+if [ "$3" = --model=jaynshare-compatibility-check ]; then
+    printf '%s\n' "$$" >> {}
+    case "$(/bin/cat {})" in
+        hang) exec /bin/sleep 30;;
+        flood) exec /usr/bin/head -c 1048577 /dev/zero;;
+        fail) exit 1;;
+        bad-auth) ANTHROPIC_AUTH_TOKEN=wrong;;
+        no-request) exec /bin/cat {};;
+    esac
+    /usr/bin/curl --silent --fail --max-time 3 --noproxy '*' \
+        -H "Authorization: Bearer $ANTHROPIC_AUTH_TOKEN" \
+        -H 'User-Agent: claude-cli/2.1.293' \
+        -H 'x-claude-code-session-id: synthetic-check' \
+        -H 'content-type: application/json' \
+        --data '{{"model":"jaynshare-compatibility-check","stream":true}}' \
+        "$ANTHROPIC_BASE_URL/v1/messages" > /dev/null || exit 1
+    exec /bin/cat {}
+fi
+/usr/bin/env > {}
+printf '%s\n' "$@" > {}
+printf '%s' "$$" > {}
+case "$(/bin/cat {})" in
+    hang) exec /bin/sleep 30;;
+    flood) exec /usr/bin/head -c 1048577 /dev/zero;;
+    fail) /bin/cat {}; exit 1;;
+    *) exec /bin/cat {};;
+esac
+"#,
                 quoted(&tools.dir),
                 quoted(&tools.bin.join("claude")),
+                quoted(&client.root.join("compatibility-pids")),
+                quoted(&client.root.join("compatibility-mode")),
+                quoted(&client.root.join("compatibility-output")),
+                quoted(&client.root.join("compatibility-output")),
                 quoted(&client.root.join("probe-env")),
                 quoted(&client.root.join("probe-argv")),
                 quoted(&client.root.join("probe-pid")),
@@ -282,8 +595,14 @@ mod macos {
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).unwrap();
             fs::write(client.root.join("probe-mode"), "success").unwrap();
+            fs::write(client.root.join("compatibility-mode"), "success").unwrap();
             fs::write(client.root.join("probe-output"), json!({"type":"result", "subtype":"success", "is_error":false,
                 "num_turns":1, "result":"OK", "stop_reason":"end_turn", "usage":{"input_tokens":17, "output_tokens":1}}).to_string()).unwrap();
+            fs::copy(
+                client.root.join("probe-output"),
+                client.root.join("compatibility-output"),
+            )
+            .unwrap();
             crate::leaks::register_planted(&client.root.join("probe-env"));
             Self {
                 client,
@@ -1044,20 +1363,133 @@ mod macos {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn version_runtime_and_managed_profile_changes_fail_before_setup() {
+    async fn future_desktop_and_runtime_versions_are_checked_without_an_allowlist() {
+        let _leak_sweep = crate::leaks::LeakGuard::default();
+        let instance = Instance::start_client("desktop-future-version").await;
+        let desktop = Desktop::new(&instance).await;
+        let bundle = desktop.client.home.join("Applications/Claude.app/Contents");
+        let plist = bundle.join("Info.plist");
+        fs::write(
+            &plist,
+            fs::read_to_string(&plist)
+                .unwrap()
+                .replace("2.31226.0", "9.0.0"),
+        )
+        .unwrap();
+        app_archive(&bundle.join("Resources/app.asar"), "2.9.123");
+        let original = desktop.runtime.ancestors().nth(5).unwrap();
+        let current = desktop.profile.join("claude-code/2.9.123");
+        fs::rename(original, &current).unwrap();
+        for rule in fs::read_dir(desktop.tools.dir.join("claude")).unwrap() {
+            fs::write(
+                rule.unwrap().path().join("stdout"),
+                "2.9.123 (Claude Code)\n",
+            )
+            .unwrap();
+        }
+        // A different, verified build of the same version does not identify the active runtime.
+        let stale = current.join("bbbbbbbbbbbb");
+        fs::create_dir_all(stale.join("claude.app/Contents/MacOS")).unwrap();
+        fs::write(stale.join(".verified"), "b".repeat(64)).unwrap();
+        fs::copy(
+            "/usr/bin/false",
+            stale.join("claude.app/Contents/MacOS/claude"),
+        )
+        .unwrap();
+        let mut running = desktop.spawn(&["desktop", "--auto"]);
+        let gateway = desktop.ready(&mut running).await;
+        for _ in 0..2 {
+            let answer = send(gateway.addr, gateway.authorize(messages(json!({"model": STARTUP_MODEL, "max_tokens": 1, "messages": [{"role":"user","content":"."}]})))).await;
+            assert_eq!(answer.status, StatusCode::OK);
+        }
+        assert_eq!(
+            fs::read_to_string(desktop.client.root.join("compatibility-pids"))
+                .unwrap()
+                .lines()
+                .count(),
+            1
+        );
+        assert_eq!(instance.upstream.calls(), 0);
+        running.stop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn runtime_compatibility_failures_reject_setup_and_reap_children() {
+        let _leak_sweep = crate::leaks::LeakGuard::default();
+        let instance = Instance::start_client("desktop-runtime-check-failures").await;
+        let desktop = Desktop::new(&instance).await;
+        for mode in ["fail", "no-request", "bad-auth", "flood", "hang"] {
+            fs::write(desktop.client.root.join("compatibility-mode"), mode).unwrap();
+            let (code, _, error) = desktop.cli(&["desktop", "--auto"]);
+            assert_eq!(code, 1, "{mode}: {error}");
+            assert!(error.contains("compatibility check"), "{mode}: {error}");
+            assert!(!desktop.record().exists());
+            assert!(!desktop.profile.join("claude_desktop_config.json").exists());
+            let pid = fs::read_to_string(desktop.client.root.join("compatibility-pids"))
+                .unwrap()
+                .lines()
+                .last()
+                .unwrap()
+                .to_owned();
+            assert!(
+                !Command::new("/bin/kill")
+                    .args(["-0", &pid])
+                    .stderr(Stdio::null())
+                    .status()
+                    .unwrap()
+                    .success(),
+                "{mode}: child still running"
+            );
+        }
+        fs::write(desktop.client.root.join("compatibility-mode"), "success").unwrap();
+        fs::write(
+            desktop.client.root.join("compatibility-output"),
+            "invalid runtime JSON",
+        )
+        .unwrap();
+        assert_eq!(desktop.cli(&["desktop", "--auto"]).0, 1);
+        assert!(!desktop.record().exists());
+        assert_eq!(instance.upstream.calls(), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn mismatched_runtime_marker_refuses_before_setup() {
+        let _leak_sweep = crate::leaks::LeakGuard::default();
+        let instance = Instance::start_client("desktop-runtime-marker").await;
+        let desktop = Desktop::new(&instance).await;
+        fs::write(
+            desktop
+                .runtime
+                .ancestors()
+                .nth(4)
+                .unwrap()
+                .join(".verified"),
+            "b".repeat(64),
+        )
+        .unwrap();
+        let (code, _, error) = desktop.cli(&["desktop", "--auto"]);
+        assert_eq!(code, 1);
+        assert!(error.contains("verification does not match"), "{error}");
+        assert!(!desktop.record().exists());
+        assert!(!desktop.client.root.join("compatibility-pids").exists());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn archive_runtime_and_managed_profile_changes_fail_before_setup() {
         let _leak_sweep = crate::leaks::LeakGuard::default();
         let instance = Instance::start_client("desktop-compatibility").await;
+        instance.add_fsub();
         let desktop = Desktop::new(&instance).await;
-        let plist = desktop
+        let archive = desktop
             .client
             .home
-            .join("Applications/Claude.app/Contents/Info.plist");
-        let original = fs::read_to_string(&plist).unwrap();
-        fs::write(&plist, original.replace("2.31226.0", "9.0.0")).unwrap();
+            .join("Applications/Claude.app/Contents/Resources/app.asar");
+        let original = fs::read(&archive).unwrap();
+        fs::write(&archive, "invalid archive").unwrap();
         assert_eq!(desktop.cli(&["desktop", "--auto"]).0, 1);
         assert!(!desktop.record().exists());
         assert!(!desktop.profile.join("claude_desktop_config.json").exists());
-        fs::write(&plist, original).unwrap();
+        fs::write(&archive, original).unwrap();
         let marker = desktop
             .runtime
             .ancestors()
@@ -1067,11 +1499,33 @@ mod macos {
         fs::remove_file(&marker).unwrap();
         let mut provisioning = desktop.spawn(&["desktop", "--auto"]);
         let gateway = desktop.ready(&mut provisioning).await;
+        let before = instance.upstream.calls();
         let answer = send(gateway.addr, gateway.authorize(messages(json!({"model": STARTUP_MODEL, "max_tokens": 1, "messages": [{"role":"user","content":"."}]})))).await;
         assert_eq!(answer.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            send(gateway.addr, gateway.engine("before-provisioning"))
+                .await
+                .status,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(instance.upstream.calls(), before);
+        fs::write(&marker, "a".repeat(64)).unwrap();
+        assert_eq!(
+            send(gateway.addr, gateway.engine("after-provisioning"))
+                .await
+                .status,
+            StatusCode::OK
+        );
+        assert_eq!(
+            fs::read_to_string(desktop.client.root.join("compatibility-pids"))
+                .unwrap()
+                .lines()
+                .count(),
+            1
+        );
         provisioning.stop().await;
         assert_eq!(desktop.cli(&["desktop", "--restore"]).0, 0);
-        fs::write(marker, "verified fixture").unwrap();
+        fs::write(marker, "a".repeat(64)).unwrap();
         let meta_path = desktop.profile.join("configLibrary/_meta.json");
         write_private(
             &meta_path,
