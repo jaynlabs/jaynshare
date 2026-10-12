@@ -1,4 +1,4 @@
-//! macOS Desktop Chat through a foreground native Gateway adapter.
+//! Claude Desktop on macOS through a foreground native Gateway adapter.
 
 mod app;
 mod bundle;
