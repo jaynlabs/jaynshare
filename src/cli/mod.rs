@@ -56,7 +56,6 @@ pub(crate) use control::{
 };
 use help::Role;
 pub(crate) use update::follow;
-#[cfg(target_os = "macos")]
 pub(crate) use verbs::confirm;
 use verbs::{
     account_add, account_availability, account_list, account_login, account_remove, account_rename,
