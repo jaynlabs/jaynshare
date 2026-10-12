@@ -1,7 +1,7 @@
 //! Loopback forward proxy with the enrollment credential added only at the next hop.
 
 use std::io::IsTerminal as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -32,31 +32,68 @@ pub async fn check_trust(installation: &client::ClientInstallation) -> Result<()
     if installation.ca_fingerprint.as_deref() != Some(crate::bundle::fingerprint(&ca)?.as_str()) {
         return Err("the enrolled pool CA does not match its recorded fingerprint; re-enrol before Desktop setup".into());
     }
-    for certificate in CertificateDer::pem_slice_iter(ca.as_bytes()) {
-        let certificate = certificate.map_err(|_| "the enrolled CA bundle is invalid")?;
+    let certificates = CertificateDer::pem_slice_iter(ca.as_bytes())
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| "the enrolled CA bundle is invalid")?;
+    let mut roots = Vec::new();
+    for (index, certificate) in certificates.iter().enumerate() {
         let path = installation
             .directory
             .join(format!("desktop-ca-check-{}.pem", uuid::Uuid::new_v4()));
-        let pem = crate::mitm::ca::pem("CERTIFICATE", &certificate);
+        let pem = crate::mitm::ca::pem("CERTIFICATE", certificate);
         crate::state::write_private_atomic(&path, pem.as_bytes())
             .map_err(|e| format!("could not prepare the Desktop CA check: {e}"))?;
-        let result = trust_certificate(&path, &crate::mitm::ca::fingerprint(&certificate)).await;
-        std::fs::remove_file(&path)
-            .map_err(|e| format!("could not remove the Desktop CA check: {e}"))?;
-        result?;
+        roots.push(Root {
+            path,
+            fingerprint: crate::mitm::ca::fingerprint(certificate),
+            // `ca.pem` holds the presented CA, then any staged one.
+            role: if index == 0 {
+                "current"
+            } else {
+                "staged replacement"
+            },
+        });
     }
-    Ok(())
+    trust(&roots).await
 }
 
-async fn trust_certificate(path: &Path, fingerprint: &str) -> Result<(), String> {
-    if trusted(path).await? {
+/// One root of `ca.pem` in its own file for `security`, removed with it.
+struct Root {
+    path: PathBuf,
+    fingerprint: String,
+    role: &'static str,
+}
+
+impl Drop for Root {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+async fn trust(roots: &[Root]) -> Result<(), String> {
+    let mut untrusted = Vec::new();
+    for root in roots {
+        if !trusted(&root.path).await? {
+            untrusted.push(root);
+        }
+    }
+    if untrusted.is_empty() {
         return Ok(());
     }
     if !std::io::stdin().is_terminal() {
         return Err("installing the pool CA globally for Claude Desktop requires confirmation in a terminal".into());
     }
-    eprintln!("Pool CA fingerprint: {fingerprint}");
-    eprintln!("This CA will be trusted by other applications using your macOS trust settings.");
+    for root in &untrusted {
+        eprintln!("Pool CA fingerprint: {} ({})", root.fingerprint, root.role);
+    }
+    eprintln!(
+        "{} will be trusted by other applications using your macOS trust settings.",
+        if untrusted.len() == 1 {
+            "This CA"
+        } else {
+            "These CAs"
+        }
+    );
     let prompt = "Install CA globally (needed for Claude Desktop) [y/N] ";
     let confirmed = crate::cli::confirm(prompt).map_err(|failure| {
         failure.error["message"]
@@ -69,11 +106,16 @@ async fn trust_certificate(path: &Path, fingerprint: &str) -> Result<(), String>
             "CA installation cancelled; Claude Desktop needs macOS trust for the pool CA".into(),
         );
     }
-    crate::deploy::trust_store::add(path, fingerprint)?;
-    if !trusted(path).await? {
-        return Err(format!(
-            "macOS still does not trust pool CA {fingerprint} after installation"
-        ));
+    for root in &untrusted {
+        crate::deploy::trust_store::add(&root.path, &root.fingerprint)?;
+    }
+    for root in &untrusted {
+        if !trusted(&root.path).await? {
+            return Err(format!(
+                "macOS still does not trust pool CA {} after installation",
+                root.fingerprint
+            ));
+        }
     }
     Ok(())
 }
