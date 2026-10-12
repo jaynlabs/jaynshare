@@ -512,11 +512,9 @@ impl Validator<'_> {
                 );
             }
         }
-        let telemetry_policy =
-            match self.enum_string(node, "telemetry_policy", &["forward", "block"]) {
-                Some("block") => TelemetryPolicy::Block,
-                _ => TelemetryPolicy::Forward,
-            };
+        // Older configurations may request forwarding; pooled identity now requires blocking.
+        self.enum_string(node, "telemetry_policy", &["forward", "block"]);
+        let telemetry_policy = TelemetryPolicy::Block;
         let egress_node = self.table(node, "egress");
         let egress = self.egress(&egress_node);
         DataPlaneSettings {

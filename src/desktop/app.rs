@@ -1,6 +1,7 @@
 //! Compatibility checks against the installed app and its verified managed CLI.
 
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::{Duration, SystemTime};
 
 use tokio::process::Command;
@@ -11,7 +12,7 @@ type Stamp = (u64, SystemTime);
 
 pub struct App {
     pub bundle: PathBuf,
-    pub runtime: PathBuf,
+    runtime: OnceLock<(PathBuf, Vec<(PathBuf, Stamp)>)>,
     version: String,
     runtime_version: &'static str,
     stamps: Vec<(PathBuf, Stamp)>,
@@ -54,41 +55,53 @@ impl App {
                 ));
             }
         };
-        let runtime = runtime(runtime_version)?;
-        let actual = output(
-            Command::new(&runtime)
-                .arg("--version")
-                .env_clear()
-                .env("HOME", crate::config::platform::home())
-                .env("PATH", "/usr/bin:/bin"),
-        )
-        .await?;
-        if actual.split_whitespace().next() != Some(runtime_version) {
-            return Err(format!(
-                "the managed Claude Code runtime is incompatible; expected {runtime_version}"
-            ));
-        }
-        let marker = runtime
-            .ancestors()
-            .nth(4)
-            .expect("managed bundle")
-            .join(".verified");
-        let stamps = [
-            plist,
-            bundle.join("Contents/Resources/app.asar"),
-            runtime.clone(),
-            marker,
-        ]
-        .into_iter()
-        .map(|path| stamp(&path).map(|stamp| (path, stamp)))
-        .collect::<Result<_, _>>()?;
-        Ok(Self {
+        let stamps = [plist, bundle.join("Contents/Resources/app.asar")]
+            .into_iter()
+            .map(|path| stamp(&path).map(|stamp| (path, stamp)))
+            .collect::<Result<_, _>>()?;
+        let app = Self {
             bundle,
-            runtime,
+            runtime: OnceLock::new(),
             version,
             runtime_version,
             stamps,
-        })
+        };
+        if runtime(runtime_version)?.is_some() {
+            app.runtime().await?;
+        }
+        Ok(app)
+    }
+
+    pub async fn runtime(&self) -> Result<&Path, String> {
+        if self.runtime.get().is_none() {
+            let runtime = runtime(self.runtime_version)?.ok_or("Desktop's managed runtime is still provisioning through the proxy; retry after its download finishes")?;
+            let actual = output(
+                Command::new(&runtime)
+                    .arg("--version")
+                    .env_clear()
+                    .env("HOME", crate::config::platform::home())
+                    .env("PATH", "/usr/bin:/bin"),
+            )
+            .await?;
+            if actual.split_whitespace().next() != Some(self.runtime_version) {
+                return Err(format!(
+                    "the managed Claude Code runtime is incompatible; expected {}",
+                    self.runtime_version
+                ));
+            }
+            let marker = runtime
+                .ancestors()
+                .nth(4)
+                .expect("managed bundle")
+                .join(".verified");
+            let stamps = [runtime.clone(), marker]
+                .into_iter()
+                .map(|path| stamp(&path).map(|stamp| (path, stamp)))
+                .collect::<Result<_, _>>()?;
+            let _ = self.runtime.set((runtime, stamps));
+        }
+        self.unchanged()?;
+        Ok(&self.runtime.get().expect("verified runtime").0)
     }
 
     pub fn unchanged(&self) -> Result<(), String> {
@@ -96,7 +109,12 @@ impl App {
             .stamps
             .iter()
             .any(|(path, before)| stamp(path).as_ref() != Ok(before))
-            || runtime(self.runtime_version).as_ref() != Ok(&self.runtime)
+            || self.runtime.get().is_some_and(|(path, stamps)| {
+                stamps
+                    .iter()
+                    .any(|(file, before)| stamp(file).as_ref() != Ok(before))
+                    || runtime(self.runtime_version).as_ref() != Ok(&Some(path.clone()))
+            })
         {
             return Err(format!(
                 "Claude Desktop {} or its runtime changed; quit Desktop fully and restart `jaynshare desktop` for a compatibility check",
@@ -106,27 +124,37 @@ impl App {
         Ok(())
     }
 
-    pub async fn open(&self) -> Result<(), String> {
-        output(Command::new("open").arg(&self.bundle))
-            .await
-            .map(|_| ())
+    pub async fn open(&self, ca: &Path) -> Result<(), String> {
+        output(
+            Command::new("open")
+                .arg("--env")
+                .arg(format!("NODE_EXTRA_CA_CERTS={}", ca.display()))
+                .arg(&self.bundle),
+        )
+        .await
+        .map(|_| ())
     }
 }
 
-fn runtime(version: &str) -> Result<PathBuf, String> {
+fn runtime(version: &str) -> Result<Option<PathBuf>, String> {
     let directory = config::profile().join("claude-code").join(version);
     let mut candidates = Vec::new();
-    for entry in std::fs::read_dir(&directory).map_err(|_| "Desktop's managed Claude Code runtime is missing; open Desktop once to finish its installation, then quit it fully")? {
+    let entries = match std::fs::read_dir(&directory) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("cannot read Desktop's managed runtime: {e}")),
+    };
+    for entry in entries {
         let path = entry.map_err(|e| e.to_string())?.path();
         let binary = path.join("claude.app/Contents/MacOS/claude");
         if path.join(".verified").is_file() && binary.is_file() {
             candidates.push(binary);
         }
     }
-    if candidates.len() != 1 {
-        return Err("Desktop's active verified runtime is missing or ambiguous; finish its installation before Gateway setup".into());
+    if candidates.len() > 1 {
+        return Err("Desktop's active verified runtime is ambiguous".into());
     }
-    Ok(candidates.remove(0))
+    Ok(candidates.pop())
 }
 
 fn stamp(path: &Path) -> Result<Stamp, String> {

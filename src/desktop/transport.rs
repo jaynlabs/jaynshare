@@ -1,8 +1,9 @@
-//! Authenticated loopback inference only; the enrolled credential never reaches Desktop.
+//! Loopback Gateway and egress relay; the enrolled credential never reaches Desktop.
 
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
+use bytes::Bytes;
 use http::header::{AUTHORIZATION, CONTENT_LENGTH, HOST, ORIGIN, USER_AGENT};
 use http::{Method, Request, Response, StatusCode};
 use http_body_util::{BodyExt, Limited};
@@ -17,7 +18,7 @@ use crate::secret::{Role, Verifier};
 
 use super::{
     app::App,
-    config::{Integration, MODEL},
+    config::Integration,
     monitor::{Monitor, Output},
     probe,
 };
@@ -61,6 +62,28 @@ impl Adapter {
         self: Arc<Self>,
         request: Request<Incoming>,
     ) -> Result<Response<ResponseBody>, std::convert::Infallible> {
+        let gateway_bearer = request
+            .headers()
+            .get_all(AUTHORIZATION)
+            .iter()
+            .flat_map(|value| {
+                value
+                    .as_bytes()
+                    .split(|byte| byte.is_ascii_whitespace() || *byte == b',')
+            })
+            .filter_map(|value| std::str::from_utf8(value).ok())
+            .any(|value| self.verifier.matches(Role::ClientSecret, value));
+        if request.method() == Method::CONNECT
+            || (request.uri().scheme_str().is_some() && !gateway_bearer)
+        {
+            if gateway_bearer {
+                return Ok(error(
+                    StatusCode::FORBIDDEN,
+                    "the Gateway bearer cannot be used for proxy requests",
+                ));
+            }
+            return Ok(super::egress::handle(self, request).await);
+        }
         let started = Instant::now();
         let mut operation = "rejected";
         let response = self.dispatch(request, started, &mut operation).await;
@@ -121,6 +144,7 @@ impl Adapter {
             );
         }
         let counting = parts.uri.path() == "/v1/messages/count_tokens";
+        let listing = parts.uri.path() == "/v1/models";
         match (parts.method.clone(), parts.uri.path()) {
             (Method::HEAD, "/api/hello") => {
                 *operation = "hello";
@@ -134,13 +158,7 @@ impl Adapter {
             (Method::POST, "/v1/messages/count_tokens") => {
                 *operation = "count_tokens";
             }
-            (Method::GET, "/v1/models") => {
-                *operation = "models";
-                return error(
-                    StatusCode::NOT_IMPLEMENTED,
-                    "this Desktop integration uses explicit models",
-                );
-            }
+            (Method::GET, "/v1/models") => *operation = "models",
             (Method::POST, "/v1/messages") => *operation = "messages",
             (_, "/v1/messages" | "/v1/messages/count_tokens" | "/v1/models" | "/api/hello") => {
                 return error(
@@ -161,6 +179,9 @@ impl Adapter {
                 "Desktop or its managed runtime changed; restart the adapter",
             );
         }
+        if listing {
+            return self.relay(parts, None, started, operation).await;
+        }
         if parts
             .headers
             .get(CONTENT_LENGTH)
@@ -180,7 +201,11 @@ impl Adapter {
                 }
                 Err(_) => return error(StatusCode::REQUEST_TIMEOUT, "request body stalled"),
             };
-        let value: Value = match serde_json::from_slice(&bytes) {
+        let decoded = match crate::data_plane::attempt::decode_body(&parts.headers, &bytes) {
+            Ok(decoded) => decoded,
+            Err(why) => return error(StatusCode::BAD_REQUEST, &why),
+        };
+        let value: Value = match serde_json::from_slice(&decoded) {
             Ok(value) => value,
             Err(_) => {
                 return error(
@@ -189,12 +214,12 @@ impl Adapter {
                 );
             }
         };
-        if value["model"] != MODEL {
+        let Some(model) = value["model"].as_str() else {
             return error(
                 StatusCode::BAD_REQUEST,
-                "only the configured Sonnet 4.6 model has been checked",
+                "Messages requests must name a model",
             );
-        }
+        };
         let engine = parts
             .headers
             .get("x-claude-code-session-id")
@@ -215,6 +240,7 @@ impl Adapter {
                 return probe::run(
                     &self.app,
                     &self.integration,
+                    model,
                     &self.installation.directory,
                     &self.probes,
                 )
@@ -243,6 +269,17 @@ impl Adapter {
                     .map(str::to_owned),
             );
         }
+        self.relay(parts, Some(bytes), started, operation).await
+    }
+
+    /// Sends the request to the enrolled pool as this client, with the selected account.
+    async fn relay(
+        &self,
+        parts: http::request::Parts,
+        body: Option<Bytes>,
+        started: Instant,
+        operation: &'static str,
+    ) -> Response<ResponseBody> {
         let secret = match client::read_secret(&self.installation) {
             Ok(secret) if secret.starts_with(Role::ClientSecret.prefix()) => secret,
             _ => {
@@ -284,10 +321,14 @@ impl Adapter {
             .iter()
             .map(|(name, value)| (name.clone(), value.clone()))
             .collect();
-        let path = parts.uri.path_and_query().expect("Messages URI").as_str();
+        let path = parts
+            .uri
+            .path_and_query()
+            .expect("origin-form URI")
+            .as_str();
         let response = match self
             .http
-            .send(Method::POST, path, Some(&secret), Some(bytes), &headers)
+            .send(parts.method.clone(), path, Some(&secret), body, &headers)
             .await
         {
             Ok(response) => response,
@@ -315,7 +356,7 @@ impl Adapter {
             usage,
             None,
             Box::new(move |end| {
-                if counting {
+                if operation != "inference" {
                     return;
                 }
                 let completion = match end {
@@ -366,7 +407,7 @@ fn simple_user(value: &Value) -> bool {
 
 fn startup(value: &Value) -> bool {
     value.as_object().is_some_and(|m| m.len() == 3)
-        && value["model"] == MODEL
+        && value["model"].is_string()
         && value["max_tokens"] == 1
         && simple_user(value)
         && value["messages"][0]["content"] == "."
@@ -374,7 +415,7 @@ fn startup(value: &Value) -> bool {
 
 fn title(value: &Value) -> bool {
     value.as_object().is_some_and(|m| m.len() == 4)
-        && value["model"] == MODEL
+        && value["model"].is_string()
         && value["max_tokens"] == 200
         && value["system"] == TITLE_SYSTEM
         && simple_user(value)
@@ -386,10 +427,10 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn auxiliary_shapes_are_exact() {
-        let probe =
-            json!({"model": MODEL, "max_tokens": 1, "messages": [{"role":"user", "content":"."}]});
-        let title_request = json!({"model": MODEL, "max_tokens": 200, "system": TITLE_SYSTEM,
+    fn auxiliary_shapes_are_exact_for_any_model() {
+        let probe = json!({"model": "claude-haiku-5-5", "max_tokens": 1,
+            "messages": [{"role":"user", "content":"."}]});
+        let title_request = json!({"model": "claude-opus-5-5", "max_tokens": 200, "system": TITLE_SYSTEM,
             "messages": [{"role":"user", "content":"Generate a title"}]});
         assert!(startup(&probe));
         assert!(title(&title_request));
@@ -400,7 +441,7 @@ mod tests {
                 assert!(!startup(&changed) && !title(&changed));
             }
             let mut changed = value;
-            changed["model"] = json!("unverified-model");
+            changed["model"] = json!(["claude-sonnet-4-6"]);
             assert!(!startup(&changed) && !title(&changed));
         }
     }

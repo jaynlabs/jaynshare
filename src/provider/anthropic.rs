@@ -48,8 +48,10 @@ pub const UPGRADE_REFUSAL: http::StatusCode = http::StatusCode::NOT_IMPLEMENTED;
 
 /// The telemetry path and anything under it.
 pub fn is_telemetry(path: &str) -> bool {
-    path.strip_prefix(TELEMETRY_PATH)
-        .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+    [TELEMETRY_PATH, "/api/eval"].iter().any(|prefix| {
+        path.strip_prefix(prefix)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+    })
 }
 /// account-bound paths on the API host, as observed; the list is
 /// open and grows with the live gates. `<org>` is one path segment.
@@ -64,6 +66,13 @@ const ACCOUNT_BOUND_PATHS: &[&str] = &[
 
 /// whether `path` (no query) answers for one account.
 pub fn is_account_bound(path: &str) -> bool {
+    if path.contains('%')
+        || path.split('/').any(|part| matches!(part, "." | ".."))
+        || path.starts_with("/api/web/")
+        || (path.starts_with("/v1/messages/") && path != COUNT_TOKENS_PATH)
+    {
+        return true;
+    }
     let segments: Vec<&str> = path.split('/').collect();
     ACCOUNT_BOUND_PATHS.iter().any(|form| {
         let form: Vec<&str> = form.split('/').collect();
@@ -220,13 +229,69 @@ fn append_beta(headers: &mut HeaderMap, beta: &str) {
     headers.insert(ANTHROPIC_BETA, header_value(&joined.join(",")));
 }
 
-/// The account-UUID rewrite applies to an OAuth account only.
-pub fn rewrite_body(body: Bytes, path: &str, account: &Account) -> Bytes {
+pub fn rewrite_body(body: Bytes, path: &str, account: &Account) -> Result<Bytes, String> {
     let account_uuid = match account.credential {
         Credential::OAuth(_) => account.profile.account_uuid,
         Credential::ApiKey(_) => None,
     };
-    rewrite(body, path, account_uuid)
+    if path != MESSAGES_PATH && path != COUNT_TOKENS_PATH {
+        return Ok(rewrite(body, path, account_uuid));
+    }
+    let mut top: Value = serde_json::from_slice(&body)
+        .map_err(|_| "Messages requests must contain a JSON object".to_string())?;
+    let top = top
+        .as_object_mut()
+        .ok_or("Messages requests must contain a JSON object")?;
+    // Token counting has no documented metadata field; absent identity needs no added field.
+    if path == COUNT_TOKENS_PATH && !top.contains_key("metadata") {
+        return Ok(rewrite(body, path, account_uuid));
+    }
+    let metadata = top
+        .entry("metadata")
+        .or_insert_with(|| serde_json::json!({}));
+    let metadata = metadata
+        .as_object_mut()
+        .ok_or("metadata must be an object")?;
+    let mut identity = match metadata.get("user_id") {
+        None => serde_json::Map::new(),
+        Some(Value::String(raw)) => serde_json::from_str::<Value>(raw)
+            .ok()
+            .and_then(|v| v.as_object().cloned())
+            .ok_or("metadata.user_id must be a JSON string containing an object")?,
+        _ => return Err("metadata.user_id must be a JSON string containing an object".into()),
+    };
+    for field in ["device_id", "account_uuid", "session_id"] {
+        if identity.get(field).is_some_and(|v| !v.is_string()) {
+            return Err(format!("metadata.user_id.{field} must be a string"));
+        }
+    }
+    for field in [
+        "email",
+        "user_email",
+        "organization_uuid",
+        "organization_id",
+        "account_id",
+    ] {
+        identity.remove(field);
+    }
+    identity.insert(
+        "device_id".into(),
+        Value::String(account.provider.machine_id(account.handle)),
+    );
+    identity.insert(
+        "account_uuid".into(),
+        Value::String(account_uuid.map(|id| id.to_string()).unwrap_or_default()),
+    );
+    metadata.insert(
+        "user_id".into(),
+        Value::String(Value::Object(identity).to_string()),
+    );
+    if let Some(Value::Array(messages)) = top.get_mut("messages") {
+        sanitize_tool_pairs(messages);
+    }
+    Ok(Bytes::from(
+        serde_json::to_vec(top).expect("JSON object serializes"),
+    ))
 }
 
 /// Checks and rewrites together. Returns the original bytes when nothing changed, so a

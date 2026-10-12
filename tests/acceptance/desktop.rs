@@ -18,8 +18,219 @@ mod macos {
     use crate::harness::*;
 
     const MODEL: &str = "claude-sonnet-4-6";
+    /// Desktop's connection test takes Haiku first from the discovered models.
+    const STARTUP_MODEL: &str = "claude-haiku-5-5";
     const TITLE_SYSTEM: &str =
         "You write short session titles. Reply with only the tagged fields the prompt asks for.";
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn egress_is_ready_before_runtime_provisioning_and_never_falls_back_directly() {
+        let _leak_sweep = crate::leaks::LeakGuard::default();
+        let mut instance = Instance::start_client("desktop-egress-provisioning").await;
+        instance.add_fsub();
+        let desktop = Desktop::new(&instance).await;
+        fs::remove_file(
+            desktop
+                .runtime
+                .ancestors()
+                .nth(4)
+                .unwrap()
+                .join(".verified"),
+        )
+        .unwrap();
+        let mut running = desktop.spawn(&["desktop", "--auto"]);
+        let gateway = desktop.ready(&mut running).await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while desktop.tools.calls("open").is_empty() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let opened = &desktop.tools.calls("open")[0];
+        assert_eq!(opened[0], "--env");
+        assert_eq!(
+            opened[1],
+            format!(
+                "NODE_EXTRA_CA_CERTS={}",
+                desktop.client.client_dir.join("ca.pem").display()
+            )
+        );
+        let profile = read(
+            &desktop
+                .profile
+                .join("configLibrary")
+                .join(format!("{}.json", gateway.id)),
+        );
+        assert_eq!(
+            profile["egressProxyUrl"],
+            format!("http://{}", gateway.addr)
+        );
+        assert!(!profile.to_string().contains(&desktop.client.client.secret));
+        let ca = desktop.client.client_dir.join("ca.pem");
+        for (host, path) in [
+            ("downloads.claude.ai", "/synthetic-catalog.sig"),
+            (
+                "api.anthropic.com",
+                "/api/web/domain_info?domain=example.test",
+            ),
+        ] {
+            let mut tunnel = crate::proxy::intercept(
+                gateway.addr,
+                &format!("{host}:443"),
+                None,
+                &ca,
+                crate::proxy::Offer::alpn(&["http/1.1"]),
+            )
+            .await
+            .unwrap();
+            instance
+                .upstream
+                .script([Reply::status(200, "synthetic unchanged public response")]);
+            let answer = tunnel
+                .send(
+                    Request::builder()
+                        .uri(path)
+                        .header("host", host)
+                        .header("cookie", "own-login")
+                        .body(Full::new(Bytes::new()))
+                        .unwrap(),
+                )
+                .await;
+            assert_eq!(answer.text(), "synthetic unchanged public response");
+            let seen = instance.upstream.last();
+            for header in ["authorization", "proxy-authorization", "cookie"] {
+                assert!(seen.header(header).is_none());
+            }
+        }
+        instance.stop();
+        let before = instance.upstream.calls();
+        let answer = send(
+            gateway.addr,
+            Request::builder()
+                .uri(format!(
+                    "http://{}/must-not-be-direct",
+                    instance.upstream.addr
+                ))
+                .body(Full::new(Bytes::new()))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(answer.status, StatusCode::BAD_GATEWAY);
+        assert_eq!(instance.upstream.calls(), before);
+        running.stop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn untrusted_interception_ca_refuses_before_desktop_profile_setup() {
+        let _leak_sweep = crate::leaks::LeakGuard::default();
+        let instance = Instance::start_client("desktop-egress-untrusted").await;
+        instance.add_fsub();
+        let desktop = Desktop::new(&instance).await;
+        fs::write(desktop.tools.dir.join("security/0000/exit"), "1").unwrap();
+        let (code, _, error) = desktop.cli(&["desktop", "--auto"]);
+        assert_eq!(code, 1);
+        assert!(error.contains("trust-ca add"));
+        assert!(!desktop.record().exists());
+        assert!(!desktop.profile.join("claude_desktop_config.json").exists());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn desktop_refreshes_staged_roots_and_requires_trust_for_each() {
+        let _leak_sweep = crate::leaks::LeakGuard::default();
+        let mut instance = Instance::start_client("desktop-egress-staged-ca").await;
+        instance.add_fsub();
+        let desktop = Desktop::new(&instance).await;
+        let ca = desktop.client.client_dir.join("ca.pem");
+        assert_eq!(
+            fs::read_to_string(&ca)
+                .unwrap()
+                .matches("BEGIN CERTIFICATE")
+                .count(),
+            1
+        );
+        assert_eq!(
+            instance.cli_json(&["ca", "rotate", "--yes"], None)["ok"],
+            true
+        );
+        instance.restart();
+        fs::write(desktop.tools.dir.join("security/0000/times"), "1").unwrap();
+        desktop.tools.rule("security", &[]).exit(1);
+        let (code, _, error) = desktop.cli(&["desktop", "--auto"]);
+        assert_eq!(code, 1);
+        assert!(error.contains("staged CA"), "{error}");
+        assert_eq!(
+            fs::read_to_string(&ca)
+                .unwrap()
+                .matches("BEGIN CERTIFICATE")
+                .count(),
+            2
+        );
+        let calls = desktop.tools.calls("security");
+        assert_eq!(calls.len(), 2);
+        for call in calls {
+            assert_eq!(&call[..4], ["verify-cert", "-L", "-l", "-c"]);
+            assert!(
+                !Path::new(&call[4]).exists(),
+                "temporary CA check is removed"
+            );
+        }
+        assert!(!desktop.record().exists());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn proxy_requests_never_forward_the_local_gateway_bearer() {
+        let _leak_sweep = crate::leaks::LeakGuard::default();
+        let instance = Instance::start_client("desktop-egress-gateway-bearer").await;
+        instance.add_fsub();
+        let desktop = Desktop::new(&instance).await;
+        let mut running = desktop.spawn(&["desktop", "--auto"]);
+        let gateway = desktop.ready(&mut running).await;
+        let destination = FakeControl::answering(200, json!({"synthetic": true}));
+        let uri = format!("http://{}/synthetic-destination", destination.addr);
+        for authorization in [
+            vec![format!("Bearer {}", gateway.key)],
+            vec!["Bearer unrelated".into(), format!("Bearer {}", gateway.key)],
+            vec![format!("Bearer {}", gateway.key), "Bearer unrelated".into()],
+            vec![format!("bearer {}", gateway.key)],
+            vec![format!("bEaReR\t {}\t", gateway.key)],
+            vec![format!("Bearer unrelated, Bearer {},", gateway.key)],
+        ] {
+            for (method, target) in [
+                (Method::GET, uri.as_str()),
+                (Method::CONNECT, "example.test:443"),
+            ] {
+                let mut request = Request::builder()
+                    .method(method)
+                    .uri(target)
+                    .body(Full::new(Bytes::new()))
+                    .unwrap();
+                for value in &authorization {
+                    request
+                        .headers_mut()
+                        .append("authorization", value.parse().unwrap());
+                }
+                assert!(send(gateway.addr, request).await.status.is_client_error());
+                assert!(destination.seen().is_empty());
+            }
+        }
+        let answer = send(
+            gateway.addr,
+            Request::builder()
+                .uri(uri)
+                .header("authorization", "Bearer destination-own-login")
+                .body(Full::new(Bytes::new()))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(answer.status, StatusCode::OK);
+        let requests = destination.seen();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].contains("authorization: Bearer destination-own-login"));
+        assert!(!requests[0].contains(&gateway.key));
+        assert!(!requests[0].contains(&desktop.client.client.secret));
+        running.stop().await;
+    }
 
     struct Desktop {
         client: ClientHome,
@@ -46,7 +257,8 @@ mod macos {
             fs::create_dir_all(bundle.join("Resources")).unwrap();
             fs::write(bundle.join("Info.plist"), "<?xml version=\"1.0\"?><plist version=\"1.0\"><dict><key>CFBundleShortVersionString</key><string>2.31226.0</string></dict></plist>").unwrap();
             fs::write(bundle.join("Resources/app.asar"), "fixture app archive").unwrap();
-            let tools = FakeTools::new(&client.root, &["open", "pgrep", "claude"]);
+            let tools = FakeTools::new(&client.root, &["open", "pgrep", "claude", "security"]);
+            tools.rule("security", &[]).exit(0);
             tools.rule("pgrep", &[]).exit(1);
             tools
                 .rule("claude", &["--version"])
@@ -100,10 +312,10 @@ mod macos {
             self.client.client_dir.join("desktop.json")
         }
 
-        /// Whether the fake `pgrep` finds Desktop running; `new` adds its rule first.
+        /// Whether the fake `pgrep` finds Desktop running.
         fn app_running(&self, running: bool) {
             fs::write(
-                self.tools.dir.join("pgrep/0000/exit"),
+                self.tools.dir.join("pgrep/0001/exit"),
                 if running { "0" } else { "1" },
             )
             .unwrap();
@@ -236,7 +448,10 @@ mod macos {
             request
         }
         fn engine(&self, session: &str) -> Request<Full<Bytes>> {
-            let mut body = prompt_for(MODEL);
+            self.engine_with(MODEL, session)
+        }
+        fn engine_with(&self, model: &str, session: &str) -> Request<Full<Bytes>> {
+            let mut body = prompt_for(model);
             body["metadata"] = json!({"user_id": json!({"device_id":"desktop-fixture", "account_uuid":"", "session_id":session}).to_string()});
             self.authorize(with(
                 in_session(messages(body), session),
@@ -248,7 +463,7 @@ mod macos {
         }
         fn startup(&self) -> Request<Full<Bytes>> {
             self.authorize(messages(
-                json!({"model":MODEL, "max_tokens":1, "messages":[{"role":"user", "content":"."}]}),
+                json!({"model":STARTUP_MODEL, "max_tokens":1, "messages":[{"role":"user", "content":"."}]}),
             ))
         }
     }
@@ -261,20 +476,40 @@ mod macos {
         let desktop = Desktop::new(&instance).await;
         let reply = Arc::new(Mutex::new(String::new()));
         let scripted = reply.clone();
-        let remote = FakeControl::start(move |_| scripted.lock().unwrap().clone());
+        let ca = send(
+            instance.addr,
+            Request::builder()
+                .uri("/control/v1/ca")
+                .body(Full::new(Bytes::new()))
+                .unwrap(),
+        )
+        .await
+        .text();
+        let remote = FakeControl::start(move |request| {
+            if request.starts_with("GET /control/v1/ca ") {
+                http_reply(200, "application/json", &ca)
+            } else {
+                scripted.lock().unwrap().clone()
+            }
+        });
         desktop
             .client
             .set("base_url", &format!("{:?}", remote.origin()));
         let mut running = desktop.spawn(&["desktop", "--auto"]);
         let gateway = desktop.ready(&mut running).await;
-        for status in [200, 401, 429, 503] {
+        for (status, model) in [
+            (200, MODEL),
+            (401, "claude-opus-5-5"),
+            (429, "claude-haiku-5-5"),
+            (503, "claude-fable-5-1"),
+        ] {
             let body = "event: ping\ndata: {}\n\nevent: message_stop\ndata: {}\n\n";
             *reply.lock().unwrap() = format!(
                 "HTTP/1.1 {status} Test\r\ncontent-type: text/event-stream\r\ncontent-encoding: identity\r\nretry-after: 7\r\nx-should-retry: false\r\nanthropic-ratelimit-unified-status: allowed\r\nx-repeat: one\r\nx-repeat: two\r\nconnection: close, x-hop\r\nx-hop: hidden\r\ncontent-length: {}\r\n\r\n{body}",
                 body.len()
             );
             let request = with(
-                gateway.engine("relay-session"),
+                gateway.engine_with(model, "relay-session"),
                 &[
                     ("cookie", "owner-cookie"),
                     ("x-api-key", "owner-key"),
@@ -367,20 +602,48 @@ mod macos {
             assert_eq!(answer.status, StatusCode::NOT_IMPLEMENTED);
             assert_eq!(answer.header("x-should-retry"), Some("false"));
         }
+        let mut unnamed = prompt_for(MODEL);
+        unnamed.as_object_mut().unwrap().remove("model");
+        assert_eq!(
+            send(gateway.addr, gateway.authorize(messages(unnamed)))
+                .await
+                .status,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(remote.seen().len(), count);
+        // Desktop's main process lists models itself, without the engine's identity.
+        let catalogue = json!({"data":[{"type":"model", "id":"claude-opus-5-5"}],
+            "has_more":true, "first_id":"claude-opus-5-5", "last_id":"claude-opus-5-5"})
+        .to_string();
+        *reply.lock().unwrap() = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\nconnection: close\r\ncontent-length: {}\r\n\r\n{catalogue}",
+            catalogue.len()
+        );
         let models = Request::builder()
-            .uri("/v1/models")
+            .uri("/v1/models?limit=1000&after_id=claude-sonnet-5-5")
+            .header("anthropic-version", "2023-06-01")
+            .header("cookie", "owner-cookie")
             .body(Full::new(Bytes::new()))
             .unwrap();
         let answer = send(gateway.addr, gateway.authorize(models)).await;
-        assert_eq!(answer.status, StatusCode::NOT_IMPLEMENTED);
-        assert_eq!(answer.header("x-should-retry"), Some("false"));
-        assert_eq!(remote.seen().len(), count);
+        assert_eq!(answer.status, StatusCode::OK);
+        assert_eq!(answer.text(), catalogue);
+        let seen = remote.seen().pop().unwrap();
+        assert!(seen.starts_with("GET /v1/models?limit=1000&after_id=claude-sonnet-5-5 "));
+        let headers = seen.to_lowercase();
+        assert!(headers.contains(&format!(
+            "authorization: bearer {}",
+            desktop.client.client.secret.to_lowercase()
+        )));
+        assert!(headers.contains("anthropic-version: 2023-06-01"));
+        assert!(!seen.contains(&gateway.key) && !seen.contains("owner-cookie"));
         running.stop().await;
         let logs = desktop.logs();
-        for operation in ["count_tokens", "models", "unsupported_direct"] {
+        for operation in ["count_tokens", "unsupported_direct"] {
             assert!(logs.contains(&format!("operation={operation} status=501")));
         }
         assert!(logs.contains("operation=inference status=200"));
+        assert!(logs.contains("operation=models status=200"));
         for private in [
             "owner-cookie",
             "say hi in three words",
@@ -393,6 +656,59 @@ mod macos {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn compressed_desktop_and_cli_requests_share_the_account_machine_identity() {
+        let _leak_sweep = crate::leaks::LeakGuard::default();
+        let instance = Instance::start_client("desktop-compressed-identity").await;
+        instance.add_fsub();
+        let desktop = Desktop::new(&instance).await;
+        let mut running = desktop.spawn(&["desktop", "--auto"]);
+        let gateway = desktop.ready(&mut running).await;
+        assert_eq!(
+            send(instance.addr, messages(prompt_for(MODEL)))
+                .await
+                .status,
+            StatusCode::OK
+        );
+        let cli: Value = serde_json::from_str(
+            instance.upstream.last().json()["metadata"]["user_id"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
+        let request = gateway.engine("compressed-desktop-session");
+        let (mut parts, body) = request.into_parts();
+        let bytes = body.collect().await.unwrap().to_bytes();
+        use std::io::{Read as _, Write as _};
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(&bytes).unwrap();
+        parts
+            .headers
+            .insert("content-encoding", "gzip".parse().unwrap());
+        let answer = send(
+            gateway.addr,
+            Request::from_parts(parts, Full::new(Bytes::from(encoder.finish().unwrap()))),
+        )
+        .await;
+        assert_eq!(answer.status, StatusCode::OK);
+        let seen = instance.upstream.last();
+        assert_eq!(seen.header("content-encoding"), Some("gzip"));
+        let mut decoded = Vec::new();
+        flate2::read::GzDecoder::new(&seen.body[..])
+            .read_to_end(&mut decoded)
+            .unwrap();
+        let body: Value = serde_json::from_slice(&decoded).unwrap();
+        let identity: Value =
+            serde_json::from_str(body["metadata"]["user_id"].as_str().unwrap()).unwrap();
+        assert_eq!(identity["device_id"], cli["device_id"]);
+        assert_eq!(identity["session_id"], "compressed-desktop-session");
+        assert_eq!(
+            body["messages"],
+            serde_json::from_slice::<Value>(&bytes).unwrap()["messages"]
+        );
+        running.stop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn managed_token_counts_relay_through_the_pool() {
         let _leak_sweep = crate::leaks::LeakGuard::default();
         let instance = Instance::start_client("desktop-count-tokens").await;
@@ -400,7 +716,22 @@ mod macos {
         let desktop = Desktop::new(&instance).await;
         let reply = Arc::new(Mutex::new(String::new()));
         let scripted = reply.clone();
-        let remote = FakeControl::start(move |_| scripted.lock().unwrap().clone());
+        let ca = send(
+            instance.addr,
+            Request::builder()
+                .uri("/control/v1/ca")
+                .body(Full::new(Bytes::new()))
+                .unwrap(),
+        )
+        .await
+        .text();
+        let remote = FakeControl::start(move |request| {
+            if request.starts_with("GET /control/v1/ca ") {
+                http_reply(200, "application/json", &ca)
+            } else {
+                scripted.lock().unwrap().clone()
+            }
+        });
         desktop
             .client
             .set("base_url", &format!("{:?}", remote.origin()));
@@ -479,6 +810,7 @@ mod macos {
         let answer = send(gateway.addr, gateway.startup()).await;
         assert_eq!(answer.status, StatusCode::OK);
         assert_eq!(answer.json()["content"][0]["text"], "OK");
+        assert_eq!(answer.json()["model"], STARTUP_MODEL);
         assert_eq!(answer.json()["usage"]["input_tokens"], 17);
         let env = fs::read_to_string(desktop.client.root.join("probe-env")).unwrap();
         assert!(env.contains(&format!("ANTHROPIC_AUTH_TOKEN={}", gateway.key)));
@@ -493,6 +825,7 @@ mod macos {
             assert!(!env.contains(value));
         }
         let argv = fs::read_to_string(desktop.client.root.join("probe-argv")).unwrap();
+        assert!(argv.contains(&format!("\n--model={STARTUP_MODEL}\n")));
         for arg in [
             "--tools\n\n",
             "--setting-sources\n\n",
@@ -502,7 +835,7 @@ mod macos {
             assert!(argv.contains(arg));
         }
         let title = gateway.authorize(messages(
-            json!({"model":MODEL, "max_tokens":200, "system":TITLE_SYSTEM,
+            json!({"model":"claude-opus-5-5", "max_tokens":200, "system":TITLE_SYSTEM,
             "messages":[{"role":"user", "content":"private title input"}]}),
         ));
         let began = Instant::now();
@@ -632,6 +965,8 @@ mod macos {
             .join(format!("{}.json", gateway.id));
         let mut entry = read(&gateway_path);
         assert_eq!(entry["disableAutoUpdates"], true);
+        assert_eq!(entry["modelDiscoveryEnabled"], true);
+        assert!(entry.get("inferenceModels").is_none());
         entry["uiHint"] = json!("user preference");
         write_private(&gateway_path, &entry.to_string());
         assert_ne!(gateway.key, desktop.client.client.secret);
@@ -650,6 +985,8 @@ mod macos {
         // Upgrade the first RC's entry without replacing its credential or user preferences.
         let mut legacy = entry.clone();
         legacy.as_object_mut().unwrap().remove("disableAutoUpdates");
+        legacy["modelDiscoveryEnabled"] = json!(false);
+        legacy["inferenceModels"] = json!([MODEL]);
         write_private(&gateway_path, &legacy.to_string());
         // Simulate interruption after the record and entry, before selection commits.
         write_private(
@@ -681,6 +1018,8 @@ mod macos {
             .unwrap()
             .push(json!({"id":new_id,"name":"User's new Gateway"}));
         write_private(&meta_path, &meta.to_string());
+        // Restoring an entry the first RC left removes its owned model list too.
+        write_private(&gateway_path, &legacy.to_string());
         assert_eq!(desktop.cli(&["desktop", "--restore"]).0, 0);
         assert_eq!(
             read(&config_path),
@@ -726,8 +1065,12 @@ mod macos {
             .unwrap()
             .join(".verified");
         fs::remove_file(&marker).unwrap();
-        assert_eq!(desktop.cli(&["desktop", "--auto"]).0, 1);
-        assert!(!desktop.record().exists());
+        let mut provisioning = desktop.spawn(&["desktop", "--auto"]);
+        let gateway = desktop.ready(&mut provisioning).await;
+        let answer = send(gateway.addr, gateway.authorize(messages(json!({"model": STARTUP_MODEL, "max_tokens": 1, "messages": [{"role":"user","content":"."}]})))).await;
+        assert_eq!(answer.status, StatusCode::SERVICE_UNAVAILABLE);
+        provisioning.stop().await;
+        assert_eq!(desktop.cli(&["desktop", "--restore"]).0, 0);
         fs::write(marker, "verified fixture").unwrap();
         let meta_path = desktop.profile.join("configLibrary/_meta.json");
         write_private(
@@ -987,16 +1330,12 @@ mod macos {
             "server_identity = \"sha256/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"\n",
         );
         write_private(&desktop.client.client_dir.join("client.toml"), &text);
-        let mut running = desktop.spawn(&["desktop", "--auto"]);
-        let gateway = desktop.ready(&mut running).await;
-        assert_eq!(
-            send(gateway.addr, gateway.engine("wrong-remote-pin"))
-                .await
-                .status,
-            StatusCode::BAD_GATEWAY
-        );
+        let before = read(&desktop.record());
+        let (code, _, error) = desktop.cli(&["desktop", "--auto"]);
+        assert_eq!(code, 1);
+        assert!(error.contains("not the pinned"), "{error}");
+        assert_eq!(read(&desktop.record()), before);
         assert_eq!(instance.upstream.calls(), calls);
-        running.stop().await;
         fs::write(
             desktop.client.client_dir.join("client.toml"),
             text.replace(
@@ -1012,15 +1351,10 @@ mod macos {
         desktop
             .client
             .set("base_url", &format!("\"http://{unavailable}\""));
-        let mut running = desktop.spawn(&["desktop", "--auto"]);
-        let gateway = desktop.ready(&mut running).await;
-        assert_eq!(
-            send(gateway.addr, gateway.engine("pool-outage"))
-                .await
-                .status,
-            StatusCode::BAD_GATEWAY
-        );
-        running.stop().await;
+        let (code, _, error) = desktop.cli(&["desktop", "--auto"]);
+        assert_eq!(code, 1);
+        assert!(error.contains("client error"), "{error}");
+        assert_eq!(read(&desktop.record()), before);
     }
 
     #[tokio::test(flavor = "multi_thread")]

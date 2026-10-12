@@ -346,7 +346,8 @@ async fn fresh_state_directory_yields_the_three_trust_files() {
         [
             "api.anthropic.com",
             "chatgpt.com",
-            "probe.jaynshare.invalid"
+            "probe.jaynshare.invalid",
+            "downloads.claude.ai"
         ],
         "the leaf's SANs are exactly the intercept set"
     );

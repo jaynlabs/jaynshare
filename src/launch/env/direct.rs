@@ -21,4 +21,9 @@ pub fn apply(plan: &mut EnvPlan, tool: &Tool) {
     if let Some(deadline) = &tool.deadline {
         plan.unset(deadline.variable);
     }
+    if tool.executable == "claude" {
+        for name in super::CLAUDE_TELEMETRY_VARIABLES {
+            plan.unset(name);
+        }
+    }
 }

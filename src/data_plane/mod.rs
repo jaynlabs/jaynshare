@@ -2,6 +2,7 @@
 //! run the exchange.
 
 pub mod attempt;
+pub mod auxiliary;
 pub mod connect;
 pub mod egress;
 pub mod envelope;
@@ -196,6 +197,9 @@ async fn dispatch(
             error_type::PROXY,
             "the proxy is shutting down",
         ));
+    }
+    if auxiliary::supports(crate::provider::anthropic::API_HOST, request.uri().path()) {
+        return Ok(auxiliary::run(server, crate::provider::anthropic::API_HOST, request).await);
     }
     exchange::run(server, exchange::Entry::base_url(principal), peer, request).await
 }

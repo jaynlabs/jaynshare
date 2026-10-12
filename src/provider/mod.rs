@@ -11,6 +11,8 @@ use bytes::Bytes;
 use http::{HeaderMap, HeaderName, Method, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
+use uuid::Uuid;
 
 use crate::client::percent_encode;
 use crate::pool::quota::Observation;
@@ -184,10 +186,27 @@ impl Provider {
 
     /// The body as the pooled account must send it; unchanged bytes when
     /// nothing needs rewriting.
-    pub fn rewrite_body(self, body: Bytes, path: &str, account: &Account) -> Bytes {
+    pub fn rewrite_body(self, body: Bytes, path: &str, account: &Account) -> Result<Bytes, String> {
         match self {
             Provider::Anthropic => anthropic::rewrite_body(body, path, account),
-            Provider::Codex => body,
+            Provider::Codex => codex::rewrite_body(body, account),
+        }
+    }
+
+    pub fn machine_id(self, handle: Uuid) -> String {
+        let mut hash = Sha256::new();
+        hash.update(b"jaynshare/machine/v1/");
+        hash.update(self.as_str().as_bytes());
+        hash.update(handle.as_bytes());
+        let digest = hash.finalize();
+        match self {
+            Provider::Anthropic => format!("{digest:x}"),
+            Provider::Codex => {
+                let mut bytes: [u8; 16] = digest[..16].try_into().expect("SHA-256 prefix");
+                bytes[6] = (bytes[6] & 0x0f) | 0x40;
+                bytes[8] = (bytes[8] & 0x3f) | 0x80;
+                Uuid::from_bytes(bytes).to_string()
+            }
         }
     }
 

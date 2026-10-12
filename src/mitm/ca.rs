@@ -39,7 +39,12 @@ pub const NEXT_FILE: &str = "mitm-ca-next.pem";
 
 /// The whole intercept set, one port; the leaf carries every name and the
 /// listener intercepts exactly these.
-pub const INTERCEPT_NAMES: [&str; 3] = [anthropic::API_HOST, codex::API_HOST, PROBE_HOST];
+pub const INTERCEPT_NAMES: [&str; 4] = [
+    anthropic::API_HOST,
+    codex::API_HOST,
+    PROBE_HOST,
+    crate::data_plane::auxiliary::DOWNLOAD_HOST,
+];
 
 /// Both certificates, valid from one hour before generation until
 /// 730 days after it. Not configurable.
@@ -601,11 +606,11 @@ mod tests {
     }
 
     #[test]
-    fn every_intercepted_name_but_the_probe_s_is_a_provider_s() {
+    fn every_intercepted_name_is_a_provider_probe_or_public_download() {
         for name in INTERCEPT_NAMES {
             assert_eq!(
                 crate::provider::Provider::for_intercepted_host(name).is_some(),
-                name != PROBE_HOST,
+                name != PROBE_HOST && name != crate::data_plane::auxiliary::DOWNLOAD_HOST,
                 "{name}"
             );
         }

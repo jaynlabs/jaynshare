@@ -2,6 +2,7 @@
 
 mod app;
 mod config;
+mod egress;
 mod monitor;
 mod probe;
 mod transport;
@@ -45,13 +46,16 @@ pub async fn restore() -> Result<(), String> {
 }
 
 pub async fn run(
-    installation: ClientInstallation,
+    mut installation: ClientInstallation,
     selector: Option<String>,
     quiet: bool,
     log: bool,
 ) -> Result<(), String> {
     let output = Output::new(quiet, log);
     let app = app::App::resolve().await?;
+    let secret = crate::client::read_secret(&installation).map_err(|(_, why)| why)?;
+    crate::client_ca::refresh(&mut installation, &secret).await?;
+    egress::check_trust(&installation).await?;
     let lock = match config::lock(&installation.directory) {
         Ok(lock) => lock,
         Err(why) => {
@@ -76,7 +80,7 @@ pub async fn run(
                 {
                     return Err("the active Desktop adapter did not confirm its identity".into());
                 }
-                app.open().await?;
+                app.open(&installation.directory.join("ca.pem")).await?;
                 if output != Output::Quiet {
                     eprintln!(
                         "reused the running Desktop adapter; its original foreground command owns the connection"
@@ -153,7 +157,8 @@ fn same_enrollment(record: &Integration, installation: &ClientInstallation) -> b
 async fn serve(adapter: Arc<transport::Adapter>, listener: TcpListener) -> Result<(), String> {
     let mut connections = JoinSet::new();
     let mut compatibility = tokio::time::interval(Duration::from_secs(2));
-    let open = adapter.app.open();
+    let ca = adapter.installation.directory.join("ca.pem");
+    let open = adapter.app.open(&ca);
     tokio::pin!(open);
     let mut opened = false;
     let interrupt = tokio::signal::ctrl_c();
@@ -189,7 +194,7 @@ async fn serve(adapter: Arc<transport::Adapter>, listener: TcpListener) -> Resul
                     let _ = hyper::server::conn::http1::Builder::new()
                         .timer(hyper_util::rt::TokioTimer::new())
                         .header_read_timeout(Duration::from_secs(10))
-                        .serve_connection(TokioIo::new(stream), service).await;
+                        .serve_connection(TokioIo::new(stream), service).with_upgrades().await;
                 });
             }
             _ = connections.join_next(), if !connections.is_empty() => {}

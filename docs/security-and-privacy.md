@@ -138,10 +138,25 @@ when the server offers no kit.
   prompts, outputs and any secret present in a message: treat them as highly
   sensitive. Capture cannot run unnoticed: every enrolled client's status shows
   that it is on, and the audit log keeps running.
-- **Telemetry:** `data_plane.telemetry_policy = "block"` stops Claude Code's
-  event-logging and Codex's analytics requests at the server; the default,
-  `forward`, relays them. This is not a content filter and says nothing about
-  what the provider receives in ordinary model requests.
+- **Telemetry:** the server blocks Claude event logging, GrowthBook evaluation
+  and Codex analytics. The effective `data_plane.telemetry_policy` is always
+  `block`; legacy `forward` configurations remain readable but cannot enable
+  forwarding. Pooled launchers disable product telemetry, evaluation and error
+  reporting where supported. The proxy also refuses the known Datadog log and
+  Codex built-in metrics hosts. Custom OpenTelemetry collectors are outside
+  this list. Ordinary model context is still sent to the provider.
+- **Machine identity:** each persisted pool-account handle derives a stable
+  provider-specific machine ID. Claude Messages metadata and Codex installation
+  headers and turn metadata use the selected account's ID on every attempt.
+  Restart, rename, refresh and replacement of a recognized account's credential
+  retain it. Recreating the account or importing it on another server changes
+  it; migrate the persisted state to retain identity. Cookies, client IP headers,
+  known custom user identity headers and optional tracing are stripped.
+  Codex turn and client metadata also drop optional workspace paths and Git
+  remotes, plus known email, username, user, account, organization and device fields.
+  Conversation IDs, tool references, signed tokens, opaque reasoning, platform
+  fields and model context remain intact. This does not hide concurrency or
+  guarantee that providers cannot correlate traffic.
 
 Jaynshare provides no per-client retention controls, no encryption of request
 bodies from the operator, and no formal security certification. No independent
@@ -153,10 +168,19 @@ The pool's CA reaches clients over the pinned channel, the next one too while
 a rotation is staged. It is handed only to the process that `jaynshare claude`
 or `jaynshare codex` launches, through `NODE_EXTRA_CA_CERTS` or
 `CODEX_CA_CERTIFICATE`. It enters the operating system's trust store only if
-the engineer runs `jaynshare trust-ca add`, which always asks first. The server
-terminates TLS only for `api.anthropic.com`, `chatgpt.com` and its own
-credential-free probe host; any other `CONNECT` target is relayed as an opaque
-tunnel, and a target that points back at the server itself is refused. On
+the engineer runs `jaynshare trust-ca add`, which always asks first. Desktop
+requires macOS trust for both current and staged roots before profile setup;
+`trust-ca add` installs only the current root. Desktop's launch also supplies
+the CA bundle to its engine through `NODE_EXTRA_CA_CERTS`.
+Desktop's egress relay refuses its local Gateway bearer in every Authorization
+value, including duplicate headers and alternate casing; destination credentials
+continue through the proxy.
+The server terminates TLS for `api.anthropic.com`, `chatgpt.com`, public downloads
+at `downloads.claude.ai` and its own credential-free probe host. Downloads and
+the supported Claude WebFetch domain-check paths use anonymous routes with
+credentials and identifying headers removed. Other `CONNECT` targets are
+opaque tunnels, except known product telemetry hosts and targets that point
+back at the server itself, which are refused. On
 `chatgpt.com`, only Codex's own paths and the read of the account's usage are
 forwarded with a pooled account; the server refuses the rest of the ChatGPT
 account, or answers it itself.

@@ -10,7 +10,6 @@ use serde_json::{Value, json};
 use crate::client::ClientInstallation;
 use crate::state;
 
-pub const MODEL: &str = "claude-sonnet-4-6";
 const RECORD: &str = "desktop.json";
 
 pub fn profile() -> PathBuf {
@@ -107,9 +106,10 @@ impl Integration {
             "inferenceProvider": "gateway", "inferenceCredentialKind": "static",
             "inferenceGatewayBaseUrl": self.origin, "inferenceGatewayApiKey": self.key,
             "inferenceGatewayAuthScheme": "bearer", "chatTabEnabled": true,
-            "modelDiscoveryEnabled": false, "inferenceModels": [MODEL],
+            "modelDiscoveryEnabled": true,
             "disableEssentialTelemetry": true, "disableNonessentialTelemetry": true,
             "disableAutoUpdates": true,
+            "egressProxyUrl": self.origin,
         })
     }
 
@@ -124,11 +124,16 @@ impl Integration {
     }
 
     fn gateway_matches(&self, current: &Value) -> bool {
-        self.gateway()
+        !current
             .as_object()
             .expect("Gateway object")
-            .iter()
-            .all(|(field, installed)| current.get(field) == Some(installed))
+            .contains_key("egressProxyPacUrl")
+            && self
+                .gateway()
+                .as_object()
+                .expect("Gateway object")
+                .iter()
+                .all(|(field, installed)| current.get(field) == Some(installed))
     }
 
     pub fn installed(&self) -> Result<bool, String> {
@@ -151,10 +156,14 @@ impl Integration {
         } else {
             self.gateway()
         };
-        let upgrade = exists && gateway.get("disableAutoUpdates").is_none();
-        if upgrade {
-            // The first RC did not own this field; install it only when absent.
-            gateway["disableAutoUpdates"] = json!(true);
+        let mut upgraded = exists && upgrade(&mut gateway);
+        if !gateway
+            .as_object()
+            .expect("Gateway object")
+            .contains_key("egressProxyUrl")
+        {
+            gateway["egressProxyUrl"] = json!(self.origin);
+            upgraded = true;
         }
         if !self.gateway_matches(&gateway) {
             return Err("the Jaynshare Gateway entry was changed; run `jaynshare desktop --restore` before setup".into());
@@ -193,7 +202,7 @@ impl Integration {
         state::check_private(&profile())?;
         state::ensure_private_dir(&profile().join("configLibrary")).map_err(|e| e.to_string())?;
         state::check_private(&profile().join("configLibrary"))?;
-        if !exists || upgrade {
+        if !exists || upgraded {
             write(&gateway_path, &gateway)?;
         }
         write(&profile().join("configLibrary/_meta.json"), &meta)?;
@@ -221,6 +230,7 @@ impl Integration {
         let gateway = self.gateway_path();
         if gateway.exists() {
             let mut current = read_object(&gateway)?;
+            upgrade(&mut current);
             for (field, value) in self.gateway().as_object().expect("Gateway object") {
                 if current.get(field) == Some(value) {
                     current.as_object_mut().expect("read_object").remove(field);
@@ -256,6 +266,24 @@ pub fn cleanup_probes(directory: &Path) -> Result<(), String> {
             "could not remove the isolated Desktop probe state: {e}"
         )),
     }
+}
+
+/// Moves the first RC's owned values to the current ones; a user's own values stay mismatched.
+fn upgrade(gateway: &mut Value) -> bool {
+    let gateway = gateway.as_object_mut().expect("read_object");
+    let mut changed = false;
+    if !gateway.contains_key("disableAutoUpdates") {
+        gateway.insert("disableAutoUpdates".into(), json!(true));
+        changed = true;
+    }
+    if gateway.get("modelDiscoveryEnabled") == Some(&json!(false))
+        && gateway.get("inferenceModels") == Some(&json!(["claude-sonnet-4-6"]))
+    {
+        gateway.insert("modelDiscoveryEnabled".into(), json!(true));
+        gateway.remove("inferenceModels");
+        changed = true;
+    }
+    changed
 }
 
 fn restore_field(document: &mut Value, field: &str, installed: &Value, before: &Option<Value>) {

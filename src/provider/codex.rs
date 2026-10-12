@@ -1,9 +1,11 @@
 //! Third-party facts about the Codex backend on chatgpt.com, as the Codex CLI
 //! speaks to it under a ChatGPT login.
 
+use bytes::Bytes;
 use http::header::AUTHORIZATION;
 use http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
 use serde_json::{Value, json};
+use std::fmt::Write as _;
 use time::OffsetDateTime;
 
 use super::{Grant, TokenRequest, Tool, form, jwt_claims};
@@ -22,11 +24,21 @@ pub const TOOL: Tool = Tool {
     upstream_variables: &["OPENAI_API_KEY", "CODEX_API_KEY", "OPENAI_BASE_URL"],
     // Its shared background server keeps the environment of whichever
     // `codex` started it, so a turn handed to it would bypass the pool.
-    pooled_args: &["--no-daemon"],
+    pooled_args: &[
+        "--no-daemon",
+        "-c",
+        "analytics.enabled=false",
+        "-c",
+        "feedback.enabled=false",
+        "-c",
+        "otel.metrics_exporter=\"none\"",
+    ],
     deadline: None,
 };
 pub const SESSION_ID: HeaderName = HeaderName::from_static("session-id");
 pub const CHATGPT_ACCOUNT_ID: HeaderName = HeaderName::from_static("chatgpt-account-id");
+pub const INSTALLATION_ID: HeaderName = HeaderName::from_static("x-codex-installation-id");
+const TURN_METADATA: &str = "x-codex-turn-metadata";
 /// Codex's own paths; the rest of chatgpt.com is account features.
 const CODEX_PREFIX: &str = "/backend-api/codex/";
 const TELEMETRY_PATH: &str = "/backend-api/codex/analytics-events";
@@ -100,6 +112,113 @@ pub fn inject_credential(headers: &mut HeaderMap, account: &Account) {
         .and_then(|id| HeaderValue::from_str(id).ok())
     {
         headers.insert(CHATGPT_ACCOUNT_ID, v);
+    }
+}
+
+pub fn rewrite_headers(headers: &mut HeaderMap, account: &Account) -> Result<(), String> {
+    let machine = account.provider.machine_id(account.handle);
+    if headers.get_all(TURN_METADATA).iter().count() > 1 {
+        return Err("x-codex-turn-metadata must occur once".into());
+    }
+    if let Some(raw) = headers.get(TURN_METADATA) {
+        let rewritten = rewrite_turn_metadata(
+            raw.to_str().map_err(|_| "invalid turn metadata header")?,
+            &machine,
+        )?;
+        headers.insert(
+            TURN_METADATA,
+            HeaderValue::from_str(&rewritten).map_err(|_| "invalid turn metadata header")?,
+        );
+    }
+    headers.insert(
+        INSTALLATION_ID,
+        machine.parse().expect("derived UUID header"),
+    );
+    Ok(())
+}
+
+pub fn rewrite_body(body: Bytes, account: &Account) -> Result<Bytes, String> {
+    if body.is_empty() {
+        return Ok(body);
+    }
+    let mut value: Value =
+        serde_json::from_slice(&body).map_err(|_| "Codex requests must contain a JSON object")?;
+    let top = value
+        .as_object_mut()
+        .ok_or("Codex requests must contain a JSON object")?;
+    let machine = account.provider.machine_id(account.handle);
+    let Some(metadata) = top.get_mut("client_metadata") else {
+        return Ok(body);
+    };
+    let metadata = metadata
+        .as_object_mut()
+        .ok_or("client_metadata must be an object")?;
+    strip_identity_metadata(metadata);
+    for field in ["installation_id", INSTALLATION_ID.as_str()] {
+        if metadata.get(field).is_some_and(|v| !v.is_string()) {
+            return Err(format!("client_metadata.{field} must be a string"));
+        }
+        if metadata.contains_key(field) || field == INSTALLATION_ID.as_str() {
+            metadata.insert(field.into(), Value::String(machine.clone()));
+        }
+    }
+    if let Some(raw) = metadata.get_mut(TURN_METADATA) {
+        let rewritten = rewrite_turn_metadata(
+            raw.as_str()
+                .ok_or("client_metadata turn metadata must be a JSON string")?,
+            &machine,
+        )?;
+        *raw = Value::String(rewritten);
+    }
+    Ok(Bytes::from(
+        serde_json::to_vec(&value).expect("JSON serializes"),
+    ))
+}
+
+fn rewrite_turn_metadata(raw: &str, machine: &str) -> Result<String, String> {
+    let mut value: Value =
+        serde_json::from_str(raw).map_err(|_| "turn metadata must contain a JSON object")?;
+    let metadata = value
+        .as_object_mut()
+        .ok_or("turn metadata must contain a JSON object")?;
+    strip_identity_metadata(metadata);
+    if metadata
+        .get("installation_id")
+        .is_some_and(|v| !v.is_string())
+    {
+        return Err("turn metadata installation_id must be a string".into());
+    }
+    if metadata.contains_key("installation_id") {
+        metadata.insert("installation_id".into(), Value::String(machine.into()));
+    }
+    let mut ascii = String::new();
+    for character in value.to_string().chars() {
+        if character.is_ascii() {
+            ascii.push(character);
+        } else {
+            for unit in character.encode_utf16(&mut [0; 2]) {
+                write!(ascii, "\\u{unit:04x}").expect("writing a string");
+            }
+        }
+    }
+    Ok(ascii)
+}
+
+fn strip_identity_metadata(metadata: &mut serde_json::Map<String, Value>) {
+    for field in [
+        "workspaces",
+        "email",
+        "user_email",
+        "user_id",
+        "user_name",
+        "username",
+        "account_id",
+        "account_uuid",
+        "organization_id",
+        "organization_uuid",
+        "device_id",
+    ] {
+        metadata.remove(field);
     }
 }
 

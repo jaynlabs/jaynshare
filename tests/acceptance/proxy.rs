@@ -37,6 +37,30 @@ fn proxy_addr(instance: &Instance) -> SocketAddr {
         .expect("the setup asked for the proxy listener")
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn product_telemetry_hosts_are_refused_in_both_proxy_forms() {
+    let instance = Instance::start_client("opaque-telemetry-blocked").await;
+    let proxy = proxy_addr(&instance);
+    for host in ["ab.chatgpt.com", "HTTP-INTAKE.LOGS.US5.DATADOGHQ.COM."] {
+        for port in [443, 8443] {
+            let refused = connect_through(proxy, &format!("{host}:{port}"), None).await;
+            assert_eq!(refused.status, 403);
+            assert!(refused.body.contains("product telemetry"));
+        }
+        let answer = send(
+            proxy,
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!("http://{host}/otlp/v1/metrics"))
+                .body(Full::new(Bytes::new()))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(answer.status, 403);
+    }
+    assert_eq!(instance.upstream.calls(), 0);
+}
+
 // ------------------------------------------------------------------ the echo target
 
 /// What the echo writes once its peer half-closes, before closing its own
@@ -1673,6 +1697,7 @@ async fn an_intercepted_target_is_served_by_our_own_tls() {
         vec![
             "api.anthropic.com",
             "chatgpt.com",
+            "downloads.claude.ai",
             "probe.jaynshare.invalid"
         ],
         "the leaf names the whole intercept set"

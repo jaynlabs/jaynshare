@@ -21,6 +21,7 @@ const DEADLINE: Duration = Duration::from_secs(9);
 pub async fn run(
     app: &App,
     integration: &Integration,
+    model: &str,
     directory: &Path,
     jobs: &std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
 ) -> Response<ResponseBody> {
@@ -31,6 +32,10 @@ pub async fn run(
             "Desktop or its runtime changed; restart the adapter",
         );
     }
+    let runtime = match app.runtime().await {
+        Ok(runtime) => runtime,
+        Err(why) => return proxy_response(StatusCode::SERVICE_UNAVAILABLE, "api_error", &why),
+    };
     let scratch = directory
         .join("desktop-probes")
         .join(uuid::Uuid::new_v4().to_string());
@@ -41,12 +46,13 @@ pub async fn run(
             "could not prepare the isolated Desktop startup check",
         );
     }
-    let child = Command::new(&app.runtime)
+    // One argument, so a model ID can never be read as another option.
+    let model_arg = format!("--model={model}");
+    let child = Command::new(runtime)
         .args([
             "-p",
             "Reply with exactly OK. Do not use tools.",
-            "--model",
-            super::config::MODEL,
+            &model_arg,
             "--tools",
             "",
             "--setting-sources",
@@ -68,7 +74,7 @@ pub async fn run(
         .env("ANTHROPIC_BASE_URL", &integration.origin)
         .env("ANTHROPIC_AUTH_TOKEN", &integration.key)
         .env("ANTHROPIC_API_KEY", "")
-        .env("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
+        .envs(crate::launch::env::CLAUDE_TELEMETRY_VARIABLES.map(|name| (name, "1")))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -84,6 +90,7 @@ pub async fn run(
     };
     let (cancel, cancelled) = oneshot::channel::<()>();
     let (answer, receiver) = oneshot::channel();
+    let model = model.to_owned();
     // The worker owns the child so dropping an HTTP request still kills AND reaps it.
     let worker = tokio::spawn(async move {
         let stdout = child.stdout.take().expect("piped stdout");
@@ -112,7 +119,7 @@ pub async fn run(
             }
         };
         let response = match completed {
-            Some(Ok(Ok((bytes, success)))) => convert(&bytes, success),
+            Some(Ok(Ok((bytes, success)))) => convert(&bytes, success, &model),
             Some(Err(_)) => proxy_response(
                 StatusCode::GATEWAY_TIMEOUT,
                 "timeout_error",
@@ -145,7 +152,7 @@ pub async fn run(
     response
 }
 
-fn convert(bytes: &[u8], success: bool) -> Response<ResponseBody> {
+fn convert(bytes: &[u8], success: bool, model: &str) -> Response<ResponseBody> {
     let result: Value = serde_json::from_slice(bytes).unwrap_or(Value::Null);
     if success
         && result["type"] == "result"
@@ -161,7 +168,7 @@ fn convert(bytes: &[u8], success: bool) -> Response<ResponseBody> {
             StatusCode::OK,
             &json!({
                 "id": format!("msg_local_{}", uuid::Uuid::new_v4().simple()),
-                "type": "message", "role": "assistant", "model": super::config::MODEL,
+                "type": "message", "role": "assistant", "model": model,
                 "content": [{"type": "text", "text": result["result"]}],
                 "stop_reason": result["stop_reason"], "stop_sequence": null, "usage": result["usage"],
             }),
@@ -193,16 +200,16 @@ mod tests {
             "num_turns":1, "result":"OK", "stop_reason":"end_turn",
             "usage":{"input_tokens":17, "output_tokens":1}});
         assert_eq!(
-            convert(result.to_string().as_bytes(), true).status(),
+            convert(result.to_string().as_bytes(), true, "claude-haiku-5-5").status(),
             StatusCode::OK
         );
         assert_eq!(
-            convert(result.to_string().as_bytes(), false).status(),
+            convert(result.to_string().as_bytes(), false, "claude-haiku-5-5").status(),
             StatusCode::BAD_GATEWAY
         );
         result["usage"]["input_tokens"] = json!(-1);
         assert_eq!(
-            convert(result.to_string().as_bytes(), true).status(),
+            convert(result.to_string().as_bytes(), true, "claude-haiku-5-5").status(),
             StatusCode::BAD_GATEWAY
         );
     }

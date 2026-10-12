@@ -1098,7 +1098,8 @@ async fn what_reaches_anthropic_is_what_the_client_sent() {
             .expect("user_id stays a JSON string"),
     )
     .expect("user_id holds an object");
-    assert_eq!(inner["device_id"], "dev-sec-11", "untouched");
+    assert_eq!(inner["device_id"].as_str().unwrap().len(), 64);
+    assert_ne!(inner["device_id"], "dev-sec-11");
     assert_eq!(inner["session_id"], "sess-sec-11", "untouched");
     assert_eq!(
         inner["account_uuid"], FIXTURE_ACCOUNT_UUID,
@@ -1113,7 +1114,7 @@ async fn what_reaches_anthropic_is_what_the_client_sent() {
         "the requested model is never rewritten"
     );
 
-    // The only two differences: the credential and the uuid inside user_id.
+    // The credential and machine/account identity belong to the serving account.
     assert_eq!(
         seen.header("authorization"),
         Some(pooled.as_str()),

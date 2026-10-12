@@ -2,6 +2,148 @@
 //! rotating or failing upstream does to a served request.
 use crate::harness::*;
 
+#[tokio::test(flavor = "multi_thread")]
+async fn invalid_identity_or_encoding_returns_400_without_contacting_upstream() {
+    let _leak_sweep = crate::leaks::LeakGuard::default();
+    let instance = Instance::start("invalid-machine-identity").await;
+    instance.add_fsub();
+    let before = instance.upstream.calls();
+    for (encoding, metadata) in [
+        ("identity", json!({"user_id":"not-json"})),
+        (
+            "identity",
+            json!({"user_id":json!({"device_id":42}).to_string()}),
+        ),
+        ("br", json!({})),
+        ("gzip", json!({})),
+    ] {
+        let mut body = haiku_prompt();
+        body["metadata"] = metadata;
+        let answer = send(
+            instance.addr,
+            with(messages(body), &[("content-encoding", encoding)]),
+        )
+        .await;
+        assert_eq!(answer.status, StatusCode::BAD_REQUEST);
+        assert_eq!(answer.json()["error"]["type"], "invalid_request_error");
+        assert_eq!(instance.upstream.calls(), before);
+    }
+    assert_eq!(
+        send(instance.addr, messages(haiku_prompt())).await.status,
+        StatusCode::OK
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn machine_identity_is_shared_by_clients_and_survives_account_updates() {
+    let _leak_sweep = crate::leaks::LeakGuard::default();
+    let mut instance = Instance::start("machine-identity-lifecycle").await;
+    instance.add_fsub();
+    instance.add_other_org(
+        "SECOND",
+        "second@example.test",
+        FSUB2_UUID,
+        "3c1f5a7e-0000-4000-8000-0000000000c2",
+    );
+    let (alpha, beta) = enroll_two_clients(&instance).await;
+    async fn machine(instance: &Instance, client: &Enrolled, reference: &str) -> Value {
+        let mut body = haiku_prompt();
+        body["metadata"] = json!({"user_id": json!({"device_id":client.id,"account_uuid":"own","session_id":client.id}).to_string()});
+        let response = send(
+            instance.addr,
+            with(
+                messages(body),
+                &[
+                    ("authorization", &client.bearer()),
+                    ("x-jaynshare-account", &token(true, reference)),
+                    ("x-claude-code-session-id", &client.id),
+                    ("cookie", "own-login"),
+                    ("x-forwarded-for", "192.0.2.1"),
+                    ("x-claude-gateway-user-email", "own@example.test"),
+                    ("traceparent", "synthetic-trace"),
+                ],
+            ),
+        )
+        .await;
+        assert_eq!(response.status, StatusCode::OK, "{}", response.text());
+        let seen = instance.upstream.last();
+        for field in [
+            "cookie",
+            "x-forwarded-for",
+            "x-claude-gateway-user-email",
+            "traceparent",
+        ] {
+            assert!(seen.header(field).is_none());
+        }
+        let identity: Value =
+            serde_json::from_str(seen.json()["metadata"]["user_id"].as_str().unwrap()).unwrap();
+        assert_eq!(identity["session_id"], client.id);
+        identity["device_id"].clone()
+    }
+    let first = machine(&instance, &alpha, "FSUB").await;
+    assert_eq!(first, machine(&instance, &beta, "FSUB").await);
+    assert_ne!(first, machine(&instance, &alpha, "SECOND").await);
+    assert_eq!(
+        instance.cli_json(&["account", "rename", "FSUB", "Renamed"], None)["ok"],
+        true
+    );
+    assert_eq!(first, machine(&instance, &beta, "Renamed").await);
+    instance.restart_with_state(|_| {});
+    assert_eq!(first, machine(&instance, &alpha, "Renamed").await);
+    instance.upstream.script([Reply::status(401, "{}")]);
+    assert_eq!(first, machine(&instance, &beta, "Renamed").await);
+    let portable = json!({"access_token":instance.needles.access_token, "refresh_token":instance.needles.refresh_token, "expires_at":"2099-01-01T00:00:00Z"}).to_string();
+    assert_eq!(
+        instance.cli_json(
+            &["account", "replace", "Renamed", "--portable", "--stdin"],
+            Some(&portable)
+        )["ok"],
+        true
+    );
+    assert_eq!(first, machine(&instance, &beta, "Renamed").await);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn domain_checks_are_anonymous_and_preserve_the_real_response_without_a_pool() {
+    let _leak_sweep = crate::leaks::LeakGuard::default();
+    let instance = Instance::start("anonymous-domain-check").await;
+    let result = json!({"domain":"example.test", "can_fetch":false});
+    instance
+        .upstream
+        .script([Reply::status(200, result.to_string())]);
+    let request = Request::builder()
+        .uri("/api/web/domain_info?domain=example.test")
+        .header("cookie", "own-login")
+        .header("user-agent", "own-platform")
+        .header("x-api-key", "own-key")
+        .header("x-real-ip", "192.0.2.1")
+        .header("x-jaynshare-account", "pin.nonexistent")
+        .body(Full::new(Bytes::new()))
+        .unwrap();
+    let answer = send(instance.addr, request).await;
+    assert_eq!(answer.json(), result);
+    let seen = instance.upstream.last();
+    assert_eq!(seen.path, "/api/web/domain_info");
+    for header in [
+        "authorization",
+        "x-api-key",
+        "cookie",
+        "x-real-ip",
+        "x-jaynshare-account",
+    ] {
+        assert!(seen.header(header).is_none());
+    }
+    assert!(seen.header("user-agent").unwrap().starts_with("jaynshare/"));
+    let before = instance.upstream.calls();
+    assert_eq!(
+        send(instance.addr, post("/api/web/domain_info", json!({})))
+            .await
+            .status,
+        StatusCode::METHOD_NOT_ALLOWED
+    );
+    assert_eq!(instance.upstream.calls(), before);
+}
+
 fn permission_error_403() -> Reply {
     Reply::status(
         403,
@@ -183,7 +325,7 @@ async fn blocked_model_is_refused_before_any_attempt() {
 /// Telemetry under `block` is answered locally, under `forward` is
 /// relayed, and another path is relayed either way.
 #[tokio::test(flavor = "multi_thread")]
-async fn telemetry_policy_decides_only_the_telemetry_path() {
+async fn product_telemetry_is_blocked_on_every_policy() {
     let _leak_sweep = crate::leaks::LeakGuard::default();
     let blocking = Instance::start_with(
         "telemetry-policy-decides-block",
@@ -238,7 +380,20 @@ async fn telemetry_policy_decides_only_the_telemetry_path() {
     )
     .await;
     assert_eq!(answer.status, StatusCode::OK);
-    assert_eq!(forwarding.upstream.last().path, "/api/event_logging");
+    assert_eq!(answer.json(), json!({}));
+    for path in ["/api/eval", "/api/eval/synthetic-key"] {
+        let before = forwarding.upstream.calls();
+        assert_eq!(
+            send(
+                forwarding.addr,
+                post(path, json!({"email":"synthetic@example.test"}))
+            )
+            .await
+            .json(),
+            json!({})
+        );
+        assert_eq!(forwarding.upstream.calls(), before);
+    }
 }
 
 /// Hop-by-hop headers stop at the proxy; the Anthropic and Claude
@@ -374,7 +529,9 @@ async fn account_uuid_rewrite_is_surgical() {
     )
     .expect("user_id holds an object");
     assert_eq!(inner["account_uuid"], FIXTURE_ACCOUNT_UUID);
-    assert_eq!(inner["device_id"], "d1", "the other members are untouched");
+    assert_eq!(inner["device_id"].as_str().unwrap().len(), 64);
+    assert_ne!(inner["device_id"], "d1");
+    assert_eq!(inner["session_id"], "s1");
     assert_eq!(body["account_uuid"], "elsewhere-untouched");
     assert_eq!(body["system"][0]["text"], attribution);
     assert_eq!(
@@ -415,7 +572,7 @@ async fn tool_pairs_are_made_consistent() {
     assert_eq!(sent[0]["role"], "user");
     assert_eq!(sent[1]["content"][0]["text"], "done");
 
-    // A body with no tool blocks and nothing to rewrite crosses byte for byte.
+    // Missing machine metadata is created without changing inference content.
     let exact = br#"{"model":"claude-haiku-4-5-20251001", "max_tokens":32,
         "messages":[{"role":"user","content":"hi"}]}"#;
     let request = Request::builder()
@@ -425,11 +582,10 @@ async fn tool_pairs_are_made_consistent() {
         .body(Full::new(Bytes::from_static(exact)))
         .expect("request builds");
     assert_eq!(send(instance.addr, request).await.status, StatusCode::OK);
-    assert_eq!(
-        instance.upstream.last().body,
-        Bytes::from_static(exact),
-        "a body with nothing to rewrite is forwarded unchanged"
-    );
+    let mut normalized = instance.upstream.last().json();
+    assert!(normalized["metadata"]["user_id"].is_string());
+    normalized.as_object_mut().unwrap().remove("metadata");
+    assert_eq!(normalized, serde_json::from_slice::<Value>(exact).unwrap());
 }
 
 /// Only a loopback upstream origin is accepted, and it is announced
@@ -1700,6 +1856,11 @@ async fn http_401_forces_a_refresh_and_one_retry_on_the_rotated_token() {
         Some(format!("Bearer {}", instance.needles.access_token).as_str())
     );
     assert_eq!(seen[1].path, "/v1/oauth/token");
+    assert_eq!(
+        seen[0].json()["metadata"]["user_id"],
+        seen[2].json()["metadata"]["user_id"],
+        "refresh keeps the account's machine identity"
+    );
     assert_eq!(seen[1].json()["grant_type"], "refresh_token");
     assert_eq!(
         seen[1].json()["refresh_token"],

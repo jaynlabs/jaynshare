@@ -101,7 +101,7 @@ tls = "identity"
 # Optional keys with their defaults; uncomment to override.
 # [data_plane]
 # max_connections = 256
-# telemetry_policy = "forward"
+# telemetry_policy = "block"
 # first_byte_timeout_seconds = 120
 # [selection]
 # switch_threshold = 0.98
@@ -1231,7 +1231,7 @@ mod tests {
         assert_eq!(config.data_plane.listen.to_string(), "127.0.0.1:17421");
         assert!(config.mitm.enabled, "clients enrol only with MITM on");
         assert_eq!(config.data_plane.tls, config::ListenerTls::Identity);
-        assert_eq!(config.data_plane.telemetry_policy, TelemetryPolicy::Forward);
+        assert_eq!(config.data_plane.telemetry_policy, TelemetryPolicy::Block);
         assert!(config.selection.priorities.is_empty());
         assert!(config.selection.routes.is_empty());
     }

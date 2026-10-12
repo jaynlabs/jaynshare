@@ -16,7 +16,7 @@ use uuid::Uuid;
 
 use crate::audit::{ErrorClass, Mode, Principal, Record, ServingAccount};
 use crate::capture::ExchangeCapture;
-use crate::config::{Config, TelemetryPolicy};
+use crate::config::Config;
 use crate::pool::quota;
 use crate::pool::ramp::Admit;
 use crate::pool::refresh::{self, Outcome, Trigger};
@@ -299,11 +299,8 @@ pub async fn run(
     let body_facts = attempt::body_facts(&parts.headers, &body);
     exchange.record.model = body_facts.model.clone();
 
-    // Telemetry under `block` and the provider's local answers are
-    // answered here, never forwarded.
-    if provider.is_telemetry(&path)
-        && settings.data_plane.telemetry_policy == TelemetryPolicy::Block
-    {
+    // Telemetry and the provider's local answers never reach upstream.
+    if provider.is_telemetry(&path) {
         return Ok(exchange.respond(json_response(StatusCode::OK, &serde_json::json!({})), None));
     }
     if let Some(answer) = provider.local_answer(&path, &parts.headers) {
@@ -562,12 +559,12 @@ pub async fn run(
                 exclusion.push(handle);
                 continue;
             };
-            let mut h = headers.clone();
-            let rewritten = provider.rewrite_body(body.clone(), &path, account);
-            if !rewritten.is_empty() || headers.contains_key(CONTENT_LENGTH) {
-                attempt::set_content_length(&mut h, rewritten.len());
-            }
-            (h, rewritten, account.display_name.clone(), account.kind())
+            (
+                headers.clone(),
+                body.clone(),
+                account.display_name.clone(),
+                account.kind(),
+            )
         };
         exchange.last_attempted = Some(handle);
 
@@ -667,6 +664,17 @@ pub async fn run(
                 other_failure = Some(message);
                 exclusion.push(handle);
                 continue;
+            }
+            Attempt::InvalidRequest(message) => {
+                return Ok(exchange.respond(
+                    envelope::error(
+                        provider,
+                        StatusCode::BAD_REQUEST,
+                        error_type::INVALID_REQUEST,
+                        &message,
+                    ),
+                    Some(ErrorClass::Request),
+                ));
             }
             Attempt::Refused401 {
                 after_refresh,
@@ -823,6 +831,7 @@ enum Attempt {
     Network(String),
     /// A failure that is neither a network failure nor a status.
     Other(String),
+    InvalidRequest(String),
     /// A 401 the exchange cannot recover from — the second one on
     /// an OAuth account, or the first on an API key. `errored_by_refresh`
     /// says the refresh engine already marked the account; `after_refresh`
@@ -832,7 +841,9 @@ enum Attempt {
         errored_by_refresh: bool,
     },
     /// The forced refresh sits out the transient floor.
-    RefreshWait { until: OffsetDateTime },
+    RefreshWait {
+        until: OffsetDateTime,
+    },
 }
 
 /// The three retry budgets of one candidate's attempt loop — one
@@ -904,14 +915,22 @@ async fn attempt_candidate(input: AttemptInput<'_>) -> Attempt {
     loop {
         // Injected fresh every iteration: a forced refresh replaced the
         // family mid-loop and the next attempt must carry it.
-        let (attempt_headers, kind) = {
-            let pool = server.pool.lock().expect("pool lock");
-            let Some(account) = pool.get(handle) else {
+        let (attempt_headers, attempt_body, kind) = {
+            let account = server.pool.lock().expect("pool lock").get(handle).cloned();
+            let Some(account) = account else {
                 break Attempt::Other("the account left the pool mid-attempt".into());
             };
             let mut h = headers.clone();
-            provider.inject_credential(&mut h, account);
-            (h, account.kind())
+            let normalized =
+                match attempt::normalize(provider, &mut h, body.clone(), uri.path(), &account) {
+                    Ok(body) => body,
+                    Err(message) => break Attempt::InvalidRequest(message),
+                };
+            if !normalized.is_empty() || headers.contains_key(CONTENT_LENGTH) {
+                attempt::set_content_length(&mut h, normalized.len());
+            }
+            provider.inject_credential(&mut h, &account);
+            (h, normalized, account.kind())
         };
         // The slot is held from here until the response headers
         // arrive or the send fails — never for the streamed body.
@@ -921,9 +940,9 @@ async fn attempt_candidate(input: AttemptInput<'_>) -> Attempt {
         }
         *attempts += 1;
         if let Some(c) = &mut capture {
-            c.attempt(*attempts, method, uri, &attempt_headers, &body);
+            c.attempt(*attempts, method, uri, &attempt_headers, &attempt_body);
         }
-        let request = build_request(method, uri, &attempt_headers, body.clone());
+        let request = build_request(method, uri, &attempt_headers, attempt_body);
         let first_byte = Duration::from_secs(settings.data_plane.first_byte_timeout_seconds);
         let sent = server.upstream.send(request, first_byte).await;
         drop(slot);

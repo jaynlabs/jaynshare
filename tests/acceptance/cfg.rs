@@ -104,7 +104,7 @@ fn minimal_document_is_every_default_and_bytes_unchanged() {
     assert_eq!(effective["selection"]["ramp"]["step_interval_ms"], 250);
     assert_eq!(effective["data_plane"]["listen"], "127.0.0.1:17421");
     assert_eq!(effective["data_plane"]["max_connections"], 256);
-    assert_eq!(effective["data_plane"]["telemetry_policy"], "forward");
+    assert_eq!(effective["data_plane"]["telemetry_policy"], "block");
     assert_eq!(effective["data_plane"]["first_byte_timeout_seconds"], 120);
     assert_eq!(effective["data_plane"]["egress"]["mode"], "off");
     assert_eq!(effective["mitm"]["listen"], "127.0.0.1:17422");
@@ -1802,7 +1802,7 @@ fn a_minimal_document_starts_with_every_default() {
     assert_eq!(effective["quota"]["probe_enabled"], false);
     assert_eq!(effective["selection"]["switch_threshold"], 0.98);
     assert_eq!(effective["data_plane"]["max_connections"], 256);
-    assert_eq!(effective["data_plane"]["telemetry_policy"], "forward");
+    assert_eq!(effective["data_plane"]["telemetry_policy"], "block");
     assert_eq!(effective["data_plane"]["first_byte_timeout_seconds"], 120);
     assert_eq!(effective["logging"]["level"], "info");
     assert_eq!(effective["logging"]["max_bytes"], 10_485_760);
