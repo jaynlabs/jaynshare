@@ -433,6 +433,63 @@ mod macos {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn desktop_asks_once_for_every_untrusted_root() {
+        let _leak_sweep = crate::leaks::LeakGuard::default();
+        let mut instance = Instance::start_client("desktop-ca-both-confirmed").await;
+        instance.add_fsub();
+        let desktop = Desktop::new(&instance).await;
+        assert_eq!(
+            instance.cli_json(&["ca", "rotate", "--yes"], None)["ok"],
+            true
+        );
+        instance.restart();
+        fs::write(desktop.tools.dir.join("security/0000/match"), "verify-cert").unwrap();
+        fs::write(desktop.tools.dir.join("security/0000/times"), "2").unwrap();
+        fs::write(desktop.tools.dir.join("security/0000/exit"), "1").unwrap();
+        let tools = desktop.tools.env();
+        let env: Vec<(&str, &str)> = tools
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        let (code, transcript) = desktop.client.pty(
+            &["desktop", "--auto", "--log"],
+            &env,
+            &[
+                (
+                    "Install CA globally (needed for Claude Desktop) [y/N]",
+                    "y\n",
+                ),
+                ("keep this command open", "\x03"),
+            ],
+        );
+        assert_eq!(code, 0, "{transcript}");
+        assert_eq!(transcript.matches("Install CA globally").count(), 1);
+        assert!(transcript.contains("(current)"), "{transcript}");
+        assert!(transcript.contains("(staged replacement)"), "{transcript}");
+        assert!(transcript.contains("These CAs"), "{transcript}");
+        let calls = desktop.tools.calls("security");
+        assert_eq!(
+            calls
+                .iter()
+                .map(|call| call[0].as_str())
+                .collect::<Vec<_>>(),
+            [
+                "verify-cert",
+                "verify-cert",
+                "add-trusted-cert",
+                "add-trusted-cert",
+                "verify-cert",
+                "verify-cert"
+            ]
+        );
+        assert_eq!(calls[0][4], calls[2][5]);
+        assert_eq!(calls[1][4], calls[3][5]);
+        assert!(!Path::new(&calls[0][4]).exists());
+        assert!(!Path::new(&calls[1][4]).exists());
+        assert!(desktop.record().exists());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn proxy_requests_never_forward_the_local_gateway_bearer() {
         let _leak_sweep = crate::leaks::LeakGuard::default();
         let instance = Instance::start_client("desktop-egress-gateway-bearer").await;
@@ -1533,6 +1590,15 @@ esac
         );
         assert_eq!(desktop.cli(&["desktop", "--auto"]).0, 1);
         assert!(!desktop.record().exists());
+        // Another installation's entry, such as the quickstart's.
+        let other = Uuid::new_v4().to_string();
+        let foreign = json!({"appliedId": other, "entries": [{"id": other, "name": "Jaynshare"}]});
+        write_private(&meta_path, &foreign.to_string());
+        let (code, _, error) = desktop.cli(&["desktop", "--auto"]);
+        assert_eq!(code, 1);
+        assert!(error.contains("another jaynshare installation"), "{error}");
+        assert!(!desktop.record().exists());
+        assert_eq!(read(&meta_path), foreign);
         fs::remove_file(meta_path).unwrap();
         let mut running = desktop.spawn(&["desktop", "--auto"]);
         let gateway = desktop.ready(&mut running).await;

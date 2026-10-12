@@ -225,6 +225,12 @@ fn sweep_tree(
 
 fn allowed_surface(path: &Path) -> bool {
     path.ends_with("state/state.json")
+        // A server killed mid-write (Windows' `stop()`) leaves its atomic write's temporary.
+        || (path.parent().is_some_and(|dir| dir.ends_with("state"))
+            && path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(".state.json.") && name.ends_with(".tmp")))
         || path.ends_with("home/.claude/.credentials.json")
         || path
             .ancestors()
@@ -260,6 +266,11 @@ mod tests {
             "token sk-ant-oat-leak-test here",
         )
         .expect("write the allowed surface");
+        fs::write(
+            dir.join("state/.state.json.924.tmp"),
+            "token sk-ant-oat-leak-test here",
+        )
+        .expect("write a killed server's temporary");
         let needles = vec![("test token".to_owned(), "sk-ant-oat-leak-test".to_owned())];
         let mut hits = Vec::new();
         sweep_tree(&dir, &needle_forms(&needles), &mut hits);

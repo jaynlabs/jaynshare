@@ -10,11 +10,14 @@
 #
 # Usage: quickstart.sh [--release[=<version>]] [up]   build or download, (re)start the server, update the client
 #        quickstart.sh [--release] claude|codex [args]  run `jaynshare claude` or `jaynshare codex` as the client
+#        quickstart.sh [--release] desktop [args]       run `jaynshare desktop` on your real Claude Desktop
 #        quickstart.sh [--release] op <verb...>       an operator verb on the server
 #        quickstart.sh [--release] client <verb...>
 #        quickstart.sh [--release] logs | down
 #
 # The join offers to add your accounts; later, `client account login` adds one.
+# `desktop` asks to trust the pool's CA in your login keychain, and points your
+# Desktop at the pool until `down`; `client trust-ca remove` removes the CA.
 # The server home persists, so an account logged in once stays logged in.
 # Removing the scratch home's client/ joins the client again; removing it all starts over.
 set -euo pipefail
@@ -64,15 +67,19 @@ as_server() { HOME="$SERVER_HOME" "$BIN" "$@"; }
 
 client_bin() { echo "$(config_root "$CLIENT_HOME")/bin/jaynshare"; }
 
-as_client() { HOME="$CLIENT_HOME" "$(client_bin)" "$@"; }
+as_client() { HOME="$CLIENT_HOME" PATH="$SCRATCH/bin:$PATH" "$(client_bin)" "$@"; }
 
-# Claude Code calls `security` from PATH for its login; this one runs it with
-# your real home, so it finds your keychain. Its first run is marked done, or
-# Claude Code would ask for a login before looking.
-prepare_claude() {
+# `security` from PATH runs with your real home, so it finds your keychain.
+prepare_security() {
     mkdir -p "$SCRATCH/bin"
     printf '#!/bin/bash\nHOME=%q exec /usr/bin/security "$@"\n' "$HOME" >"$SCRATCH/bin/security"
     chmod +x "$SCRATCH/bin/security"
+}
+
+# Claude Code calls `security` for its login. Its first run is marked done, or
+# Claude Code would ask for a login before looking.
+prepare_claude() {
+    prepare_security
     python3 - "$CLIENT_HOME/.claude.json" <<'EOF'
 import json, os, sys
 path = sys.argv[1]
@@ -81,6 +88,24 @@ if not config.get("hasCompletedOnboarding"):
     config["hasCompletedOnboarding"] = True
     json.dump(config, open(path, "w"), indent=2)
 EOF
+}
+
+link() { [ -L "$2" ] || ln -s "$1" "$2"; }
+
+# Desktop reads its profile in your real home, and its CA prompt installs into
+# your real login keychain: these links point the client's home at them.
+prepare_desktop() {
+    prepare_security
+    mkdir -p "$HOME/Library/Application Support/Claude-3p"
+    link "$HOME/Library/Application Support/Claude-3p" "$CLIENT_HOME/Library/Application Support/Claude-3p"
+    link "$HOME/Library/Keychains" "$CLIENT_HOME/Library/Keychains"
+    link "$HOME/Applications" "$CLIENT_HOME/Applications"
+}
+
+# Desktop refuses its restore while it runs, and the server keeps running then.
+restore_desktop() {
+    [ -f "$(config_root "$CLIENT_HOME")/client/desktop.json" ] || return 0
+    as_client desktop --restore
 }
 
 # The launcher finds `codex` on PATH; this one runs it with your real home.
@@ -215,15 +240,16 @@ up() {
     else
         join_client
     fi
-    echo "pool up on $LISTEN (proxy $PROXY_LISTEN); $SELF claude or $SELF codex to use it"
+    echo "pool up on $LISTEN (proxy $PROXY_LISTEN); $SELF claude, $SELF codex or $SELF desktop to use it"
 }
 
 [ "$(uname)" = Darwin ] || die "the quickstart is macOS-only"
 case ${1:-up} in
 up) up ;;
-down) stop_server ;;
+down) restore_desktop && stop_server ;;
 logs) tail -f "$SCRATCH/server.log" ;;
 claude | codex) tool=$1; shift; "prepare_$tool"; HOME="$CLIENT_HOME" PATH="$SCRATCH/bin:$PATH" exec "$(client_bin)" "$tool" "$@" ;;
+desktop) shift; prepare_desktop; as_client desktop "$@" ;;
 op) shift; as_server "$@" ;;
 client) shift; as_client "$@" ;;
 *) die "unknown command $1; see the usage at the top of $0" ;;
