@@ -570,6 +570,47 @@ async fn public_downloads_use_the_anonymous_streaming_route_and_preserve_ranges(
     assert_eq!(instance.upstream.calls(), before);
 }
 
+/// Codex's standalone update reruns its installer from chatgpt.com, which
+/// redirects to releases.openai.com: the redirect rides the anonymous route,
+/// with neither a pooled login nor the engineer's own.
+#[tokio::test(flavor = "multi_thread")]
+async fn codex_s_installer_rides_the_anonymous_route() {
+    let _leak_sweep = crate::leaks::LeakGuard::default();
+    let instance = Instance::start_client("codex-installer").await;
+    let mut tunnel = codex_tunnel(&instance, &ca_file(&instance)).await.unwrap();
+    let release = "https://releases.openai.com/codex/install.sh";
+    instance.upstream.script([crate::harness::Reply::Raw {
+        status: 302,
+        headers: vec![("location".into(), release.into())],
+        body: String::new(),
+    }]);
+    let answer = tunnel
+        .send(codex_request(
+            Method::GET,
+            "/codex/install.sh",
+            Bytes::new(),
+        ))
+        .await;
+    assert_eq!(answer.status, 302, "{}", answer.text());
+    assert_eq!(answer.header("location"), Some(release));
+    let seen = instance.upstream.last();
+    assert_eq!(seen.path, "/codex/install.sh");
+    assert!(seen.header("authorization").is_none());
+    assert!(seen.header("chatgpt-account-id").is_none());
+    assert!(seen.header("user-agent").unwrap().starts_with("jaynshare/"));
+
+    let before = instance.upstream.calls();
+    let lookalike = tunnel
+        .send(codex_request(
+            Method::GET,
+            "/codex/install.sh.old",
+            Bytes::new(),
+        ))
+        .await;
+    assert_eq!(lookalike.status, 403, "{}", lookalike.text());
+    assert_eq!(instance.upstream.calls(), before);
+}
+
 /// A real Codex CLI on `PATH`; asked with a throwaway home, so nothing reads
 /// the developer's own.
 fn codex_available(root: &std::path::Path) -> bool {

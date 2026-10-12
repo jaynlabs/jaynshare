@@ -37,6 +37,8 @@ pub struct ClientInstallation {
 
 /// The trust anchor `join --tls-ca` keeps for a server without a pin.
 pub const BASE_URL_CA_FILE: &str = "base-url-ca.pem";
+/// The system's roots plus `ca.pem`, rewritten by each launch that needs it.
+pub const CA_BUNDLE_FILE: &str = "ca-bundle.pem";
 
 /// What a machine without an installation does.
 pub const JOIN_HINT: &str =

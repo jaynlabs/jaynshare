@@ -11,6 +11,8 @@ pub mod mitm;
 pub mod no_proxy;
 pub mod timeout;
 
+use std::path::Path;
+
 use crate::client::ClientInstallation;
 use crate::provider::Tool;
 
@@ -67,6 +69,8 @@ pub struct Inputs<'a> {
     pub hold_hint: Option<u64>,
     /// The inherited deadline variable, if any (never lowered).
     pub inherited_timeout: Option<String>,
+    /// `ca-bundle.pem`, when the tool takes one and it was written.
+    pub bundle: Option<&'a Path>,
 }
 
 /// The plan for a pooled launch.
@@ -118,6 +122,7 @@ mod tests {
             token: None,
             hold_hint: Some(541),
             inherited_timeout: None,
+            bundle: Some(Path::new("client/ca-bundle.pem")),
         })
     }
 
@@ -130,6 +135,7 @@ mod tests {
         let plan = pooled(Provider::Codex);
         let ca = std::path::Path::new("client").join("ca.pem");
         assert_eq!(plan.get("CODEX_CA_CERTIFICATE"), ca.to_str());
+        assert_eq!(plan.get("CURL_CA_BUNDLE"), Some("client/ca-bundle.pem"));
         assert_eq!(plan.get("HTTPS_PROXY"), Some("http://:s@h:2"));
         for name in ["OPENAI_API_KEY", "CODEX_API_KEY", "OPENAI_BASE_URL"] {
             assert!(removed(&plan, name), "{name}");
@@ -144,6 +150,7 @@ mod tests {
         assert!(plan.get("NODE_EXTRA_CA_CERTS").is_some());
         assert!(removed(&plan, "ANTHROPIC_BASE_URL"));
         assert_eq!(plan.get("CODEX_CA_CERTIFICATE"), None);
+        assert_eq!(plan.get("CURL_CA_BUNDLE"), None);
         assert_eq!(plan.get("API_TIMEOUT_MS"), Some("601000"));
         for name in CLAUDE_TELEMETRY_VARIABLES {
             assert_eq!(plan.get(name), Some("1"));

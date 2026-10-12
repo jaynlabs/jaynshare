@@ -894,6 +894,64 @@ async fn codex_launches_with_its_own_variables() {
     assert!(stderr.starts_with("cli_codex_missing:"), "{stderr}");
 }
 
+/// Codex's update runs `curl` on its installer with Codex's environment.
+/// `CURL_CA_BUNDLE` is the system's roots (or the caller's own bundle) then
+/// `ca.pem`, so that curl fetches the installer through the pool.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn codex_s_updater_fetches_its_installer_through_the_pool() {
+    let _leak_sweep = crate::leaks::LeakGuard::default();
+    let instance = Instance::start_client("codex-updater").await;
+    let machine = install_client(&instance).await;
+    machine.remove("claude");
+    let bundle = machine.client_dir.join("ca-bundle.pem");
+    let ca = fs::read_to_string(machine.client_dir.join("ca.pem")).unwrap();
+
+    let (code, _, stderr) = machine.jaynshare(&["codex", "--auto"], &[], None);
+    assert_eq!(code, 0, "the fake exits 0: {stderr}");
+    let seen = machine.claude_ran().expect("Codex was launched");
+    assert_eq!(
+        seen.env.get("CURL_CA_BUNDLE"),
+        Some(&bundle.display().to_string())
+    );
+    let held = fs::read_to_string(&bundle).unwrap();
+    assert!(
+        held.len() > ca.len() && held.ends_with(&ca),
+        "the system's roots, then ca.pem"
+    );
+
+    let script = "#!/bin/sh\necho synthetic installer\n";
+    instance.upstream.script([Reply::Raw {
+        status: 200,
+        headers: vec![],
+        body: script.into(),
+    }]);
+    let curl = Command::new("curl")
+        .env_clear()
+        .envs(&seen.env)
+        .args(["-fsS", "https://chatgpt.com/codex/install.sh"])
+        .output()
+        .expect("run curl");
+    let stderr = String::from_utf8_lossy(&curl.stderr);
+    assert!(curl.status.success(), "{stderr}");
+    assert_eq!(String::from_utf8_lossy(&curl.stdout), script);
+
+    let own = machine.root.join("own-roots.pem");
+    fs::write(&own, "own roots\n").unwrap();
+    let own_path = own.display().to_string();
+    let (code, _, stderr) = machine.jaynshare(
+        &["codex", "--auto"],
+        &[("CURL_CA_BUNDLE", own_path.as_str())],
+        None,
+    );
+    assert_eq!(code, 0, "the fake exits 0: {stderr}");
+    assert_eq!(
+        fs::read_to_string(&bundle).unwrap(),
+        format!("own roots\n{ca}"),
+        "the caller's own bundle stands in for the system's"
+    );
+}
+
 /// `codex --account` resolves among the Codex accounts (`provider=codex`);
 /// `claude --account` names no provider, which every server reads as
 /// Anthropic.

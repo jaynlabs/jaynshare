@@ -57,6 +57,9 @@ pub struct Tool {
     pub upstream_variables: &'static [&'static str],
     /// Put before the caller's arguments in a pooled launch.
     pub pooled_args: &'static [&'static str],
+    /// The variable its helpers read a whole trust bundle from: the
+    /// system's roots plus the pool's CA.
+    pub bundle_variable: Option<&'static str>,
     pub deadline: Option<Deadline>,
 }
 

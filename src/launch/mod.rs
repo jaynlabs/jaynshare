@@ -195,6 +195,9 @@ pub fn prepare(request: Request, launch: bool) -> Result<Prepared, Refusal> {
         executable(tool, launch)?
     };
 
+    let bundle = tool
+        .bundle_variable
+        .and_then(|variable| crate::client_ca::write_bundle(&installation, variable));
     let mut plan = env::build(&env::Inputs {
         tool,
         installation: &installation,
@@ -205,6 +208,7 @@ pub fn prepare(request: Request, launch: bool) -> Result<Prepared, Refusal> {
             .deadline
             .as_ref()
             .and_then(|deadline| std::env::var(deadline.variable).ok()),
+        bundle: bundle.as_deref(),
     });
     if launch {
         plan.set(crate::statusline::ACTIVE_ENV, "1");

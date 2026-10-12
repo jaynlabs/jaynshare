@@ -51,6 +51,7 @@ pub(super) async fn uninstall(cli: &Cli) -> Outcome {
     for ca in [
         directory.join("ca.pem"),
         directory.join(crate::client::BASE_URL_CA_FILE),
+        directory.join(crate::client::CA_BUNDLE_FILE),
     ] {
         if ca.exists() {
             paths.push(ca);

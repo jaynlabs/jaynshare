@@ -167,8 +167,11 @@ security audit is claimed.
 The pool's CA reaches clients over the pinned channel, the next one too while
 a rotation is staged. It is handed only to the process that `jaynshare claude`
 or `jaynshare codex` launches, through `NODE_EXTRA_CA_CERTS` or
-`CODEX_CA_CERTIFICATE`. It enters the operating system's trust store only if
-the engineer runs `jaynshare trust-ca add`, which always asks first. Desktop
+`CODEX_CA_CERTIFICATE`. Outside Windows, a Codex launch also sets
+`CURL_CA_BUNDLE` to the system's roots plus the CA, so Codex's updater can
+fetch its installer; any `curl` run under that Codex trusts the CA too. It
+enters the operating system's trust store only if the engineer runs
+`jaynshare trust-ca add`, which always asks first. Desktop
 requires macOS trust for both current and staged roots before profile setup;
 `trust-ca add` installs only the current root. Desktop's launch also supplies
 the CA bundle to its engine through `NODE_EXTRA_CA_CERTS`.
@@ -176,9 +179,10 @@ Desktop's egress relay refuses its local Gateway bearer in every Authorization
 value, including duplicate headers and alternate casing; destination credentials
 continue through the proxy.
 The server terminates TLS for `api.anthropic.com`, `chatgpt.com`, public downloads
-at `downloads.claude.ai` and its own credential-free probe host. Downloads and
-the supported Claude WebFetch domain-check paths use anonymous routes with
-credentials and identifying headers removed. Other `CONNECT` targets are
+at `downloads.claude.ai` and its own credential-free probe host. Downloads,
+Codex's installer scripts and the supported Claude WebFetch domain-check paths
+use anonymous routes with credentials and identifying headers removed. Other
+`CONNECT` targets are
 opaque tunnels, except known product telemetry hosts and targets that point
 back at the server itself, which are refused. On
 `chatgpt.com`, only Codex's own paths and the read of the account's usage are
