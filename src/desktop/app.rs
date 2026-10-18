@@ -8,6 +8,10 @@ use tokio::sync::OnceCell;
 
 use super::{bundle, compatibility, config};
 
+/// Generous: the first run of a freshly installed binary waits for macOS's
+/// security scan.
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(15);
+
 type Stamp = (u64, SystemTime);
 
 pub struct App {
@@ -175,7 +179,7 @@ fn stamp(path: &Path) -> Result<Stamp, String> {
 pub async fn running(bundle: &Path) -> Result<bool, String> {
     let path = bundle.join("Contents/MacOS/Claude");
     let result = tokio::time::timeout(
-        Duration::from_secs(2),
+        COMMAND_TIMEOUT,
         Command::new("pgrep")
             .args(["-f", "-l"])
             .arg(path)
@@ -214,7 +218,7 @@ async fn policy() -> Result<(), String> {
 }
 
 async fn output(command: &mut Command) -> Result<String, String> {
-    let result = tokio::time::timeout(Duration::from_secs(3), command.kill_on_drop(true).output())
+    let result = tokio::time::timeout(COMMAND_TIMEOUT, command.kill_on_drop(true).output())
         .await
         .map_err(|_| "Desktop compatibility command timed out")?
         .map_err(|e| e.to_string())?;
