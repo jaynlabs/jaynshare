@@ -105,6 +105,7 @@ tls = "identity"
 # first_byte_timeout_seconds = 120
 # [selection]
 # switch_threshold = 0.98
+# failover = true
 # [quota]
 # probe_enabled = false
 # [logging]

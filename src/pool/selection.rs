@@ -111,7 +111,7 @@ pub struct Choice {
     pub default_moved_from: Option<Uuid>,
     /// The old default's reason, beside `default_moved_from`.
     pub default_moved_cause: Option<MoveCause>,
-    /// The attempt is a session's first, so this answer binds it.
+    /// The answer binds the session: its first attempt, or a failover.
     pub binds: bool,
     /// The answer came from the request-model-only pass.
     pub advisor_fallback: bool,
@@ -502,7 +502,9 @@ impl<'a> Pass<'a> {
     }
 
     fn run(&self) -> Result<Choice, Nobody> {
-        let binds = self.facts.session && self.facts.binding.is_none();
+        let bound = self.facts.binding.and_then(|handle| self.bound(handle));
+        let moves = self.settings.failover && matches!(bound, Some(Err(_)));
+        let binds = self.facts.session && (self.facts.binding.is_none() || moves);
         let choice = |handle, cause| Choice {
             handle,
             cause,
@@ -539,9 +541,10 @@ impl<'a> Pass<'a> {
         {
             return Ok(choice(preferred, Cause::RoutePreference));
         }
-        // Rule 4: a bound session is served by its binding and nothing else runs.
-        if let Some(bound) = self.facts.binding
-            && let Some(answer) = self.bound(bound)
+        // Rule 4: a bound session is served by its binding and nothing else
+        // runs, unless the binding cannot serve and failover moves it.
+        if let Some(answer) = bound
+            && !moves
         {
             return answer;
         }
@@ -1113,7 +1116,11 @@ mod tests {
             (bound, Cause::Session, false)
         );
 
-        // Under a hold, or disabled, the bound account ends the exchange naming itself.
+        // Without failover, a held or disabled binding ends the exchange naming itself.
+        let s = SelectionSettings {
+            failover: false,
+            ..s
+        };
         let mut held = oauth("a", 0.5);
         held.quota[0].exhaustion_hold_until = Some(NOW + time::Duration::minutes(5));
         let f = Fixture::new(vec![held.clone(), b.clone()], Some(b.handle));
@@ -1137,6 +1144,64 @@ mod tests {
         assert_eq!(
             select(&facts, &f.snapshot(), &s).unwrap_err().reason,
             NoService::AllDisabledOrErrored
+        );
+    }
+
+    #[test]
+    fn failover_rebinds_a_session_whose_binding_cannot_serve() {
+        let s = settings();
+        let b = oauth("b", 0.1);
+        let mut held = oauth("a", 0.5);
+        held.quota[0].exhaustion_hold_until = Some(NOW + time::Duration::minutes(5));
+        let mut off = oauth("c", 0.5);
+        off.enabled = false;
+        let f = Fixture::new(vec![held.clone(), off.clone(), b.clone()], Some(b.handle));
+        for bound in [held.handle, off.handle] {
+            let facts = RequestFacts {
+                session: true,
+                binding: Some(bound),
+                ..RequestFacts::default()
+            };
+            let choice = select(&facts, &f.snapshot(), &s).unwrap();
+            assert_eq!(
+                (choice.handle, choice.cause, choice.binds),
+                (b.handle, Cause::Default, true)
+            );
+        }
+        // An exhaustion 429 in this exchange excludes the binding.
+        let a = oauth("a", 0.5);
+        let f = Fixture::new(vec![a.clone(), b.clone()], Some(a.handle));
+        let facts = RequestFacts {
+            session: true,
+            binding: Some(a.handle),
+            exclusion: &[a.handle],
+            ..RequestFacts::default()
+        };
+        let choice = select(&facts, &f.snapshot(), &s).unwrap();
+        assert_eq!((choice.handle, choice.binds), (b.handle, true));
+        // With nobody else, nobody is named.
+        let f = Fixture::new(vec![held.clone()], Some(held.handle));
+        let facts = RequestFacts {
+            session: true,
+            binding: Some(held.handle),
+            ..RequestFacts::default()
+        };
+        let nobody = select(&facts, &f.snapshot(), &s).unwrap_err();
+        assert_eq!(
+            (nobody.reason, nobody.named),
+            (NoService::AllHeldOrOverThreshold, None)
+        );
+        // A pin never fails over.
+        let facts = RequestFacts {
+            pin: Some(held.handle),
+            session: true,
+            binding: Some(held.handle),
+            ..RequestFacts::default()
+        };
+        let f = Fixture::new(vec![held.clone(), b.clone()], Some(b.handle));
+        assert_eq!(
+            select(&facts, &f.snapshot(), &s).unwrap_err().reason,
+            NoService::PinnedUnavailable
         );
     }
 

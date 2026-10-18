@@ -324,13 +324,16 @@ async fn the_refused_candidate_ends_502_and_the_sibling_is_never_tried() {
         "FSUB2 untouched"
     );
 
-    // The session bound before the failure keeps its binding: it
-    // gets the synthetic 429 naming its errored account, no attempt made.
+    // Failover moves the session bound before the failure to FSUB2.
     let calls = instance.upstream.calls();
     let answer = send(instance.addr, in_session(messages(haiku_prompt()), "oscar")).await;
-    assert_eq!(answer.status, StatusCode::TOO_MANY_REQUESTS);
-    assert!(answer.text().contains("FSUB"), "{}", answer.text());
-    assert_eq!(instance.upstream.calls(), calls, "no attempt for the 429");
+    assert_eq!(answer.status, StatusCode::OK, "{}", answer.text());
+    assert_eq!(instance.upstream.calls(), calls + 1);
+    assert_eq!(
+        instance.last_record(3)["serving_account"]["display_name"],
+        "FSUB2"
+    );
+    assert_eq!(instance.events("session_moved").len(), 1);
 
     // (b) a bare 403: the 502 ends the exchange, the account not errored.
     let instance = Instance::start_with_accounts(

@@ -66,6 +66,8 @@ pub struct QuotaSettings {
 pub struct SelectionSettings {
     pub switch_threshold: f64,
     pub distribute_sessions: bool,
+    /// An unpinned session moves off an account that cannot serve it.
+    pub failover: bool,
     pub blocked_models: Vec<String>,
     pub priorities: Vec<Priority>,
     pub routes: Vec<Route>,
@@ -517,6 +519,7 @@ mod tests {
         assert_eq!(c.data_plane.listen.to_string(), DEFAULT_LISTEN);
         assert_eq!(c.data_plane.first_byte_timeout_seconds, 120);
         assert_eq!(c.selection.switch_threshold, 0.98);
+        assert!(c.selection.failover);
         assert_eq!(c.data_plane.telemetry_policy, TelemetryPolicy::Block);
         assert!(c.data_plane.upstream_origin.is_none());
         assert_eq!(c.audit.retained_files, 7);

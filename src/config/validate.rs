@@ -302,6 +302,7 @@ impl Validator<'_> {
             &[
                 "switch_threshold",
                 "distribute_sessions",
+                "failover",
                 "blocked_models",
                 "priorities",
                 "routes",
@@ -342,6 +343,7 @@ impl Validator<'_> {
         SelectionSettings {
             switch_threshold,
             distribute_sessions: self.boolean(node, "distribute_sessions", false),
+            failover: self.boolean(node, "failover", true),
             blocked_models: self
                 .string_array(node, "blocked_models")
                 .unwrap_or_default(),

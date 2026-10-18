@@ -219,7 +219,14 @@ async fn usage_401_refreshes_once_and_timeout_retains_quota() {
 #[tokio::test(flavor = "multi_thread")]
 async fn spend_cap_holds_the_organisation_and_not_others() {
     let _leak_sweep = crate::leaks::LeakGuard::default();
-    let instance = Instance::start("spend-cap-holds-organisation").await;
+    let instance = Instance::start_with(
+        "spend-cap-holds-organisation",
+        Setup {
+            selection: "failover = false\n".into(),
+            ..Setup::default()
+        },
+    )
+    .await;
     add_two(&instance);
     instance.add_other_org(
         "FOTHER",
