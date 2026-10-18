@@ -458,7 +458,14 @@ async fn one_release_set_one_version_only_the_allowed_files() {
             let file = std::fs::File::open(&path).expect("open the archive");
             let mut archive = zip::ZipArchive::new(file).expect("read the archive");
             (0..archive.len())
-                .map(|i| archive.by_index(i).expect("member").name().to_string())
+                .map(|i| {
+                    archive
+                        .by_index(i)
+                        .expect("member")
+                        .name()
+                        .expect("name")
+                        .into_owned()
+                })
                 .collect()
         } else {
             let listed = std::process::Command::new("tar")

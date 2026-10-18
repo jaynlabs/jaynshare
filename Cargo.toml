@@ -39,7 +39,7 @@ x509-parser = { version = "0.16", features = ["verify"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 # The enrollment bundle and client kit are ZIP archives; stored plus deflate
 # covers what the release tooling produces.
-zip = { version = "4", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 # The Linux platform archive is a `.tar.gz`; native install reads it.
 flate2 = "1"
 tar = { version = "0.4", default-features = false }
