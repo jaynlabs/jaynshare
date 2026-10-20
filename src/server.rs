@@ -375,10 +375,26 @@ mod tests {
     type Write = fn(&Server, usize) -> Result<(), String>;
 
     /// Runs `write` ROUNDS times on its own thread and sends the first failure.
-    fn writer(server: &Arc<Server>, results: &mpsc::Sender<Result<(), String>>, write: Write) {
+    static PROGRESS: [std::sync::atomic::AtomicUsize; 3] =
+        [const { std::sync::atomic::AtomicUsize::new(0) }; 3];
+
+    fn writer(
+        server: &Arc<Server>,
+        results: &mpsc::Sender<Result<(), String>>,
+        write: Write,
+        n: usize,
+    ) {
         let (server, results) = (Arc::clone(server), results.clone());
         thread::spawn(move || {
-            let _ = results.send((0..ROUNDS).try_for_each(|i| write(&server, i)));
+            let _ = results.send((0..ROUNDS).try_for_each(|i| {
+                let started = Instant::now();
+                let out = write(&server, i);
+                if started.elapsed() > Duration::from_millis(500) {
+                    eprintln!("writer {n} round {i} took {:?}", started.elapsed());
+                }
+                PROGRESS[n].store(i + 1, Ordering::SeqCst);
+                out
+            }));
         });
     }
 
@@ -425,16 +441,22 @@ mod tests {
             },
         ];
         let (results, finished) = mpsc::channel();
-        for write in writes {
-            writer(&server, &results, write);
+        let started = Instant::now();
+        for (n, write) in writes.into_iter().enumerate() {
+            writer(&server, &results, write, n);
         }
 
         for _ in writes {
             let result = finished
                 .recv_timeout(Duration::from_secs(60))
-                .expect("a writer deadlocked");
+                .unwrap_or_else(|e| {
+                    let rounds: Vec<usize> =
+                        PROGRESS.iter().map(|p| p.load(Ordering::SeqCst)).collect();
+                    panic!("a writer deadlocked: {e:?}; rounds done per writer: {rounds:?}")
+                });
             result.expect("every concurrent write succeeds");
         }
+        eprintln!("concurrent writes took {:?}", started.elapsed());
         let on_disk: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&server.state_path).expect("state file"))
                 .expect("state JSON");

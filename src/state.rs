@@ -124,6 +124,14 @@ pub fn write(path: &Path, state: &State) -> io::Result<()> {
 
 /// Temporary file in the same directory, mode 0600, fsync, rename, directory fsync.
 pub fn write_private_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let mut last = std::time::Instant::now();
+    let mut lap = |phase: &str| {
+        let now = std::time::Instant::now();
+        if now - last > std::time::Duration::from_millis(250) {
+            eprintln!("slow phase {phase}: {:?}", now - last);
+        }
+        last = now;
+    };
     let dir = path.parent().unwrap_or(Path::new("."));
     if !dir.exists() {
         ensure_private_dir(dir)?;
@@ -137,13 +145,18 @@ pub fn write_private_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let tmp = dir.join(format!(".{file_name}.{}.tmp", std::process::id()));
     {
         let mut f = open_private(&tmp)?;
+        lap("open");
         f.write_all(bytes)?;
+        lap("write");
         f.sync_all()?;
+        lap("sync_all");
     }
+    lap("close");
     if let Err(e) = fs::rename(&tmp, path) {
         let _ = fs::remove_file(&tmp);
         return Err(e);
     }
+    lap("rename");
     #[cfg(unix)]
     {
         File::open(dir)?.sync_all()?;
@@ -152,6 +165,7 @@ pub fn write_private_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     // renamed file inherits its parent's grant otherwise).
     #[cfg(windows)]
     crate::state::protect_windows(path).map_err(io::Error::other)?;
+    lap("protect_windows");
     Ok(())
 }
 

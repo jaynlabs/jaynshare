@@ -1,81 +1,45 @@
 name: ci
 on:
   pull_request:
-  push:
-    branches: [main]
-env:
-  CARGO_TERM_COLOR: always
 permissions:
   contents: read
-# A new push to a pull request cancels its older run.
-concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
-  check:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
+  probe:
+    runs-on: windows-latest
     timeout-minutes: 60
     env:
       CARGO_INCREMENTAL: '1'
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
       CARGO_PROFILE_TEST_DEBUG: line-tables-only
-      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: '16'
-      CARGO_PROFILE_RELEASE_LTO: 'off'
     defaults:
       run:
         shell: bash
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - run: rustup show
-      - if: runner.os == 'Linux'
-        run: cargo fmt --all -- --check
-      # Keep compiler reuse data, without caching acceptance outputs or pruning crates.
       - uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
-        id: cargo-cache
         with:
-          path: &cargo-cache-paths |
+          path: |
             ~/.cargo/registry
             target/debug
-            target/release
-            target/x86_64-unknown-linux-musl
-          key: cargo-ci-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', '.github/workflows/ci.yml') }}
+          key: cargo-ci-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml') }}-probe
           restore-keys: cargo-ci-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml') }}-
-      - if: runner.os == 'Linux'
+      - name: Defender state
+        shell: pwsh
         run: |
-          sudo apt-get update && sudo apt-get install -y musl-tools
-          rustup target add x86_64-unknown-linux-musl
-      - name: Compile unit and acceptance tests
-        run: cargo test --locked --bins --test acceptance --no-run
-      - run: cargo clippy --locked --all-targets -- -D warnings
-      - run: cargo build --locked --release
-      # Host fault injection needs dynamic linking; container tests use static musl.
-      - name: Linux binary for container tests
-        if: runner.os == 'Linux'
-        run: cargo build --locked --release --target x86_64-unknown-linux-musl
-        env:
-          CC_x86_64_unknown_linux_musl: musl-gcc
-      # A failed scenario must not force the next run to rebuild everything.
-      - uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
-        if: steps.cargo-cache.outputs.cache-hit != 'true'
-        with:
-          path: *cargo-cache-paths
-          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
-      - run: cargo test --locked --bins
-      - name: acceptance tests (against the optimized CI binary)
+          Get-MpComputerStatus | Select-Object AntivirusEnabled, RealTimeProtectionEnabled, OnAccessProtectionEnabled | Format-List
+          (Get-MpPreference).ExclusionPath
+          $env:TEMP
+      - run: cargo test --locked --bins --no-run
+      - name: The test alone, 30 times
         run: |
-          if [[ "$RUNNER_OS" == Linux ]]; then
-            export JAYNSHARE_LINUX_BIN=target/x86_64-unknown-linux-musl/release/jaynshare
-          fi
-          cargo test --locked --test acceptance -- --test-threads=8
-        env:
-          JAYNSHARE_BIN: target/release/jaynshare${{ runner.os == 'Windows' && '.exe' || '' }}
-  deny:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-      - uses: EmbarkStudios/cargo-deny-action@b66acf5e9fe20f8aba065be86778a8a4c846f902 # v2
+          for i in $(seq 1 30); do
+            echo "== alone $i"
+            cargo test --locked --bins -q -- --nocapture --exact server::tests::concurrent_state_writes_all_succeed_and_the_last_one_is_current 2>&1 | grep -E 'slow phase|took|panicked|deadlocked|test result' || true
+          done
+      - name: The full unit suite, 10 times
+        run: |
+          for i in $(seq 1 10); do
+            echo "== suite $i"
+            cargo test --locked --bins -q -- --nocapture 2>&1 | grep -E 'slow phase|concurrent writes took|writer [0-9] round|panicked|deadlocked|test result' || true
+          done
