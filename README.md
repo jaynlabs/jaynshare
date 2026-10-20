@@ -170,7 +170,8 @@ updates itself whenever the server does.
 
 `jaynshare claude` and `jaynshare codex` open a picker when the pool cannot
 choose for you; `--account <name>` names the account, `--auto` lets the pool
-pick, and `--direct` runs the tool outside the pool under your own login.
+pick and move the session to another account when its own runs out, and
+`--direct` runs the tool outside the pool under your own login.
 `jaynshare` alone opens one picker over every pooled account, grouped by tool
 with each account's five-hour and weekly usage, and launches the tool of the
 account you pick.
@@ -211,8 +212,8 @@ included, from its next message, without quitting Desktop; a moved
 conversation starts without its prompt cache. With `--log`, or when standard
 error is not a terminal, it prints one line per request instead. A second
 command with the same account and enrollment reuses the running one. With
-`--auto`, existing sessions keep their account; an exhausted account returns
-an error instead of switching by itself.
+`--auto`, a conversation whose account runs out moves to another one by
+itself, without its prompt cache; a pinned account returns an error instead.
 
 Chat and Code go through the pool, with the models its accounts offer.
 Attachments, Cowork, Chrome, connectors, projects, memory and artifacts are

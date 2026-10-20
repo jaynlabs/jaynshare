@@ -367,7 +367,10 @@ pub fn read_zip(path: &Path) -> Result<BTreeMap<String, Vec<u8>>, String> {
         let mut entry = archive
             .by_index(index)
             .map_err(|e| format!("{}: damaged member: {e}", path.display()))?;
-        let name = entry.name().to_string();
+        let name = entry
+            .name()
+            .map_err(|e| format!("{}: unreadable member name: {e}", path.display()))?
+            .into_owned();
         if name.starts_with('/') || name.contains("..") || name.contains('\\') {
             return Err(format!(
                 "archive member {name:?} is not a relative kit path"

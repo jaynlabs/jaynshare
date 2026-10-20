@@ -10,8 +10,8 @@ use ruzstd::encoding::{CompressionLevel, compress_to_vec};
 
 use crate::harness::{
     Bytes, CODEX_RESPONSES_PATH, Command, Duration, Full, Instance, Instant, Method,
-    OffsetDateTime, Request, Setup, Stdio, Value, fs, haiku_prompt, json, make_private,
-    private_dir,
+    OffsetDateTime, Reply, Request, Setup, Stdio, Value, add_two, fs, haiku_prompt, json,
+    make_private, private_dir,
 };
 use crate::proxy::{Intercepted, Offer, ca_file, intercept};
 
@@ -351,6 +351,72 @@ async fn codex_s_usage_read_rides_the_pooled_login() {
         1,
         "only the read reached chatgpt.com"
     );
+}
+
+/// Failover on Codex: an exhausted login's 429 is answered by the next
+/// one, and the thread stays there.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_exhausted_codex_login_hands_the_thread_to_the_next() {
+    let _leak_sweep = crate::leaks::LeakGuard::default();
+    let mut instance = Instance::start_with(
+        "codex-failover",
+        Setup {
+            mitm: true,
+            ..Setup::default()
+        },
+    )
+    .await;
+    add_two(&instance);
+    instance.restart_with_state(|state| {
+        for record in state["accounts"].as_array_mut().expect("accounts") {
+            let name = record["display_name"].as_str().expect("name");
+            record["chatgpt_account_id"] = json!(format!("ws-{name}"));
+            record["provider"] = json!("codex");
+        }
+    });
+    let mut tunnel = codex_tunnel(&instance, &ca_file(&instance))
+        .await
+        .expect("the handshake succeeds");
+    let turn = || responses_request(&zstd(&json!({ "model": "gpt-5-codex", "input": [] })));
+    let workspaces = || -> Vec<String> {
+        instance
+            .upstream
+            .seen()
+            .into_iter()
+            .filter(|seen| seen.path == CODEX_RESPONSES_PATH)
+            .map(|seen| {
+                seen.header("chatgpt-account-id")
+                    .expect("workspace")
+                    .to_string()
+            })
+            .collect()
+    };
+
+    assert_eq!(tunnel.send(turn()).await.status, 200);
+    instance.upstream.script([Reply::Raw {
+        status: 429,
+        headers: [
+            ("content-type", "application/json"),
+            ("x-codex-primary-used-percent", "100"),
+            ("x-codex-primary-window-minutes", "300"),
+            ("x-codex-primary-reset-at", "1900000000"),
+        ]
+        .map(|(name, value)| (name.to_string(), value.to_string()))
+        .to_vec(),
+        body: json!({ "error": { "type": "usage_limit_reached", "message": "limit" } }).to_string(),
+    }]);
+    let answer = tunnel.send(turn()).await;
+    assert_eq!(answer.status, 200, "{}", answer.text());
+    assert!(answer.text().contains("hello from the fake chatgpt"));
+    assert_eq!(tunnel.send(turn()).await.status, 200);
+
+    let seen = workspaces();
+    let [first, exhausted, next, after] = &seen[..] else {
+        panic!("four turns upstream: {seen:?}");
+    };
+    assert_eq!(exhausted, first, "the bound login answered the 429");
+    assert_ne!(next, first, "the next login took the turn");
+    assert_eq!(after, next, "and keeps the thread");
 }
 
 #[tokio::test(flavor = "multi_thread")]

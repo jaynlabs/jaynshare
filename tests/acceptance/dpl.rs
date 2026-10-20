@@ -933,6 +933,7 @@ async fn every_exchange_leaves_one_record() {
         "exchange-leaves-record",
         Setup {
             blocked_models: vec!["*opus*".into()],
+            selection: "failover = false\n".into(),
             ..Setup::default()
         },
     )
@@ -1360,7 +1361,14 @@ async fn http_403_on_the_bound_account_ends_with_502_naming_it() {
 #[tokio::test(flavor = "multi_thread")]
 async fn exhaustion_429_on_the_bound_account_is_relayed() {
     let _leak_sweep = crate::leaks::LeakGuard::default();
-    let instance = Instance::start("exhaustion-429-bound").await;
+    let instance = Instance::start_with(
+        "exhaustion-429-bound",
+        Setup {
+            selection: "failover = false\n".into(),
+            ..Setup::default()
+        },
+    )
+    .await;
     add_two(&instance);
     send(
         instance.addr,
@@ -1479,9 +1487,15 @@ async fn throttle_retry_absorbed_then_relayed() {
 async fn inline_wait_then_reattempt_of_the_bound_account() {
     let _leak_sweep = crate::leaks::LeakGuard::default();
     let faults = crate::faults::Faults::new();
-    let instance =
-        Instance::start_with_faults("inline-wait-reattempt", Setup::default(), faults.clone())
-            .await;
+    let instance = Instance::start_with_faults(
+        "inline-wait-reattempt",
+        Setup {
+            selection: "failover = false\n".into(),
+            ..Setup::default()
+        },
+        faults.clone(),
+    )
+    .await;
     add_two(&instance);
     send(instance.addr, in_session(messages(haiku_prompt()), "golf")).await;
 

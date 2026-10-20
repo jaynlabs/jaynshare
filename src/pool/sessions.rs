@@ -1,8 +1,8 @@
 //! Sessions and their bindings.
 //!
 //! A session is the pair (principal, `x-claude-code-session-id`). The pool
-//! remembers, per session, the account it is bound to — set once at its first
-//! attempt and never moved — the account that served it last, when it
+//! remembers, per session, the account it is bound to — set at its first
+//! attempt, moved only by failover — the account that served it last, when it
 //! was last seen and how many of its exchanges are in flight. Every
 //! time-dependent decision takes `now` from the caller so the windows are
 //! provable without a clock seam.
@@ -26,7 +26,7 @@ pub struct SessionKey {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionRecord {
-    /// Set at the first attempt, never moved.
+    /// Set at the first attempt, moved only by failover.
     pub bound: Option<Uuid>,
     pub last_served: Option<Uuid>,
     pub last_seen: OffsetDateTime,
@@ -83,13 +83,10 @@ impl Sessions {
         record.last_seen = now;
     }
 
-    /// The first attempt binds; a session that already has a binding keeps it.
-    pub fn bind(&mut self, key: &SessionKey, handle: Uuid) {
-        if let Some(record) = self.records.get_mut(key)
-            && record.bound.is_none()
-        {
-            record.bound = Some(handle);
-        }
+    /// Bind the session to `handle`; the other account it was bound to, if any.
+    pub fn bind(&mut self, key: &SessionKey, handle: Uuid) -> Option<Uuid> {
+        let record = self.records.get_mut(key)?;
+        record.bound.replace(handle).filter(|old| *old != handle)
     }
 
     /// The exchange ended; `served` is the account that made its last attempt, if any.
@@ -158,16 +155,17 @@ mod tests {
     }
 
     #[test]
-    fn binding_is_set_once_and_never_moved() {
+    fn a_bind_names_the_binding_it_moves() {
         let (a, b) = (Uuid::new_v4(), Uuid::new_v4());
         let mut s = Sessions::default();
         s.begin(key("s1"), T0);
         assert_eq!(s.binding(&key("s1")), None);
-        s.bind(&key("s1"), a);
-        s.bind(&key("s1"), b);
-        assert_eq!(s.binding(&key("s1")), Some(a));
-        s.end(&key("s1"), Some(a), T0);
-        assert_eq!(s.records.get(&key("s1")).unwrap().last_served, Some(a));
+        assert_eq!(s.bind(&key("s1"), a), None);
+        assert_eq!(s.bind(&key("s1"), a), None);
+        assert_eq!(s.bind(&key("s1"), b), Some(a));
+        assert_eq!(s.binding(&key("s1")), Some(b));
+        s.end(&key("s1"), Some(b), T0);
+        assert_eq!(s.records.get(&key("s1")).unwrap().last_served, Some(b));
     }
 
     #[test]

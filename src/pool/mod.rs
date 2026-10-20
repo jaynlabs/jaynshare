@@ -388,8 +388,9 @@ impl Pool {
                 }
                 if choice.binds
                     && let Some(key) = session
+                    && let Some(from) = self.sessions.bind(key, choice.handle)
                 {
-                    self.sessions.bind(key, choice.handle);
+                    tracing::info!(event = "session_moved", from = %from, to = %choice.handle, "failover moved the session to another account");
                 }
                 Ok(choice)
             }

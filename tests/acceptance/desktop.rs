@@ -1625,7 +1625,7 @@ esac
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn pinned_and_auto_sessions_resume_without_mid_chat_failover() {
+    async fn an_automatic_conversation_fails_over_mid_chat_and_stays() {
         let _leak_sweep = crate::leaks::LeakGuard::default();
         let instance = Instance::start_client("desktop-session-selection").await;
         add_two(&instance);
@@ -1671,23 +1671,31 @@ esac
             StatusCode::OK
         );
         instance.last_record(3);
+        // FSUB2 runs out mid-chat: the message is answered by FSUB, and the
+        // conversation stays there.
         instance.upstream.script([reply_exhausted_429(60)]);
-        assert_eq!(
-            send(gateway.addr, gateway.engine("pinned-conversation"))
-                .await
-                .status,
-            StatusCode::TOO_MANY_REQUESTS
-        );
-        instance.last_record(4);
         let calls = instance.upstream.calls();
         assert_eq!(
             send(gateway.addr, gateway.engine("pinned-conversation"))
                 .await
                 .status,
-            StatusCode::TOO_MANY_REQUESTS
+            StatusCode::OK
         );
-        assert_eq!(instance.upstream.calls(), calls);
-        assert_eq!(instance.last_record(5)["session_id"], "pinned-conversation");
+        assert_eq!(instance.upstream.calls(), calls + 2);
+        let record = instance.last_record(4);
+        assert_eq!(record["serving_account"]["display_name"], "FSUB");
+        assert_eq!(record["failed_over"], true);
+        let calls = instance.upstream.calls();
+        assert_eq!(
+            send(gateway.addr, gateway.engine("pinned-conversation"))
+                .await
+                .status,
+            StatusCode::OK
+        );
+        assert_eq!(instance.upstream.calls(), calls + 1);
+        let record = instance.last_record(5);
+        assert_eq!(record["session_id"], "pinned-conversation");
+        assert_eq!(record["serving_account"]["display_name"], "FSUB");
         assert_eq!(
             send(gateway.addr, gateway.engine("new-conversation"))
                 .await

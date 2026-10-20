@@ -415,7 +415,10 @@ async fn a_bound_session_gets_its_accounts_real_429() {
     let faults = Faults::new();
     let instance = Instance::start_with_faults(
         "bound-session-gets-accounts",
-        Setup::default(),
+        Setup {
+            selection: "failover = false\n".into(),
+            ..Setup::default()
+        },
         faults.clone(),
     )
     .await;
@@ -476,6 +479,7 @@ async fn disabled_errored_held_never_chosen() {
         "disabled-errored-held",
         Setup {
             quota: "revalidation_floor_seconds = 2\nrevalidation_interval_seconds = 2\n".into(),
+            selection: "failover = false\n".into(),
             ..Setup::default()
         },
     )
@@ -791,7 +795,7 @@ async fn held_assignment_keeps_the_session_and_binds_nothing() {
     let instance = Instance::start_with(
         "held-assignment-keeps-session",
         Setup {
-            selection: "distribute_sessions = true\n".into(),
+            selection: "distribute_sessions = true\nfailover = false\n".into(),
             ..Setup::default()
         },
     )
@@ -848,7 +852,14 @@ async fn held_assignment_keeps_the_session_and_binds_nothing() {
 #[tokio::test(flavor = "multi_thread")]
 async fn bound_and_held_gets_the_synthetic_429() {
     let _leak_sweep = crate::leaks::LeakGuard::default();
-    let instance = Instance::start("bound-held-gets-synthetic").await;
+    let instance = Instance::start_with(
+        "bound-held-gets-synthetic",
+        Setup {
+            selection: "failover = false\n".into(),
+            ..Setup::default()
+        },
+    )
+    .await;
     add_two(&instance);
     send(
         instance.addr,
@@ -894,6 +905,65 @@ async fn bound_and_held_gets_the_synthetic_429() {
     assert_eq!(record["selection_cause"], "session");
     assert_eq!(record["error_class"], "rate_limit");
     assert!(instance.events("default_moved").is_empty());
+}
+
+/// Failover: the bound account's exhaustion 429 is answered by the next
+/// account, and the session stays there; a throttle never moves it; with
+/// nobody left, the last account's own 429 is relayed.
+#[tokio::test(flavor = "multi_thread")]
+async fn failover_moves_an_exhausted_session_and_keeps_it_there() {
+    let _leak_sweep = crate::leaks::LeakGuard::default();
+    let instance = Instance::start("failover-moves-session").await;
+    add_two(&instance);
+    let session = || in_session(messages(haiku_prompt()), "tango");
+    send(instance.addr, session()).await;
+    assert_eq!(
+        instance.last_record(1)["serving_account"]["display_name"],
+        "FSUB"
+    );
+
+    instance.upstream.script([reply_exhausted_429(60)]);
+    let calls = instance.upstream.calls();
+    let answer = send(instance.addr, session()).await;
+    assert_eq!(answer.status, StatusCode::OK, "{}", answer.text());
+    assert_eq!(instance.upstream.calls(), calls + 2);
+    let record = instance.last_record(2);
+    assert_eq!(record["serving_account"]["display_name"], "FSUB2");
+    assert_eq!(record["failed_over"], true);
+    assert_eq!(record["attempts"], 2);
+    assert_eq!(instance.events("session_moved").len(), 1);
+
+    let calls = instance.upstream.calls();
+    send(instance.addr, session()).await;
+    assert_eq!(instance.upstream.calls(), calls + 1, "straight to FSUB2");
+    assert_eq!(
+        instance.last_record(3)["serving_account"]["display_name"],
+        "FSUB2"
+    );
+
+    instance.upstream.script([reply_throttle_429(Some(1))]);
+    let answer = send(instance.addr, session()).await;
+    assert_eq!(answer.status, StatusCode::OK, "{}", answer.text());
+    assert_eq!(
+        instance.last_record(4)["serving_account"]["display_name"],
+        "FSUB2"
+    );
+    assert_eq!(
+        instance.events("session_moved").len(),
+        1,
+        "a throttle stays"
+    );
+
+    instance.upstream.script([reply_exhausted_429(45)]);
+    let calls = instance.upstream.calls();
+    let answer = send(instance.addr, session()).await;
+    assert_eq!(answer.status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(answer.header("retry-after"), Some("45"));
+    assert_eq!(answer.header("request-id"), Some("req_fixture_0429"));
+    assert_eq!(instance.upstream.calls(), calls + 1, "FSUB is still held");
+    let record = instance.last_record(5);
+    assert_eq!(record["serving_account"]["display_name"], "FSUB2");
+    assert_eq!(record["error_class"], "rate_limit");
 }
 
 // ---- step 5: the operator's steer, the route view and the advisor

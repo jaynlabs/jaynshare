@@ -14,7 +14,6 @@ set is enforced in CI by `cargo-deny` (`deny.toml`).
 | `anstyle-parse` | 1.0.0 | MIT OR Apache-2.0 | https://github.com/rust-cli/anstyle.git |
 | `anstyle-query` | 1.1.5 | MIT OR Apache-2.0 | https://github.com/rust-cli/anstyle.git |
 | `anstyle-wincon` | 3.0.11 | MIT OR Apache-2.0 | https://github.com/rust-cli/anstyle.git |
-| `arbitrary` | 1.4.2 | MIT OR Apache-2.0 | https://github.com/rust-fuzz/arbitrary/ |
 | `asn1-rs` | 0.6.2 | MIT OR Apache-2.0 | https://github.com/rusticata/asn1-rs.git |
 | `asn1-rs-derive` | 0.5.1 | MIT OR Apache-2.0 | https://github.com/rusticata/asn1-rs.git |
 | `asn1-rs-impl` | 0.2.0 | MIT/Apache-2.0 | https://github.com/rusticata/asn1-rs.git |
@@ -27,6 +26,7 @@ set is enforced in CI by `cargo-deny` (`deny.toml`).
 | `bytes` | 1.12.1 | MIT | https://github.com/tokio-rs/bytes |
 | `cc` | 1.4.6 | MIT OR Apache-2.0 | https://github.com/rust-lang/cc-rs |
 | `cfg-if` | 1.0.4 | MIT OR Apache-2.0 | https://github.com/rust-lang/cfg-if |
+| `cfg_aliases` | 0.2.2 | MIT | https://github.com/katharostech/cfg_aliases |
 | `clap` | 4.6.7 | MIT OR Apache-2.0 | https://github.com/clap-rs/clap |
 | `clap_builder` | 4.6.7 | MIT OR Apache-2.0 | https://github.com/clap-rs/clap |
 | `clap_derive` | 4.6.7 | MIT OR Apache-2.0 | https://github.com/clap-rs/clap |
@@ -42,7 +42,6 @@ set is enforced in CI by `cargo-deny` (`deny.toml`).
 | `data-encoding` | 2.11.1 | MIT | https://github.com/ia0/data-encoding |
 | `der-parser` | 9.0.0 | MIT/Apache-2.0 | https://github.com/rusticata/der-parser.git |
 | `deranged` | 0.5.8 | MIT OR Apache-2.0 | https://github.com/jhpratt/deranged |
-| `derive_arbitrary` | 1.4.2 | MIT OR Apache-2.0 | https://github.com/rust-fuzz/arbitrary |
 | `digest` | 0.10.7 | MIT OR Apache-2.0 | https://github.com/RustCrypto/traits |
 | `displaydoc` | 0.2.7 | MIT OR Apache-2.0 | https://github.com/yaahc/displaydoc |
 | `document-features` | 0.2.12 | MIT OR Apache-2.0 | https://github.com/slint-ui/document-features |
@@ -87,6 +86,7 @@ set is enforced in CI by `cargo-deny` (`deny.toml`).
 | `minimal-lexical` | 0.2.1 | MIT/Apache-2.0 | https://github.com/Alexhuszagh/minimal-lexical |
 | `miniz_oxide` | 0.9.1 | MIT OR Zlib OR Apache-2.0 | https://github.com/Frommi/miniz_oxide/tree/master/miniz_oxide |
 | `mio` | 1.2.3 | MIT | https://github.com/tokio-rs/mio |
+| `nix` | 0.31.3 | MIT | https://github.com/nix-rust/nix |
 | `nom` | 7.1.3 | MIT | https://github.com/Geal/nom |
 | `num-bigint` | 0.4.8 | MIT OR Apache-2.0 | https://github.com/rust-num/num-bigint |
 | `num-conv` | 0.2.2 | MIT OR Apache-2.0 | https://github.com/jhpratt/num-conv |
@@ -111,12 +111,12 @@ set is enforced in CI by `cargo-deny` (`deny.toml`).
 | `rtoolbox` | 0.0.6 | Apache-2.0 | https://github.com/conradkleinespel/rtoolbox |
 | `rusticata-macros` | 4.1.0 | MIT/Apache-2.0 | https://github.com/rusticata/rusticata-macros.git |
 | `rustix` | 1.1.5 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | https://github.com/bytecodealliance/rustix |
-| `rustls` | 0.23.45 | Apache-2.0 OR ISC OR MIT | https://github.com/rustls/rustls |
+| `rustls` | 0.23.46 | Apache-2.0 OR ISC OR MIT | https://github.com/rustls/rustls |
 | `rustls-native-certs` | 0.8.4 | Apache-2.0 OR ISC OR MIT | https://github.com/rustls/rustls-native-certs |
 | `rustls-pki-types` | 1.15.1 | MIT OR Apache-2.0 | https://github.com/rustls/pki-types |
 | `rustls-webpki` | 0.103.15 | ISC | https://github.com/rustls/webpki |
 | `rustversion` | 1.0.23 | MIT OR Apache-2.0 | https://github.com/dtolnay/rustversion |
-| `ruzstd` | 0.9.0 | MIT | https://github.com/KillingSpark/zstd-rs |
+| `ruzstd` | 0.9.1 | MIT | https://github.com/KillingSpark/zstd-rs |
 | `schannel` | 0.1.29 | MIT | https://github.com/steffengy/schannel-rs |
 | `scopeguard` | 1.2.0 | MIT OR Apache-2.0 | https://github.com/bluss/scopeguard |
 | `security-framework` | 3.7.0 | MIT OR Apache-2.0 | https://github.com/kornelski/rust-security-framework |
@@ -162,6 +162,7 @@ set is enforced in CI by `cargo-deny` (`deny.toml`).
 | `tracing-core` | 0.1.36 | MIT | https://github.com/tokio-rs/tracing |
 | `tracing-subscriber` | 0.3.23 | MIT | https://github.com/tokio-rs/tracing |
 | `try-lock` | 0.2.5 | MIT | https://github.com/seanmonstar/try-lock |
+| `typed-path` | 0.12.3 | MIT OR Apache-2.0 | https://github.com/chipsenkbeil/typed-path |
 | `typenum` | 1.20.1 | MIT OR Apache-2.0 | https://github.com/paholg/typenum |
 | `unicase` | 2.9.0 | MIT OR Apache-2.0 | https://github.com/seanmonstar/unicase |
 | `unicode-ident` | 1.0.24 | (MIT OR Apache-2.0) AND Unicode-3.0 | https://github.com/dtolnay/unicode-ident |
@@ -194,7 +195,7 @@ set is enforced in CI by `cargo-deny` (`deny.toml`).
 | `x509-parser` | 0.16.0 | MIT OR Apache-2.0 | https://github.com/rusticata/x509-parser.git |
 | `yasna` | 0.5.2 | MIT OR Apache-2.0 | https://github.com/qnighy/yasna.rs |
 | `zeroize` | 1.9.0 | Apache-2.0 OR MIT | https://github.com/RustCrypto/utils |
-| `zip` | 4.6.1 | MIT | https://github.com/zip-rs/zip2.git |
+| `zip` | 9.0.5 | MIT | https://github.com/zip-rs/zip2 |
 | `zlib-rs` | 0.6.8 | Zlib | https://github.com/trifectatechfoundation/zlib-rs |
 | `zmij` | 1.0.23 | MIT | https://github.com/dtolnay/zmij |
 | `zopfli` | 0.8.3 | Apache-2.0 | https://github.com/zopfli-rs/zopfli |

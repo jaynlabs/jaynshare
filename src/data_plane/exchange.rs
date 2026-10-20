@@ -459,17 +459,20 @@ pub async fn run(
     headers.insert(HOST, server.upstream.host_header(provider));
     let uri = server.upstream.uri_for(provider, &path_and_query);
 
-    // A failure that is neither a network failure nor a status is the one
-    // path that may try another account, and only for an exchange that is
-    // neither pinned nor a session's: a session's first attempt is its
-    // binding, so its exchange has one candidate. The exclusion set exists
-    // for the sessionless case.
+    // A failure that is neither a network failure nor a status may try
+    // another account, and only for an exchange that is neither pinned nor a
+    // session's: a session's first attempt is its binding, so its exchange
+    // has one candidate. The exclusion set exists for the sessionless case,
+    // and for failover past an exhausted account.
     let one_candidate = pin.is_some() || session.is_some();
+    let fails_over = pin.is_none() && settings.selection.failover;
     let mut exclusion: Vec<Uuid> = Vec::new();
     let mut first_account: Option<Uuid> = None;
     let mut other_failure: Option<String> = None;
+    // The last exhaustion 429 passed over, relayed when nobody else serves.
+    let mut passed_over = None;
 
-    loop {
+    let (handle, mut response_parts, incoming, permit, collected) = loop {
         let facts = RequestFacts {
             exclusion: &exclusion,
             pin,
@@ -487,6 +490,9 @@ pub async fn run(
         {
             Ok(choice) => choice,
             Err(nobody) => {
+                if let Some(relayed) = passed_over {
+                    break relayed;
+                }
                 exchange.record.no_service_reason = Some(reason_name(&nobody.reason));
                 // The refusal names the rule that produced it —
                 // the pin, or the session's binding.
@@ -585,7 +591,7 @@ pub async fn run(
         })
         .await;
 
-        let (mut response_parts, incoming, permit, collected) = match attempt {
+        let (response_parts, incoming, permit, collected) = match attempt {
             Attempt::Served {
                 response,
                 permit,
@@ -641,12 +647,17 @@ pub async fn run(
                 parts,
                 collected,
                 permit,
-            } => (
-                parts,
-                Either::Right(Full::new(collected.clone().unwrap_or_default())),
-                permit,
-                collected,
-            ),
+                exhausted,
+            } => {
+                let body = Either::Right(Full::new(collected.clone().unwrap_or_default()));
+                if exhausted && fails_over {
+                    tracing::info!(event = "exhausted_passed_over", account = %display_name, "exhaustion 429; trying another account");
+                    exclusion.push(handle);
+                    passed_over = Some((handle, parts, body, permit, collected));
+                    continue;
+                }
+                (parts, body, permit, collected)
+            }
             Attempt::Network(message) => {
                 tracing::warn!(event = "upstream_network_failure", account = %display_name, error = %message, "second failure; closing the client connection");
                 exchange.write(None, Some(ErrorClass::Upstream));
@@ -718,63 +729,65 @@ pub async fn run(
             }
         };
 
-        // Relayed as is; a 429 reaches the client classified and
-        // byte-identical.
-        strip_response_headers(&mut response_parts.headers);
-        let status = response_parts.status;
-        if let Some(c) = &mut capture {
-            c.response(status, &response_parts.headers);
-        }
-        let content_type = response_parts
-            .headers
-            .get(CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok());
-        let usage = UsageExtractor::for_content_type(content_type);
-        let idle = Duration::from_secs(settings.data_plane.body_idle_timeout_seconds);
-        exchange.record.status = Some(status.as_u16());
-        let error_class = match status.as_u16() {
-            429 => Some(ErrorClass::RateLimit),
-            s if s >= 500 => Some(ErrorClass::Upstream),
-            _ => None,
-        };
-        let server_for_end = Arc::clone(&server);
-        let mut exchange_at_end = exchange;
-        let on_end = Box::new(move |end: BodyEnd| {
-            let (tokens, class) = match end {
-                BodyEnd::Complete(t) | BodyEnd::Dropped(t) => (t, error_class),
-                BodyEnd::Failed(t) => (t, Some(ErrorClass::Upstream)),
-            };
-            if tokens.input > 0 || tokens.output > 0 {
-                // Usage totals are runtime facts; the
-                // traffic counters alone never schedule a quota-state write.
-                server_for_end.pool.lock().expect("pool lock").add_usage(
-                    handle,
-                    tokens.input,
-                    tokens.output,
-                );
-            }
-            exchange_at_end.write(Some(status.as_u16()), class);
-            drop(permit);
-        });
-        let body = match collected {
-            // A classified 429 the proxy already read: relayed as one frame.
-            Some(bytes) => {
-                let tokens = {
-                    let mut usage = UsageExtractor::for_content_type(content_type);
-                    usage.feed(&bytes);
-                    usage.finish()
-                };
-                relay::FullBody::new(bytes, tokens, on_end).boxed()
-            }
-            None => {
-                let Either::Left(incoming) = incoming else {
-                    unreachable!("an unclassified body streams, it is not pre-read")
-                };
-                RelayBody::new(incoming, idle, usage, capture, on_end).boxed()
-            }
-        };
-        return Ok(Response::from_parts(response_parts, body));
+        break (handle, response_parts, incoming, permit, collected);
+    };
+
+    // Relayed as is; a 429 reaches the client classified and
+    // byte-identical.
+    strip_response_headers(&mut response_parts.headers);
+    let status = response_parts.status;
+    if let Some(c) = &mut capture {
+        c.response(status, &response_parts.headers);
     }
+    let content_type = response_parts
+        .headers
+        .get(CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok());
+    let usage = UsageExtractor::for_content_type(content_type);
+    let idle = Duration::from_secs(settings.data_plane.body_idle_timeout_seconds);
+    exchange.record.status = Some(status.as_u16());
+    let error_class = match status.as_u16() {
+        429 => Some(ErrorClass::RateLimit),
+        s if s >= 500 => Some(ErrorClass::Upstream),
+        _ => None,
+    };
+    let server_for_end = Arc::clone(&server);
+    let mut exchange_at_end = exchange;
+    let on_end = Box::new(move |end: BodyEnd| {
+        let (tokens, class) = match end {
+            BodyEnd::Complete(t) | BodyEnd::Dropped(t) => (t, error_class),
+            BodyEnd::Failed(t) => (t, Some(ErrorClass::Upstream)),
+        };
+        if tokens.input > 0 || tokens.output > 0 {
+            // Usage totals are runtime facts; the
+            // traffic counters alone never schedule a quota-state write.
+            server_for_end.pool.lock().expect("pool lock").add_usage(
+                handle,
+                tokens.input,
+                tokens.output,
+            );
+        }
+        exchange_at_end.write(Some(status.as_u16()), class);
+        drop(permit);
+    });
+    let body = match collected {
+        // A classified 429 the proxy already read: relayed as one frame.
+        Some(bytes) => {
+            let tokens = {
+                let mut usage = UsageExtractor::for_content_type(content_type);
+                usage.feed(&bytes);
+                usage.finish()
+            };
+            relay::FullBody::new(bytes, tokens, on_end).boxed()
+        }
+        None => {
+            let Either::Left(incoming) = incoming else {
+                unreachable!("an unclassified body streams, it is not pre-read")
+            };
+            RelayBody::new(incoming, idle, usage, capture, on_end).boxed()
+        }
+    };
+    Ok(Response::from_parts(response_parts, body))
 }
 
 fn build_request(method: &Method, uri: &Uri, headers: &HeaderMap, body: Bytes) -> Request<Bytes> {
@@ -826,6 +839,7 @@ enum Attempt {
         parts: http::response::Parts,
         collected: Option<Bytes>,
         permit: OwnedSemaphorePermit,
+        exhausted: bool,
     },
     /// The second network failure — close the client connection.
     Network(String),
@@ -1033,11 +1047,12 @@ async fn attempt_candidate(input: AttemptInput<'_>) -> Attempt {
                     pool.quota_hold_end(handle, OffsetDateTime::now_utc())
                 };
                 let hold_end = hold.map(crate::timestamp::rfc3339);
-                tracing::info!(event = "exhausted_relayed", account = %display_name, hold_end = hold_end.as_deref().unwrap_or("none"), "exhaustion 429 relayed with its retry-after");
+                tracing::info!(event = "exhausted", account = %display_name, hold_end = hold_end.as_deref().unwrap_or("none"), "exhaustion 429");
                 break Attempt::Classified429 {
                     parts: response_parts,
                     collected,
                     permit,
+                    exhausted: true,
                 };
             }
             quota::Classification::Throttle => {
@@ -1053,6 +1068,7 @@ async fn attempt_candidate(input: AttemptInput<'_>) -> Attempt {
                     parts: response_parts,
                     collected,
                     permit,
+                    exhausted: false,
                 };
             }
         }
